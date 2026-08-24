@@ -15,12 +15,8 @@ void ATA::DRQCmdPIODataToHost(u8* buff, int buffLen, int buffIndex, int size, bo
 	regStatus &= ~ATA_STAT_BUSY;
 	regStatus |= ATA_STAT_DRQ;
 
-	// Only set pendingInterrupt if nIEN is cleared
-	if (regControlEnableIRQ && sendIRQ)
-	{
-		pendingInterrupt = true;
-		_DEV9irq(ATA_INTR_INTRQ, 1);
-	}
+	if (sendIRQ)
+		SetPendingInterrupt();
 }
 void ATA::PostCmdPIODataToHost()
 {
@@ -39,6 +35,41 @@ void ATA::PostCmdPIODataToHost()
 }
 
 //FromHost
+void ATA::DRQCmdPIODataFromHost(bool sendIRQ)
+{
+	pioPtr = 0;
+	pioEnd = sizeof(pioBuffer) / sizeof(u16);
+	regStatus &= ~ATA_STAT_BUSY;
+	regStatus |= ATA_STAT_DRQ;
+
+	if (sendIRQ)
+		SetPendingInterrupt();
+}
+
+void ATA::ATAwritePIO(u16 value, int width)
+{
+	if (width != 16)
+	{
+		Console.Error("DEV9: ATA: Unsupported %dbit PIO data write", width);
+		return;
+	}
+	if (pioPtr >= pioEnd)
+		return;
+
+	pioBuffer[pioPtr * 2] = static_cast<u8>(value);
+	pioBuffer[pioPtr * 2 + 1] = static_cast<u8>(value >> 8);
+	pioPtr++;
+	if (pioPtr < pioEnd)
+		return;
+
+	pioPtr = 0;
+	pioEnd = 0;
+	regStatus |= ATA_STAT_BUSY;
+	regStatus &= ~ATA_STAT_DRQ;
+	if (pioDRQEndTransferFunc != nullptr)
+		(this->*pioDRQEndTransferFunc)();
+}
+
 u16 ATA::ATAreadPIO()
 {
 	//DevCon.WriteLn("DEV9: *ATA_R_DATA 16bit read, pio_count %i,  pio_size %i", pioPtr, pioEnd);
@@ -145,5 +176,59 @@ void ATA::HDD_ReadPIOEndBlock()
 //Write Multiple
 
 //Write Sectors
+void ATA::HDD_WriteSectors(bool isLBA48)
+{
+	sectorsPerInterrupt = 1;
+	HDD_WritePIO(isLBA48);
+}
+
+void ATA::HDD_WritePIO(bool isLBA48)
+{
+	if (!PreCmd())
+		return;
+
+	IDE_CmdLBA48Transform(isLBA48);
+	regStatus &= ~ATA_STAT_SEEK;
+	if (!HDD_CanSeek())
+	{
+		regStatus |= ATA_STAT_ERR;
+		regStatusSeekLock = -1;
+		regError |= ATA_ERR_ID;
+		PostCmdNoData();
+		return;
+	}
+	regStatus |= ATA_STAT_SEEK;
+
+	if (!HDD_CanAssessOrSetError())
+		return;
+
+	nsectorLeft = nsector;
+	currentWrite = new u8[static_cast<size_t>(nsector) * 512];
+	currentWriteLength = static_cast<u32>(nsector) * 512;
+	currentWriteSectors = static_cast<u64>(HDD_GetLBA());
+	currentWriteLinuxSwap = IsSelectedLinuxSwap();
+	wrTransferred = 0;
+	pioDRQEndTransferFunc = &ATA::HDD_WritePIOEndBlock;
+
+	// The host begins the first block after observing DRQ. Later blocks raise INTRQ.
+	DRQCmdPIODataFromHost(false);
+}
+
+void ATA::HDD_WritePIOEndBlock()
+{
+	std::memcpy(&currentWrite[wrTransferred], pioBuffer, sizeof(pioBuffer));
+	wrTransferred += sizeof(pioBuffer);
+	if (wrTransferred < static_cast<int>(currentWriteLength))
+	{
+		DRQCmdPIODataFromHost(true);
+		return;
+	}
+
+	HDD_SetErrorAtTransferEnd();
+	pioDRQEndTransferFunc = nullptr;
+	nsector = 0;
+	wrTransferred = 0;
+	PostCmdDMADataFromHost();
+}
 
 //Download Microcode (Used for FW updates)

@@ -29,6 +29,15 @@ void ATA::IDE_ExecCmd(u16 value)
 			else
 				HDD_Unk();
 			break;
+		case 0x30:
+			HDD_WriteSectors(false);
+			break;
+		case 0x34:
+			if (SelectedDeviceSupportsLBA48())
+				HDD_WriteSectors(true);
+			else
+				HDD_Unk();
+			break;
 		case 0x40:
 			HDD_ReadVerifySectors(false);
 			break;

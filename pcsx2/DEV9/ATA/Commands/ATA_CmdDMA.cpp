@@ -22,9 +22,7 @@ void ATA::PostCmdDMADataToHost()
 	regStatus &= ~ATA_STAT_BUSY;
 	dmaReady = false;
 
-	pendingInterrupt = true;
-	if (regControlEnableIRQ)
-		_DEV9irq(ATA_INTR_INTRQ, 1);
+	SetPendingInterrupt();
 }
 
 void ATA::DRQCmdDMADataFromHost()
@@ -48,12 +46,34 @@ void ATA::DRQCmdDMADataFromHost()
 }
 void ATA::PostCmdDMADataFromHost()
 {
-	WriteQueueEntry entry{0};
-	entry.data = currentWrite;
-	entry.length = currentWriteLength;
-	entry.sector = currentWriteSectors;
-	entry.linuxSwap = currentWriteLinuxSwap;
-	writeQueue.Enqueue(entry);
+	const bool write_completed = currentWriteLinuxSwap;
+	if (write_completed)
+	{
+		// The slave is already host memory. Avoid a queue wake-up and a second copy on
+		// the I/O thread for every small Linux swap write; IRQ ordering is unchanged.
+		const u64 image_pos = currentWriteSectors * 512;
+		if (image_pos > LINUX_SWAP_SIZE || currentWriteLength > LINUX_SWAP_SIZE - image_pos)
+		{
+			Console.Error("DEV9: ATA: RAM disk write exceeds device bounds (offset %" PRIu64 ", length %u)",
+				image_pos, currentWriteLength);
+			regStatus |= ATA_STAT_ERR;
+			regError |= ATA_ERR_ID;
+		}
+		else
+		{
+			std::memcpy(&linuxSwapData[static_cast<size_t>(image_pos)], currentWrite, currentWriteLength);
+		}
+		delete[] currentWrite;
+	}
+	else
+	{
+		WriteQueueEntry entry{0};
+		entry.data = currentWrite;
+		entry.length = currentWriteLength;
+		entry.sector = currentWriteSectors;
+		entry.linuxSwap = false;
+		writeQueue.Enqueue(entry);
+	}
 	currentWrite = nullptr;
 	currentWriteLength = 0;
 	currentWriteSectors = 0;
@@ -63,28 +83,30 @@ void ATA::PostCmdDMADataFromHost()
 	regStatus &= ~ATA_STAT_DRQ;
 	dmaReady = false;
 
-	if (fetWriteCacheEnabled)
+	if (fetWriteCacheEnabled || write_completed)
 	{
 		regStatus &= ~ATA_STAT_BUSY;
-		pendingInterrupt = true;
-		if (regControlEnableIRQ)
-			_DEV9irq(ATA_INTR_INTRQ, 1);
+		SetPendingInterrupt();
 	}
 	else
 		awaitFlush = true;
 
-	Async(-1);
+	if (!write_completed)
+		Async(-1);
 }
 
 int ATA::ReadDMAToFIFO(u8* buffer, int space)
 {
 	if (udmaMode >= 0 || mdmaMode >= 0)
 	{
-		if (space == 0 || nsector == -1)
+		if (space <= 0 || nsector <= 0 || !buffer || !readBuffer)
 			return 0;
 
 		// Read to FIFO
-		const int size = std::min(space, nsector * 512 - rdTransferred);
+		const s64 remaining = static_cast<s64>(nsector) * 512 - rdTransferred;
+		if (remaining <= 0 || rdTransferred < 0 || rdTransferred >= readBufferLen)
+			return 0;
+		const int size = std::min({space, static_cast<int>(remaining), readBufferLen - rdTransferred});
 		memcpy(buffer, &readBuffer[rdTransferred], size);
 
 		rdTransferred += size;
@@ -107,11 +129,14 @@ int ATA::WriteDMAFromFIFO(u8* buffer, int available)
 {
 	if (udmaMode >= 0 || mdmaMode >= 0)
 	{
-		if (available == 0 || nsector == -1)
+		if (available <= 0 || nsector <= 0 || !buffer || !currentWrite)
 			return 0;
 
 		// Write to FIFO
-		const int size = std::min(available, nsector * 512 - wrTransferred);
+		const s64 remaining = static_cast<s64>(currentWriteLength) - wrTransferred;
+		if (remaining <= 0 || wrTransferred < 0)
+			return 0;
+		const int size = std::min(available, static_cast<int>(remaining));
 		memcpy(&currentWrite[wrTransferred], buffer, size);
 
 		wrTransferred += size;

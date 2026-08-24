@@ -8,8 +8,7 @@ void ATA::PreCmdExecuteDeviceDiag()
 {
 	regStatus |= ATA_STAT_BUSY;
 	regStatus &= ~ATA_STAT_READY;
-	pendingInterrupt = false;
-	dev9.irqcause &= ~ATA_INTR_INTRQ;
+	ClearAllPendingInterrupts();
 	//dev9.spd.regIntStat &= unchecked((UInt16)~DEV9Header.ATA_INTR_DMA_RDY); //Is this correct?
 }
 
@@ -24,9 +23,7 @@ void ATA::PostCmdExecuteDeviceDiag(bool sendIRQ)
 	// then we don't raise an IRQ or set pending interrupt
 	if (sendIRQ)
 	{
-		pendingInterrupt = true;
-		if (regControlEnableIRQ)
-			_DEV9irq(ATA_INTR_INTRQ, 1);
+		SetPendingInterrupt();
 	}
 }
 

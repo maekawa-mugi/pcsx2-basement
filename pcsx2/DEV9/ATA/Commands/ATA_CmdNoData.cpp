@@ -8,9 +8,7 @@ void ATA::PostCmdNoData()
 {
 	regStatus &= ~ATA_STAT_BUSY;
 
-	pendingInterrupt = true;
-	if (regControlEnableIRQ)
-		_DEV9irq(ATA_INTR_INTRQ, 1);
+	SetPendingInterrupt();
 }
 
 void ATA::CmdNoDataAbort()

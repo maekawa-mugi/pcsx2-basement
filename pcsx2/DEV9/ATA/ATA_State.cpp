@@ -137,17 +137,29 @@ bool ATA::OpenLinuxSwap()
 	}
 	std::memset(linuxSwapData.get(), 0, static_cast<size_t>(LINUX_SWAP_SIZE));
 
-	InitializeLinuxSwapHeader();
-	DevCon.WriteLn("DEV9: ATA: Added 256 MiB Linux swap RAM disk as primary slave");
+	InitializeLinuxSwapDisk();
+	DevCon.WriteLn("DEV9: ATA: Added 256 MiB Linux swap RAM disk with MBR partition as primary slave");
 	return true;
 }
 
-void ATA::InitializeLinuxSwapHeader()
+void ATA::InitializeLinuxSwapDisk()
 {
 	// The supplied PS2 Linux 2.2.1 kernel uses 4 KiB pages; other MIPS kernels need proper testing.
+	constexpr size_t sector_size = 512;
 	constexpr size_t page_size = 4096;
+	constexpr u32 sectors_per_track = 63;
+	constexpr u32 heads = 16;
+	constexpr u32 partition_start_lba = sectors_per_track;
+	constexpr u32 disk_sectors = static_cast<u32>(LINUX_SWAP_SIZE / sector_size);
+	constexpr u32 partition_end_lba = (disk_sectors / (heads * sectors_per_track)) *
+	                                      heads * sectors_per_track -
+	                                  1;
+	constexpr u32 partition_sectors = partition_end_lba - partition_start_lba + 1;
+	constexpr size_t partition_offset = static_cast<size_t>(partition_start_lba) * sector_size;
+	constexpr size_t partition_size = static_cast<size_t>(partition_sectors) * sector_size;
 	constexpr char magic[] = "SWAPSPACE2";
 	static_assert(sizeof(magic) - 1 == 10);
+	static_assert(partition_offset + partition_size <= LINUX_SWAP_SIZE);
 
 	auto write_le32 = [this](size_t offset, u32 value) {
 		linuxSwapData[offset] = static_cast<u8>(value);
@@ -155,15 +167,38 @@ void ATA::InitializeLinuxSwapHeader()
 		linuxSwapData[offset + 2] = static_cast<u8>(value >> 16);
 		linuxSwapData[offset + 3] = static_cast<u8>(value >> 24);
 	};
+	auto write_chs = [this](size_t offset, u32 lba) {
+		constexpr u32 chs_sectors_per_track = 63;
+		constexpr u32 chs_heads = 16;
+		const u32 cylinder = lba / (chs_heads * chs_sectors_per_track);
+		const u32 track_offset = lba % (chs_heads * chs_sectors_per_track);
+		const u32 head = track_offset / chs_sectors_per_track;
+		const u32 sector = track_offset % chs_sectors_per_track + 1;
+		linuxSwapData[offset] = static_cast<u8>(head);
+		linuxSwapData[offset + 1] = static_cast<u8>(sector | ((cylinder >> 2) & 0xc0));
+		linuxSwapData[offset + 2] = static_cast<u8>(cylinder);
+	};
+
+	// Use a conventional DOS MBR layout understood by the PS2 Linux installer. The
+	// first track is reserved and hdb1 spans complete legacy CHS cylinders.
+	constexpr size_t partition_entry = 446;
+	linuxSwapData[partition_entry] = 0x00;
+	write_chs(partition_entry + 1, partition_start_lba);
+	linuxSwapData[partition_entry + 4] = 0x82;
+	write_chs(partition_entry + 5, partition_end_lba);
+	write_le32(partition_entry + 8, partition_start_lba);
+	write_le32(partition_entry + 12, partition_sectors);
+	linuxSwapData[510] = 0x55;
+	linuxSwapData[511] = 0xaa;
 
 	// Linux swap v2 reserves the first KiB, followed by version, last page, bad-page
 	// count, UUID, and volume label. The signature is stored at the end of page zero.
-	write_le32(1024, 1);
-	write_le32(1028, static_cast<u32>(LINUX_SWAP_SIZE / page_size - 1));
-	write_le32(1032, 0);
+	write_le32(partition_offset + 1024, 1);
+	write_le32(partition_offset + 1028, static_cast<u32>(partition_size / page_size - 1));
+	write_le32(partition_offset + 1032, 0);
 	constexpr char volume_label[] = "PCSX2 swap";
-	std::memcpy(&linuxSwapData[1052], volume_label, sizeof(volume_label) - 1);
-	std::memcpy(&linuxSwapData[page_size - (sizeof(magic) - 1)], magic, sizeof(magic) - 1);
+	std::memcpy(&linuxSwapData[partition_offset + 1052], volume_label, sizeof(volume_label) - 1);
+	std::memcpy(&linuxSwapData[partition_offset + page_size - (sizeof(magic) - 1)], magic, sizeof(magic) - 1);
 }
 
 bool ATA::IsSelectedDevicePresent() const
@@ -363,12 +398,28 @@ void ATA::Close()
 	lba48Supported = false;
 	linuxSwapData.reset();
 
+	delete[] currentWrite;
+	currentWrite = nullptr;
+	currentWriteLength = 0;
+	currentWriteSectors = 0;
+	currentWriteLinuxSwap = false;
+
 	delete[] readBuffer;
 	readBuffer = nullptr;
 }
 
 void ATA::ResetBegin()
 {
+	delete[] currentWrite;
+	currentWrite = nullptr;
+	currentWriteLength = 0;
+	currentWriteSectors = 0;
+	currentWriteLinuxSwap = false;
+	pioPtr = 0;
+	pioEnd = 0;
+	pioDRQEndTransferFunc = nullptr;
+	wrTransferred = 0;
+
 	PreCmdExecuteDeviceDiag();
 }
 void ATA::ResetEnd(bool hard)
@@ -405,6 +456,32 @@ void ATA::ATA_HardReset()
 	//DevCon.WriteLn("DEV9: *ATA_HARD RESET");
 	ResetBegin();
 	ResetEnd(true);
+}
+
+void ATA::SetPendingInterrupt()
+{
+	pendingInterruptMask |= static_cast<u8>(1u << GetSelectedDevice());
+	UpdateInterruptLine();
+}
+
+void ATA::ClearPendingInterrupt()
+{
+	pendingInterruptMask &= static_cast<u8>(~(1u << GetSelectedDevice()));
+	UpdateInterruptLine();
+}
+
+void ATA::ClearAllPendingInterrupts()
+{
+	pendingInterruptMask = 0;
+	UpdateInterruptLine();
+}
+
+void ATA::UpdateInterruptLine()
+{
+	if (regControlEnableIRQ && pendingInterruptMask != 0)
+		_DEV9irq(ATA_INTR_INTRQ, 1);
+	else
+		dev9.irqcause &= ~ATA_INTR_INTRQ;
 }
 
 u16 ATA::Read(u32 addr, int width)
@@ -460,9 +537,9 @@ u16 ATA::Read(u32 addr, int width)
 			//DevCon.WriteLn("DEV9: ATA: ATA_R_SELECT %dbit read %x, Active %s", width, regSelect, (GetSelectedDevice() == 0) ? " True " : " False ");
 			return regSelect;
 		case ATA_R_STATUS:
-			// Clear irqcause
-			pendingInterrupt = false;
-			dev9.irqcause &= ~ATA_INTR_INTRQ;
+			// Reading status acknowledges only the selected device. The other device
+			// can still be holding the channel's shared INTRQ line active.
+			ClearPendingInterrupt();
 			[[fallthrough]];
 		case ATA_R_ALT_STATUS:
 			//DevCon.WriteLn("DEV9: ATA: %s %dbit read %x, Active %s", addr == ATA_R_ALT_STATUS ? "ATA_R_ALT_STATUS" : "ATA_R_STATUS", width, regStatus, (GetSelectedDevice() == 0) ? " True " : " False ");
@@ -493,13 +570,24 @@ u16 ATA::Read(u32 addr, int width)
 
 void ATA::Write(u32 addr, u16 value, int width)
 {
-	if ((addr != ATA_R_CMD && addr != ATA_R_CONTROL) && (regStatus & (ATA_STAT_BUSY | ATA_STAT_DRQ)) != 0)
+	if (addr == ATA_R_DATA)
+	{
+		if ((regStatus & ATA_STAT_BUSY) != 0 || (regStatus & ATA_STAT_DRQ) == 0)
+		{
+			Console.Error("DEV9: ATA: DATA write while device is not ready");
+			return;
+		}
+	}
+	else if ((addr != ATA_R_CMD && addr != ATA_R_CONTROL) && (regStatus & (ATA_STAT_BUSY | ATA_STAT_DRQ)) != 0)
 	{
 		Console.Error("DEV9: ATA: DEVICE BUSY, DROPPING WRITE");
 		return;
 	}
 	switch (addr)
 	{
+		case ATA_R_DATA:
+			ATAwritePIO(value, width);
+			break;
 		case ATA_R_FEATURE:
 			//DevCon.WriteLn("DEV9: ATA: ATA_R_FEATURE %dbit write %x", width, value);
 			ClearHOB();
@@ -533,19 +621,6 @@ void ATA::Write(u32 addr, u16 value, int width)
 		case ATA_R_SELECT:
 		{
 			//DevCon.WriteLn("DEV9: ATA: ATA_R_SELECT %dbit write %x", width, value);
-			const int oldDev = GetSelectedDevice();
-			const int newDev = (value >> 4) & 1;
-			// Suppress INTRQ when not selected device
-			if (oldDev == 0 && newDev == 1)
-			{
-				dev9.irqcause &= ~ATA_INTR_INTRQ;
-			}
-			else if (oldDev == 1 && newDev == 0)
-			{
-				if (regControlEnableIRQ && pendingInterrupt)
-					_DEV9irq(ATA_INTR_INTRQ, 1);
-			}
-
 			regSelect = static_cast<u8>(value);
 			break;
 		}
@@ -553,15 +628,13 @@ void ATA::Write(u32 addr, u16 value, int width)
 			//DevCon.WriteLn("DEV9: ATA: ATA_R_CONTROL %dbit write %x", width, value);
 			if ((value & 0x2) != 0)
 			{
-				// Suppress INTRQ
-				dev9.irqcause &= ~ATA_INTR_INTRQ;
 				regControlEnableIRQ = false;
+				UpdateInterruptLine();
 			}
 			else
 			{
-				if (GetSelectedDevice() == 0 && regControlEnableIRQ == false && pendingInterrupt)
-					_DEV9irq(ATA_INTR_INTRQ, 1);
 				regControlEnableIRQ = true;
+				UpdateInterruptLine();
 			}
 
 			if ((value & 0x4) != 0)
@@ -580,8 +653,7 @@ void ATA::Write(u32 addr, u16 value, int width)
 				return;
 			regCommand = value;
 			regControlHOBRead = false;
-			pendingInterrupt = false;
-			dev9.irqcause &= ~ATA_INTR_INTRQ;
+			ClearPendingInterrupt();
 			IDE_ExecCmd(value);
 			break;
 		default:

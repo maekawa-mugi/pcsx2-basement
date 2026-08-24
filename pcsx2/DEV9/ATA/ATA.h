@@ -103,14 +103,14 @@ private:
 	// A value of -1 is locked clear, a value of 1 is locked set, 0 is unlocked.
 	s8 regStatusSeekLock; 
 
-	bool pendingInterrupt = false;
+	u8 pendingInterruptMask = 0;
 
 	//Transfer
 	//Write Buffer(s)
 	bool awaitFlush = false;
-	u8* currentWrite; //array
-	u32 currentWriteLength;
-	u64 currentWriteSectors;
+	u8* currentWrite = nullptr; //array
+	u32 currentWriteLength = 0;
+	u64 currentWriteSectors = 0;
 	bool currentWriteLinuxSwap = false;
 
 	struct WriteQueueEntry
@@ -182,12 +182,12 @@ public:
 	int WriteDMAFromFIFO(u8* buffer, int available);
 
 	u16 ATAreadPIO();
-	//ATAwritePIO;
+	void ATAwritePIO(u16 value, int width);
 
 private:
 	bool OpenMaster(const std::string& hddPath);
 	bool OpenLinuxSwap();
-	void InitializeLinuxSwapHeader();
+	void InitializeLinuxSwapDisk();
 	void InitSparseSupport(const std::string& hddPath);
 	bool IsSelectedDevicePresent() const;
 	bool IsSelectedLinuxSwap() const;
@@ -221,6 +221,10 @@ private:
 	bool HDD_CanAccess(int* sectors);
 
 	void ClearHOB();
+	void SetPendingInterrupt();
+	void ClearPendingInterrupt();
+	void ClearAllPendingInterrupts();
+	void UpdateInterruptLine();
 
 	//Transfer
 	void IO_Thread();
@@ -271,6 +275,7 @@ private:
 	void HDD_IdleImmediate();
 
 	void DRQCmdPIODataToHost(u8* buff, int buffLen, int buffIndex, int size, bool sendIRQ);
+	void DRQCmdPIODataFromHost(bool sendIRQ);
 	void PostCmdPIODataToHost();
 	void HDD_IdentifyDevice();
 
@@ -279,7 +284,9 @@ private:
 	void HDD_ReadPIO(bool isLBA48);
 	void HDD_ReadPIOS2();
 	void HDD_ReadPIOEndBlock();
-	//HDD_Write*
+	void HDD_WriteSectors(bool isLBA48);
+	void HDD_WritePIO(bool isLBA48);
+	void HDD_WritePIOEndBlock();
 
 	void HDD_Smart();
 	void SMART_SetAutoSaveAttribute();
