@@ -22,11 +22,17 @@ void ATA::WriteUInt64(u8* data, int* index, u64 value)
 	*index += sizeof(value);
 }
 
-//No null char
-void ATA::WritePaddedString(u8* data, int* index, const std::string& value, u32 len)
+// ATA IDENTIFY strings contain the first character in the high byte of each word.
+// No null terminator is stored, and unused characters are padded with spaces.
+void ATA::WriteATAString(u8* data, int* index, const std::string& value, u32 len)
 {
-	memset(&data[*index], (u8)' ', len);
-	memcpy(&data[*index], value.c_str(), value.length() < len ? value.length() : len);
+	for (u32 i = 0; i < len; i += 2)
+	{
+		const u8 first = i < value.length() ? static_cast<u8>(value[i]) : static_cast<u8>(' ');
+		const u8 second = (i + 1) < value.length() ? static_cast<u8>(value[i + 1]) : static_cast<u8>(' ');
+		data[*index + i] = second;
+		data[*index + i + 1] = first;
+	}
 	*index += len;
 }
 
@@ -100,7 +106,7 @@ void ATA::CreateHDDinfo(u64 sizeSectors)
 	//Retired
 	index += 1 * 2; //word 9
 	//Serial number (20 ASCII characters)
-	WritePaddedString(identifyData, &index, "PCSX2-DEV9-ATA-HDD", 20); //word 10-19
+	WriteATAString(identifyData, &index, "PCSX2-DEV9-ATA-HDD", 20); //word 10-19
 	//Buffer(cache) type (Retired)
 	WriteUInt16(identifyData, &index, /*3*/ 0); //word 20
 	//Buffer(cache) size in sectors (Retired)
@@ -108,9 +114,9 @@ void ATA::CreateHDDinfo(u64 sizeSectors)
 	//Number of ECC bytes available on read / write long commands (Obsolete)
 	WriteUInt16(identifyData, &index, /*4*/ 0); //word 22
 	//Firmware revision (8 ASCII characters)
-	WritePaddedString(identifyData, &index, "FIRM100", 8); //word 23-26
+	WriteATAString(identifyData, &index, "FIRM100", 8); //word 23-26
 	//Model number (40 ASCII characters)
-	WritePaddedString(identifyData, &index, "PCSX2-DEV9-ATA-HDD", 40); //word 27-46
+	WriteATAString(identifyData, &index, "PCSX2-DEV9-ATA-HDD", 40); //word 27-46
 	//READ/WRITE MULI max sectors
 	WriteUInt16(identifyData, &index, 128 | (0x80 << 8)); //word 47
 	//Reserved
