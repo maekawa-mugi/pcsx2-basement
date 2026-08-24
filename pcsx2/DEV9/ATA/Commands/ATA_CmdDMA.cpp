@@ -37,6 +37,7 @@ void ATA::DRQCmdDMADataFromHost()
 	currentWrite = new u8[nsector * 512];
 	currentWriteLength = nsector * 512;
 	currentWriteSectors = HDD_GetLBA();
+	currentWriteLinuxSwap = IsSelectedLinuxSwap();
 
 
 	regStatus &= ~ATA_STAT_BUSY;
@@ -51,10 +52,12 @@ void ATA::PostCmdDMADataFromHost()
 	entry.data = currentWrite;
 	entry.length = currentWriteLength;
 	entry.sector = currentWriteSectors;
+	entry.linuxSwap = currentWriteLinuxSwap;
 	writeQueue.Enqueue(entry);
 	currentWrite = nullptr;
 	currentWriteLength = 0;
 	currentWriteSectors = 0;
+	currentWriteLinuxSwap = false;
 	nsectorLeft = 0;
 
 	regStatus &= ~ATA_STAT_DRQ;

@@ -94,6 +94,26 @@ std::string GetHDDPath()
 	return hddPath;
 }
 
+static bool IsDEV9Enabled()
+{
+	return EmuConfig.DEV9.EthEnable || EmuConfig.DEV9.HddEnable || EmuConfig.DEV9.HddEnableLinuxSwap;
+}
+
+static void OpenATADevices()
+{
+	const std::string hdd_path = GetHDDPath();
+	const bool master_requested = EmuConfig.DEV9.HddEnable;
+	const bool linux_swap_requested = EmuConfig.DEV9.HddEnableLinuxSwap;
+	if (!master_requested && !linux_swap_requested)
+		return;
+
+	dev9.ata->Open(hdd_path, master_requested, linux_swap_requested);
+	if (master_requested && !dev9.ata->IsMasterPresent())
+		EmuConfig.DEV9.HddEnable = false;
+	if (linux_swap_requested && !dev9.ata->IsLinuxSwapPresent())
+		EmuConfig.DEV9.HddEnableLinuxSwap = false;
+}
+
 s32 DEV9init()
 {
 	DevCon.WriteLn("DEV9: DEV9init");
@@ -183,13 +203,7 @@ s32 DEV9open()
 {
 	DevCon.WriteLn("DEV9: DEV9open");
 
-	std::string hddPath(GetHDDPath());
-
-	if (EmuConfig.DEV9.HddEnable)
-	{
-		if (dev9.ata->Open(hddPath) != 0)
-			EmuConfig.DEV9.HddEnable = false;
-	}
+	OpenATADevices();
 
 	if (EmuConfig.DEV9.EthEnable)
 		InitNet();
@@ -888,7 +902,7 @@ void SpeedWrite(u32 addr, u16 value, int width)
 
 u8 DEV9read8(u32 addr)
 {
-	if (!EmuConfig.DEV9.EthEnable && !EmuConfig.DEV9.HddEnable)
+	if (!IsDEV9Enabled())
 		return 0;
 
 	if (addr >= ATA_DEV9_HDD_BASE && addr < ATA_DEV9_HDD_END)
@@ -928,7 +942,7 @@ u8 DEV9read8(u32 addr)
 
 u16 DEV9read16(u32 addr)
 {
-	if (!EmuConfig.DEV9.EthEnable && !EmuConfig.DEV9.HddEnable)
+	if (!IsDEV9Enabled())
 		return 0;
 
 	if (addr >= ATA_DEV9_HDD_BASE && addr < ATA_DEV9_HDD_END)
@@ -969,7 +983,7 @@ u16 DEV9read16(u32 addr)
 
 u32 DEV9read32(u32 addr)
 {
-	if (!EmuConfig.DEV9.EthEnable && !EmuConfig.DEV9.HddEnable)
+	if (!IsDEV9Enabled())
 		return 0;
 
 	if (addr >= ATA_DEV9_HDD_BASE && addr < ATA_DEV9_HDD_END)
@@ -994,7 +1008,7 @@ u32 DEV9read32(u32 addr)
 
 void DEV9write8(u32 addr, u8 value)
 {
-	if (!EmuConfig.DEV9.EthEnable && !EmuConfig.DEV9.HddEnable)
+	if (!IsDEV9Enabled())
 		return;
 
 	if (addr >= ATA_DEV9_HDD_BASE && addr < ATA_DEV9_HDD_END)
@@ -1027,7 +1041,7 @@ void DEV9write8(u32 addr, u8 value)
 
 void DEV9write16(u32 addr, u16 value)
 {
-	if (!EmuConfig.DEV9.EthEnable && !EmuConfig.DEV9.HddEnable)
+	if (!IsDEV9Enabled())
 		return;
 
 	if (addr >= ATA_DEV9_HDD_BASE && addr < ATA_DEV9_HDD_END)
@@ -1061,7 +1075,7 @@ void DEV9write16(u32 addr, u16 value)
 
 void DEV9write32(u32 addr, u32 value)
 {
-	if (!EmuConfig.DEV9.EthEnable && !EmuConfig.DEV9.HddEnable)
+	if (!IsDEV9Enabled())
 		return;
 
 	if (addr >= ATA_DEV9_HDD_BASE && addr < ATA_DEV9_HDD_END)
@@ -1097,7 +1111,7 @@ void DEV9write32(u32 addr, u32 value)
 
 void DEV9readDMA8Mem(u32* pMem, int size)
 {
-	if (!EmuConfig.DEV9.EthEnable && !EmuConfig.DEV9.HddEnable)
+	if (!IsDEV9Enabled())
 		return;
 
 	size >>= 1;
@@ -1136,7 +1150,7 @@ void DEV9readDMA8Mem(u32* pMem, int size)
 
 void DEV9writeDMA8Mem(u32* pMem, int size)
 {
-	if (!EmuConfig.DEV9.EthEnable && !EmuConfig.DEV9.HddEnable)
+	if (!IsDEV9Enabled())
 		return;
 
 	size >>= 1;
@@ -1185,27 +1199,13 @@ void DEV9CheckChanges(const Pcsx2Config& old_config)
 	//Eth
 	ReconfigureLiveNet(old_config);
 
-	//Hdd
-	//Hdd Validate Path
-	std::string hddPath(GetHDDPath());
-
-	//Hdd Compare with old config
-	if (EmuConfig.DEV9.HddEnable)
+	// ATA device configuration changes are rare. Reopen both devices together so the
+	// primary/slave selection and volatile swap lifetime remain deterministic.
+	if (EmuConfig.DEV9.HddEnable != old_config.DEV9.HddEnable ||
+		EmuConfig.DEV9.HddEnableLinuxSwap != old_config.DEV9.HddEnableLinuxSwap ||
+		EmuConfig.DEV9.HddFile != old_config.DEV9.HddFile)
 	{
-		if (old_config.DEV9.HddEnable)
-		{
-			//ATA::Open/Close dosn't set any regs
-			//So we can close/open to apply settings
-			if (EmuConfig.DEV9.HddFile != old_config.DEV9.HddFile)
-			{
-				dev9.ata->Close();
-				if (dev9.ata->Open(hddPath) != 0)
-					EmuConfig.DEV9.HddEnable = false;
-			}
-		}
-		else if (dev9.ata->Open(hddPath) != 0)
-			EmuConfig.DEV9.HddEnable = false;
-	}
-	else if (old_config.DEV9.HddEnable)
 		dev9.ata->Close();
+		OpenATADevices();
+	}
 }

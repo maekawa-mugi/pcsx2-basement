@@ -63,7 +63,7 @@ void ATA::HDD_IdentifyDevice()
 	DevCon.WriteLn("DEV9: HddidentifyDevice");
 
 	//IDE transfer start
-	CreateHDDinfo(hddImageSize / 512);
+	CreateHDDinfo();
 
 	pioDRQEndTransferFunc = nullptr;
 	DRQCmdPIODataToHost(identifyData, 256 * 2, 0, 256 * 2, true);

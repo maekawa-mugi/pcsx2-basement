@@ -169,6 +169,8 @@ DEV9SettingsWidget::DEV9SettingsWidget(SettingsWindow* settings_dialog, QWidget*
 	//////////////////////////////////////////////////////////////////////////
 	connect(m_ui.hddEnabled, &QCheckBox::checkStateChanged, this, &DEV9SettingsWidget::onHddEnabledChanged);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.hddEnabled, "DEV9/Hdd", "HddEnable", false);
+	SettingWidgetBinder::BindWidgetToBoolSetting(
+		sif, m_ui.hddLinuxSwap, "DEV9/Hdd", "HddEnableLinuxSwap", false);
 
 	if (dialog()->isPerGameSettings())
 	{

@@ -68,8 +68,14 @@ void ATA::IO_Read()
 	}
 
 	const u64 pos = lba * 512;
-	if (FileSystem::FSeek64(hddImage, pos, SEEK_SET) != 0 ||
-		std::fread(readBuffer,  512, nsector, hddImage) != static_cast<size_t>(nsector))
+	if (IsSelectedLinuxSwap())
+	{
+		const size_t length = static_cast<size_t>(nsector) * 512;
+		pxAssert(pos + length <= LINUX_SWAP_SIZE);
+		std::memcpy(readBuffer, &linuxSwapData[static_cast<size_t>(pos)], length);
+	}
+	else if (FileSystem::FSeek64(hddImage, pos, SEEK_SET) != 0 ||
+			 std::fread(readBuffer, 512, nsector, hddImage) != static_cast<size_t>(nsector))
 	{
 		Console.Error("DEV9: ATA: File read error");
 		pxAssert(false);
@@ -92,6 +98,14 @@ bool ATA::IO_Write()
 	}
 
 	const u64 imagePos = entry.sector * 512;
+	if (entry.linuxSwap)
+	{
+		pxAssert(imagePos + entry.length <= LINUX_SWAP_SIZE);
+		std::memcpy(&linuxSwapData[static_cast<size_t>(imagePos)], entry.data, entry.length);
+		delete[] entry.data;
+		return true;
+	}
+
 	if (FileSystem::FSeek64(hddImage, imagePos, SEEK_SET) != 0)
 	{
 		Console.Error("DEV9: ATA: File seek error");

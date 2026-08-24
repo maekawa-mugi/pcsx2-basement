@@ -1073,6 +1073,7 @@ struct Pcsx2Config
 		bool LogDeviceAccess{false};
 
 		bool HddEnable{false};
+		bool HddEnableLinuxSwap{false};
 		std::string HddFile;
 
 		DEV9Options();

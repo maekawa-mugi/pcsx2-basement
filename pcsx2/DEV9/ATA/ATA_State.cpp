@@ -7,6 +7,8 @@
 #include "ATA.h"
 #include "DEV9/DEV9.h"
 
+#include <new>
+
 #if _WIN32
 #include "pathcch.h"
 #include <io.h>
@@ -30,28 +32,52 @@ ATA::ATA()
 
 ATA::~ATA()
 {
-	if (hddImage)
-		std::fclose(hddImage);
+	Close();
 }
 
-int ATA::Open(const std::string& hddPath)
+void ATA::Open(const std::string& hddPath, bool enableMaster, bool enableLinuxSwap)
 {
 	readBufferLen = 256 * 512;
 	readBuffer = new u8[readBufferLen];
 	memset(sceSec, 0, sizeof(sceSec));
 
+	if (enableMaster)
+		OpenMaster(hddPath);
+	if (enableLinuxSwap)
+		OpenLinuxSwap();
+
+	if (!IsMasterPresent() && !IsLinuxSwapPresent())
+		return;
+
+	{
+		std::lock_guard ioSignallock(ioMutex);
+		ioRead = false;
+		ioWrite = false;
+	}
+
+	ioThread = std::thread(&ATA::IO_Thread, this);
+	ioRunning = true;
+}
+
+bool ATA::OpenMaster(const std::string& hddPath)
+{
 	DevCon.WriteLn("DEV9: ATA: HddFile : %s", hddPath.c_str());
 
 	//Open File
 	if (!FileSystem::FileExists(hddPath.c_str()))
-		return -1;
+		return false;
 
 	hddImage = FileSystem::OpenCFile(hddPath.c_str(), "r+b");
 	const s64 size = hddImage ? FileSystem::FSize64(hddImage) : -1;
 	if (!hddImage || size < 0)
 	{
 		Console.Error("DEV9: ATA: Failed to open HDD image '%s'", hddPath.c_str());
-		return -1;
+		if (hddImage)
+		{
+			std::fclose(hddImage);
+			hddImage = nullptr;
+		}
+		return false;
 	}
 
 	// Open and read the content of the hddid file
@@ -97,20 +123,67 @@ int ATA::Open(const std::string& hddPath)
 	hddImageSize = static_cast<u64>(size);
 	lba48Supported = (hddImageSize > ((static_cast<s64>(1) << 28) - 1) * 512);
 
-	CreateHDDinfo(hddImageSize / 512);
-
 	InitSparseSupport(hddPath);
+	return true;
+}
 
+bool ATA::OpenLinuxSwap()
+{
+	linuxSwapData.reset(new (std::nothrow) u8[static_cast<size_t>(LINUX_SWAP_SIZE)]);
+	if (!linuxSwapData)
 	{
-		std::lock_guard ioSignallock(ioMutex);
-		ioRead = false;
-		ioWrite = false;
+		Console.Error("DEV9: ATA: Failed to allocate 256 MiB Linux swap RAM disk");
+		return false;
 	}
+	std::memset(linuxSwapData.get(), 0, static_cast<size_t>(LINUX_SWAP_SIZE));
 
-	ioThread = std::thread(&ATA::IO_Thread, this);
-	ioRunning = true;
+	InitializeLinuxSwapHeader();
+	DevCon.WriteLn("DEV9: ATA: Added 256 MiB Linux swap RAM disk as primary slave");
+	return true;
+}
 
-	return 0;
+void ATA::InitializeLinuxSwapHeader()
+{
+	// The supplied PS2 Linux 2.2.1 kernel uses 4 KiB pages; other MIPS kernels need proper testing.
+	constexpr size_t page_size = 4096;
+	constexpr char magic[] = "SWAPSPACE2";
+	static_assert(sizeof(magic) - 1 == 10);
+
+	auto write_le32 = [this](size_t offset, u32 value) {
+		linuxSwapData[offset] = static_cast<u8>(value);
+		linuxSwapData[offset + 1] = static_cast<u8>(value >> 8);
+		linuxSwapData[offset + 2] = static_cast<u8>(value >> 16);
+		linuxSwapData[offset + 3] = static_cast<u8>(value >> 24);
+	};
+
+	// Linux swap v2 reserves the first KiB, followed by version, last page, bad-page
+	// count, UUID, and volume label. The signature is stored at the end of page zero.
+	write_le32(1024, 1);
+	write_le32(1028, static_cast<u32>(LINUX_SWAP_SIZE / page_size - 1));
+	write_le32(1032, 0);
+	constexpr char volume_label[] = "PCSX2 swap";
+	std::memcpy(&linuxSwapData[1052], volume_label, sizeof(volume_label) - 1);
+	std::memcpy(&linuxSwapData[page_size - (sizeof(magic) - 1)], magic, sizeof(magic) - 1);
+}
+
+bool ATA::IsSelectedDevicePresent() const
+{
+	return GetSelectedDevice() ? IsLinuxSwapPresent() : IsMasterPresent();
+}
+
+bool ATA::IsSelectedLinuxSwap() const
+{
+	return GetSelectedDevice() != 0 && IsLinuxSwapPresent();
+}
+
+u64 ATA::GetSelectedDeviceSize() const
+{
+	return IsSelectedLinuxSwap() ? LINUX_SWAP_SIZE : hddImageSize;
+}
+
+bool ATA::SelectedDeviceSupportsLBA48() const
+{
+	return GetSelectedDevice() == 0 && lba48Supported;
 }
 
 void ATA::InitSparseSupport(const std::string& hddPath)
@@ -286,6 +359,9 @@ void ATA::Close()
 		std::fclose(hddImage);
 		hddImage = nullptr;
 	}
+	hddImageSize = 0;
+	lba48Supported = false;
+	linuxSwapData.reset();
 
 	delete[] readBuffer;
 	readBuffer = nullptr;
@@ -338,17 +414,19 @@ u16 ATA::Read(u32 addr, int width)
 		case ATA_R_DATA:
 			if (width == 8)
 				Console.Error("DEV9:ATA : ATA_R_DATA 8bit read???, Active %s", (GetSelectedDevice() == 0) ? "True" : "False");
+			if (!IsSelectedDevicePresent())
+				return 0;
 			//else
 			//	DevCon.WriteLn("DEV9: ATA: ATA_R_DATA %dbit read, Active %s", width, hard, (GetSelectedDevice() == 0) ? "True" : "False");
 			return ATAreadPIO();
 		case ATA_R_ERROR:
 			//DevCon.WriteLn("DEV9: ATA: ATA_R_ERROR %dbit read %x, Active %s", width, regError, (GetSelectedDevice() == 0) ? "True" : "False");
-			if (GetSelectedDevice() != 0)
+			if (!IsSelectedDevicePresent())
 				return 0;
 			return regError;
 		case ATA_R_NSECTOR:
 			//DevCon.WriteLn("DEV9: ATA: ATA_R_NSECTOR %dbit read %x, Active %s", width, nsector, (GetSelectedDevice() == 0) ? "True" : "False");
-			if (GetSelectedDevice() != 0)
+			if (!IsSelectedDevicePresent())
 				return 0;
 			if (!regControlHOBRead)
 				return regNsector;
@@ -356,7 +434,7 @@ u16 ATA::Read(u32 addr, int width)
 				return regNsectorHOB;
 		case ATA_R_SECTOR:
 			//DevCon.WriteLn("DEV9: ATA: ATA_R_NSECTOR %dbit read %x, Active %s", width, regSector, (GetSelectedDevice() == 0) ? "True" : "False");
-			if (GetSelectedDevice() != 0)
+			if (!IsSelectedDevicePresent())
 				return 0;
 			if (!regControlHOBRead)
 				return regSector;
@@ -364,7 +442,7 @@ u16 ATA::Read(u32 addr, int width)
 				return regSectorHOB;
 		case ATA_R_LCYL:
 			//DevCon.WriteLn("DEV9: ATA: ATA_R_LCYL %dbit read %x, Active %s", width, regLcyl, (GetSelectedDevice() == 0) ? "True" : "False");
-			if (GetSelectedDevice() != 0)
+			if (!IsSelectedDevicePresent())
 				return 0;
 			if (!regControlHOBRead)
 				return regLcyl;
@@ -372,7 +450,7 @@ u16 ATA::Read(u32 addr, int width)
 				return regLcylHOB;
 		case ATA_R_HCYL:
 			//DevCon.WriteLn("DEV9: ATA: ATA_R_HCYL %dbit read %x, Active %s", width, regHcyl, (GetSelectedDevice() == 0) ? " True " : " False ");
-			if (GetSelectedDevice() != 0)
+			if (!IsSelectedDevicePresent())
 				return 0;
 			if (!regControlHOBRead)
 				return regHcyl;
@@ -389,11 +467,10 @@ u16 ATA::Read(u32 addr, int width)
 		case ATA_R_ALT_STATUS:
 			//DevCon.WriteLn("DEV9: ATA: %s %dbit read %x, Active %s", addr == ATA_R_ALT_STATUS ? "ATA_R_ALT_STATUS" : "ATA_R_STATUS", width, regStatus, (GetSelectedDevice() == 0) ? " True " : " False ");
 
-			if (!EmuConfig.DEV9.HddEnable)
-				return 0xff7f; // PS2 confirmed response when no HDD is actually connected. The Expansion bay always says HDD support is connected.
-
-			if (GetSelectedDevice() != 0)
-				return 0;
+			if (!IsSelectedDevicePresent())
+				return GetSelectedDevice() == 0 ?
+				           0xff7f : // PS2 response when no master HDD is connected.
+				           0;
 
 			// When an error occurs, the seek bit shall not be changed until the Status Register is read, after which the bit then indicates the current Seek status.
 			// This handles reporting the locked value, and then unlocking if read form STATUS rather then ALT_STATUS.
@@ -499,6 +576,8 @@ void ATA::Write(u32 addr, u16 value, int width)
 			break;
 		case ATA_R_CMD:
 			//DevCon.WriteLn("DEV9: ATA: ATA_R_CMD %dbit write %x", width, value);
+			if (!IsSelectedDevicePresent())
+				return;
 			regCommand = value;
 			regControlHOBRead = false;
 			pendingInterrupt = false;
@@ -513,7 +592,7 @@ void ATA::Write(u32 addr, u16 value, int width)
 
 void ATA::Async(uint cycles)
 {
-	if (!hddImage)
+	if (!IsMasterPresent() && !IsLinuxSwapPresent())
 		return;
 
 	if ((regStatus & (ATA_STAT_BUSY | ATA_STAT_DRQ)) == 0 ||
@@ -623,7 +702,7 @@ bool ATA::HDD_CanSeek()
 
 bool ATA::HDD_CanAccess(int* sectors)
 {
-	s64 maxLBA = hddImageSize / 512 - 1;
+	s64 maxLBA = GetSelectedDeviceSize() / 512 - 1;
 	if ((regSelect & 0x40) == 0) //CHS mode
 		maxLBA = std::min<s64>(maxLBA, curCylinders * curHeads * curSectors);
 
@@ -639,9 +718,10 @@ bool ATA::HDD_CanAccess(int* sectors)
 	}
 
 	const s64 posEnd = posStart + *sectors;
-	if (posEnd > maxLBA)
+	const s64 deviceEnd = maxLBA + 1;
+	if (posEnd > deviceEnd)
 	{
-		const s64 overshoot = posEnd - maxLBA;
+		const s64 overshoot = posEnd - deviceEnd;
 		s64 space = *sectors - overshoot;
 		*sectors = static_cast<int>(space);
 		return false;

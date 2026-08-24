@@ -17,6 +17,8 @@
 class ATA
 {
 public:
+	static constexpr u64 LINUX_SWAP_SIZE = 256ULL * 1024 * 1024;
+
 	//Transfer
 	bool dmaReady = false;
 	int nsector = 0;     //sector count
@@ -25,7 +27,8 @@ private:
 	bool lba48Supported = false;
 
 	std::FILE* hddImage = nullptr;
-	u64 hddImageSize;
+	u64 hddImageSize = 0;
+	std::unique_ptr<u8[]> linuxSwapData;
 
 	bool hddSparse = false;
 	u64 hddSparseBlockSize;
@@ -108,12 +111,14 @@ private:
 	u8* currentWrite; //array
 	u32 currentWriteLength;
 	u64 currentWriteSectors;
+	bool currentWriteLinuxSwap = false;
 
 	struct WriteQueueEntry
 	{
 		u8* data;
 		u32 length;
 		u64 sector;
+		bool linuxSwap;
 	};
 	SimpleQueue<WriteQueueEntry> writeQueue;
 
@@ -161,8 +166,10 @@ public:
 	ATA();
 	~ATA();
 
-	int Open(const std::string& hddPath);
+	void Open(const std::string& hddPath, bool enableMaster, bool enableLinuxSwap);
 	void Close();
+	bool IsMasterPresent() const { return hddImage != nullptr; }
+	bool IsLinuxSwapPresent() const { return linuxSwapData != nullptr; }
 
 	void ATA_HardReset();
 
@@ -178,17 +185,24 @@ public:
 	//ATAwritePIO;
 
 private:
+	bool OpenMaster(const std::string& hddPath);
+	bool OpenLinuxSwap();
+	void InitializeLinuxSwapHeader();
 	void InitSparseSupport(const std::string& hddPath);
+	bool IsSelectedDevicePresent() const;
+	bool IsSelectedLinuxSwap() const;
+	u64 GetSelectedDeviceSize() const;
+	bool SelectedDeviceSupportsLBA48() const;
 
 	//Info
-	void CreateHDDinfo(u64 sizeSectors);
+	void CreateHDDinfo();
 	void CreateHDDinfoCsum();
 
 	//State
 	void ResetBegin();
 	void ResetEnd(bool hard);
 
-	u8 GetSelectedDevice()
+	u8 GetSelectedDevice() const
 	{
 		return (regSelect >> 4) & 1;
 	}

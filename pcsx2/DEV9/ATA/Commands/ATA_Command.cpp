@@ -18,13 +18,13 @@ void ATA::IDE_ExecCmd(u16 value)
 			HDD_ReadSectors(false);
 			break;
 		case 0x24:
-			if (lba48Supported)
+			if (SelectedDeviceSupportsLBA48())
 				HDD_ReadSectors(true);
 			else
 				HDD_Unk();
 			break;
 		case 0x29:
-			if (lba48Supported)
+			if (SelectedDeviceSupportsLBA48())
 				HDD_ReadMultiple(true);
 			else
 				HDD_Unk();
@@ -33,7 +33,7 @@ void ATA::IDE_ExecCmd(u16 value)
 			HDD_ReadVerifySectors(false);
 			break;
 		case 0x42:
-			if (lba48Supported)
+			if (SelectedDeviceSupportsLBA48())
 				HDD_ReadVerifySectors(true);
 			else
 				HDD_Unk();
@@ -63,13 +63,13 @@ void ATA::IDE_ExecCmd(u16 value)
 			HDD_WriteDMA(false);
 			break;
 		case 0x25:
-			if (lba48Supported)
+			if (SelectedDeviceSupportsLBA48())
 				HDD_ReadDMA(true);
 			else
 				HDD_Unk();
 			break;
 		case 0x35:
-			if (lba48Supported)
+			if (SelectedDeviceSupportsLBA48())
 				HDD_WriteDMA(true);
 			else
 				HDD_Unk();
@@ -84,7 +84,7 @@ void ATA::IDE_ExecCmd(u16 value)
 			HDD_FlushCache();
 			break;
 		case 0xEA:
-			if (lba48Supported)
+			if (SelectedDeviceSupportsLBA48())
 				HDD_FlushCache();
 			else
 				HDD_Unk();

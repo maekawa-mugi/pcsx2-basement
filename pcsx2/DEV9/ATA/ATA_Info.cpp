@@ -36,13 +36,17 @@ void ATA::WriteATAString(u8* data, int* index, const std::string& value, u32 len
 	*index += len;
 }
 
-void ATA::CreateHDDinfo(u64 sizeSectors)
+void ATA::CreateHDDinfo()
 {
+	u64 sizeSectors = GetSelectedDeviceSize() / 512;
+	const bool supports_lba48 = SelectedDeviceSupportsLBA48();
+	const std::string device_name = IsSelectedLinuxSwap() ? "PCSX2-LINUX-SWAP" : "PCSX2-DEV9-ATA-HDD";
+
 	//PS2 is limited to 48bit size HDD (2TB), however,
 	//we don't yet support 48bit, so limit to 28bit size
 	u64 maxSize = (1 << 28) - 1; // 128Gb
 	const u32 nbSectors = std::min<u32>(sizeSectors, maxSize); // nbSectors will hold 28-bit size
-	if (lba48Supported)
+	if (supports_lba48)
 		maxSize = (1ULL << 48) - 1; // 128PiB
 
 	sizeSectors = std::min<u64>(sizeSectors, maxSize);
@@ -106,7 +110,7 @@ void ATA::CreateHDDinfo(u64 sizeSectors)
 	//Retired
 	index += 1 * 2; //word 9
 	//Serial number (20 ASCII characters)
-	WriteATAString(identifyData, &index, "PCSX2-DEV9-ATA-HDD", 20); //word 10-19
+	WriteATAString(identifyData, &index, device_name, 20); //word 10-19
 	//Buffer(cache) type (Retired)
 	WriteUInt16(identifyData, &index, /*3*/ 0); //word 20
 	//Buffer(cache) size in sectors (Retired)
@@ -116,7 +120,7 @@ void ATA::CreateHDDinfo(u64 sizeSectors)
 	//Firmware revision (8 ASCII characters)
 	WriteATAString(identifyData, &index, "FIRM100", 8); //word 23-26
 	//Model number (40 ASCII characters)
-	WriteATAString(identifyData, &index, "PCSX2-DEV9-ATA-HDD", 40); //word 27-46
+	WriteATAString(identifyData, &index, device_name, 40); //word 27-46
 	//READ/WRITE MULI max sectors
 	WriteUInt16(identifyData, &index, 128 | (0x80 << 8)); //word 47
 	//Reserved
@@ -240,7 +244,7 @@ void ATA::CreateHDDinfo(u64 sizeSectors)
 	 * bit 14: 1
 	 */
 	WriteUInt16(identifyData, &index, ( 	//word 83
-		(lba48Supported << 10) | 			//user defined
+		(supports_lba48 << 10) | 			//user defined
 		(1 << 12) |							//Implemented
 		(1 << 13) |							//Implemented
 		(1 << 14) 							//Always one
@@ -275,7 +279,7 @@ void ATA::CreateHDDinfo(u64 sizeSectors)
 	//Command set/feature enabled/supported (See word 83)
 	WriteUInt16(identifyData, &index, ( 	//word 86
 		/*(1 << 8) |						//SET MAX */
-		(lba48Supported << 10) |			//user defined
+		(supports_lba48 << 10) |			//user defined
 		(1 << 12) |							//Implemented
 		(1 << 13)));						//Implemented
 	//Command set/feature enabled/supported (See word 84)
@@ -334,7 +338,7 @@ void ATA::CreateHDDinfo(u64 sizeSectors)
 	//98-99
 	//Total Number of User Addressable Sectors for the 48-bit Address feature set.
 	index = 100 * 2;
-	if (lba48Supported)
+	if (supports_lba48)
 		WriteUInt64(identifyData, &index, sizeSectors);
 	else
 		WriteUInt64(identifyData, &index, 0); // for 28-bit only this area is empty
