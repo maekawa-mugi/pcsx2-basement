@@ -9,7 +9,9 @@
 
 namespace EEMemory
 {
-	static constexpr u32 RECOMPILER_TRANSLATION_CACHE_SIZE = 64;
+	// Linux regularly keeps more than 64 virtual pages hot across kernel and user mappings.
+	// A larger direct-mapped micro-TLB reduces conflict misses without adding hit-path branches.
+	static constexpr u32 RECOMPILER_TRANSLATION_CACHE_SIZE = 256;
 	static constexpr u32 RECOMPILER_TRANSLATION_NO_TLB_ENTRY = 0xffffffffU;
 	static constexpr u32 RECOMPILER_TRANSLATION_SCRATCHPAD = 1U << 0;
 	static constexpr u32 RECOMPILER_TRANSLATION_NO_ACCESS = 1U << 1;

@@ -324,6 +324,14 @@ static void DynGenFullTLBTranslate(const xRegister32& original_address, EEMmu::A
 		xMOV(eax, original_address);
 		xAND(eax, 0x1ffff000);
 		xXOR(arg4reg, arg4reg);
+		// Most Linux kernel accesses target main RAM through KSEG0/KSEG1. Publish the
+		// host page here so the read/write path can skip a second physical-map lookup.
+		// Extra-memory mode changes flush recompiled blocks, but needs proper testing.
+		xCMP(eax, Ps2MemSize::ExposedRam);
+		xForwardJAE32 direct_segment_not_ram;
+		xLoadFarAddr(arg4reg, eeMem->Main);
+		xADD(arg4reg, rax);
+		direct_segment_not_ram.SetTarget();
 		translated_segment_ready.emplace();
 		translated_segment_miss->SetTarget();
 	}
