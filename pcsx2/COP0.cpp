@@ -449,7 +449,7 @@ namespace R5900
 					{
 						tlb[j] = EEMmu::BuildTLBEntry(cpuRegs.CP0.n.PageMask, cpuRegs.CP0.n.EntryHi,
 							cpuRegs.CP0.n.EntryLo0, cpuRegs.CP0.n.EntryLo1);
-						EEMmu::InvalidateTranslations();
+						EEMmu::InvalidateTLBEntry(j);
 					}
 					else
 					{
@@ -476,7 +476,7 @@ namespace R5900
 					{
 						tlb[j] = EEMmu::BuildTLBEntry(cpuRegs.CP0.n.PageMask, cpuRegs.CP0.n.EntryHi,
 							cpuRegs.CP0.n.EntryLo0, cpuRegs.CP0.n.EntryLo1);
-						EEMmu::InvalidateTranslations();
+						EEMmu::InvalidateTLBEntry(j);
 					}
 					else
 					{

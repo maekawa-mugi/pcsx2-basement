@@ -172,10 +172,17 @@ TEST(EERecompilerMemory, TranslationCacheRejectsOldTLBGeneration)
 	LiveEEStateGuard guard;
 	cpuRegs.pc = 0x20001004;
 	tlb[0] = MakeEntry(0x10000000, 0x01000000, 0x01001000);
+	EEMmu::InvalidateTLBEntry(0);
+	EXPECT_EQ(EEMemory::TranslateForRecompiler(0x10000020, EEMmu::AccessType::Load).paddr, 0x01000020U);
+
+	// Updating an unrelated entry must leave the cached entry usable.
+	const u32 entry_zero_generation = EEMmu::GetTLBEntryGeneration(0);
+	EEMmu::InvalidateTLBEntry(1);
+	EXPECT_EQ(EEMmu::GetTLBEntryGeneration(0), entry_zero_generation);
 	EXPECT_EQ(EEMemory::TranslateForRecompiler(0x10000020, EEMmu::AccessType::Load).paddr, 0x01000020U);
 
 	tlb[0] = MakeEntry(0x10000000, 0x02000000, 0x02001000);
-	EEMmu::InvalidateTranslations();
+	EEMmu::InvalidateTLBEntry(0);
 	EXPECT_EQ(EEMemory::TranslateForRecompiler(0x10000020, EEMmu::AccessType::Load).paddr, 0x02000020U);
 }
 
@@ -197,7 +204,8 @@ TEST(EERecompilerMemory, JitTranslationResolverPublishesTaggedPhysicalPage)
 		EEMemory::GetRecompilerJitTranslationCacheBase(EEMmu::AccessType::Load)
 			[virtual_page & (EEMemory::RECOMPILER_TRANSLATION_CACHE_SIZE - 1)];
 	EXPECT_EQ(entry.virtual_page, virtual_page);
-	EXPECT_EQ(entry.translation_generation, EEMmu::GetTranslationGeneration());
+	EXPECT_EQ(entry.tlb_entry_index, 0U);
+	EXPECT_EQ(entry.translation_generation, EEMmu::GetTLBEntryGeneration(0));
 	EXPECT_EQ(entry.context_key, EEMemory::GetRecompilerJitTranslationContextKey());
 	EXPECT_EQ(entry.translation, packed);
 }
@@ -632,10 +640,20 @@ TEST(EETLBInstructions, RandomDecrementsAndWrapsAtWired)
 	EXPECT_TRUE(EEMmu::HasWarning(warnings, EEMmu::Warning::InvalidWired));
 }
 
-TEST(EETLBInstructions, TranslationGenerationChangesOnlyWhenInvalidated)
+TEST(EETLBInstructions, TranslationGenerationInvalidatesOnlyChangedEntry)
 {
-	const u32 before = EEMmu::GetTranslationGeneration();
-	EXPECT_EQ(*EEMmu::GetTranslationGenerationAddress(), before);
+	const u32 global_before = EEMmu::GetTranslationGeneration();
+	const u32 entry_zero_before = EEMmu::GetTLBEntryGeneration(0);
+	const u32 entry_one_before = EEMmu::GetTLBEntryGeneration(1);
+	EXPECT_EQ(*EEMmu::GetTranslationGenerationAddress(), global_before);
+	EXPECT_EQ(*EEMmu::GetTLBEntryGenerationAddress(0), entry_zero_before);
+
+	EEMmu::InvalidateTLBEntry(1);
+	EXPECT_NE(EEMmu::GetTranslationGeneration(), global_before);
+	EXPECT_EQ(EEMmu::GetTLBEntryGeneration(0), entry_zero_before);
+	EXPECT_NE(EEMmu::GetTLBEntryGeneration(1), entry_one_before);
+
+	const u32 entry_zero_before_full_reset = EEMmu::GetTLBEntryGeneration(0);
 	EEMmu::InvalidateTranslations();
-	EXPECT_NE(EEMmu::GetTranslationGeneration(), before);
+	EXPECT_NE(EEMmu::GetTLBEntryGeneration(0), entry_zero_before_full_reset);
 }

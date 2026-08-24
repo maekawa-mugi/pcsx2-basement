@@ -2253,16 +2253,16 @@ static void memory_protect_recompiled_code(u32 startpc, u32 size)
 		struct ProtectedFetchPage
 		{
 			EEMemory::FetchPage fetch;
+			const u32* translation_generation_address = nullptr;
+			u32 translation_generation = 0;
 			const u32* write_generation_address = nullptr;
 			u32 write_generation = 0;
 			u8* writable_code_page = nullptr;
 		};
 
-		const u32 translation_generation = EEMmu::GetTranslationGeneration();
 		const u32 status_key = cpuRegs.CP0.n.Status.val & 0x1e;
 		const u32 config_key = cpuRegs.CP0.n.Config & 0x7;
 		const u32 asid_key = cpuRegs.CP0.n.EntryHi & 0xff;
-		const u32 wired_key = cpuRegs.CP0.n.Wired;
 		const u32 first_virtual_page = startpc & ~vtlb_private::VTLB_PAGE_MASK;
 		const u32 last_address = startpc + (size - 1) * sizeof(u32);
 		const u32 last_virtual_page = last_address & ~vtlb_private::VTLB_PAGE_MASK;
@@ -2279,6 +2279,12 @@ static void memory_protect_recompiled_code(u32 startpc, u32 size)
 		for (u32 i = 0; i < protected_page_count; i++)
 		{
 			ProtectedFetchPage& page = protected_pages[i];
+			if (page.fetch.translation.matched_tlb_index >= 0)
+			{
+				const size_t tlb_index = static_cast<size_t>(page.fetch.translation.matched_tlb_index);
+				page.translation_generation_address = EEMmu::GetTLBEntryGenerationAddress(tlb_index);
+				page.translation_generation = *page.translation_generation_address;
+			}
 			if (page.fetch.translation.target == EEMmu::Target::Scratchpad)
 			{
 				page.write_generation_address = EEMemory::GetScratchpadWriteGenerationAddress();
@@ -2296,9 +2302,9 @@ static void memory_protect_recompiled_code(u32 startpc, u32 size)
 			page.write_generation = *page.write_generation_address;
 		}
 
-		// Avoid a runtime TLB lookup at every block entry. TLB writes advance the mapping
-		// generation, while the small execution-context key permits user blocks to survive
-		// an interrupt/ERET round trip. This needs proper testing with unusual context changes.
+		// Avoid a runtime TLB lookup at every block entry. Each translated fetch page watches
+		// only the TLB entry which supplied it, so unrelated TLBWI/TLBWR operations leave this
+		// block alive. The context key still catches privilege, ASID, and direct-segment changes.
 		xMOV(eax, ptr32[&cpuRegs.CP0.n.Status.val]);
 		xAND(eax, 0x1e);
 		xCMP(eax, status_key);
@@ -2311,19 +2317,29 @@ static void memory_protect_recompiled_code(u32 startpc, u32 size)
 		xAND(eax, 0xff);
 		xCMP(eax, asid_key);
 		xForwardJNE8 mapping_changed_asid;
-		xCMP(ptr32[EEMmu::GetTranslationGenerationAddress()], translation_generation);
-		xForwardJNE8 mapping_changed_generation;
-		xCMP(ptr32[&cpuRegs.CP0.n.Wired], wired_key);
-		xForwardJE8 mapping_matches;
+		xForwardJump8 mapping_context_matches;
 
 		mapping_changed_status.SetTarget();
 		mapping_changed_config.SetTarget();
 		mapping_changed_asid.SetTarget();
-		mapping_changed_generation.SetTarget();
 		xMOV(arg1regd, startpc);
 		xMOV(arg2regd, size);
 		xJMP(DispatchBlockDiscard);
-		mapping_matches.SetTarget();
+		mapping_context_matches.SetTarget();
+
+		for (u32 i = 0; i < protected_page_count; i++)
+		{
+			const ProtectedFetchPage& page = protected_pages[i];
+			if (!page.translation_generation_address)
+				continue;
+
+			xCMP(ptr32[page.translation_generation_address], page.translation_generation);
+			xForwardJE8 mapping_entry_unchanged;
+			xMOV(arg1regd, startpc);
+			xMOV(arg2regd, size);
+			xJMP(DispatchBlockDiscard);
+			mapping_entry_unchanged.SetTarget();
+		}
 
 		// All Full TLB EE writes advance a physical-page generation. DMA and external writers
 		// already call Cpu::Clear(). Check both pages when a cross-page delay slot is present.

@@ -142,8 +142,13 @@ namespace EEMmu
 	ProbeResult ProbeTLB(const tlbs* entries, size_t entry_count, u32 entry_hi);
 	u32 AdvanceRandom(u32 random, u32 wired, Warning* warnings = nullptr);
 
-	// Recompiler blocks use this to reject fetch translations compiled before a TLB write.
+	// The global generation is retained for diagnostics. Recompiler caches use the
+	// entry generations so an unrelated TLB write does not invalidate every mapping.
 	u32 GetTranslationGeneration();
 	const u32* GetTranslationGenerationAddress();
+	u32 GetTLBEntryGeneration(size_t index);
+	const u32* GetTLBEntryGenerationAddress(size_t index);
+	const u32* GetTLBEntryGenerationBase();
+	void InvalidateTLBEntry(size_t index);
 	void InvalidateTranslations();
 } // namespace EEMmu

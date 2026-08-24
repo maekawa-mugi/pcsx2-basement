@@ -18,6 +18,7 @@ namespace EEMemory
 	{
 		u32 virtual_page = 0xffffffff;
 		u32 translation_generation = 0;
+		u32 tlb_entry_index = RECOMPILER_TRANSLATION_NO_TLB_ENTRY;
 		u32 status_key = 0;
 		u8 config_key = 0;
 		u8 asid = 0;
@@ -369,7 +370,6 @@ namespace EEMemory
 
 		const u32 virtual_page = vaddr & ~vtlb_private::VTLB_PAGE_MASK;
 		const u32 page_offset = vaddr & vtlb_private::VTLB_PAGE_MASK;
-		const u32 translation_generation = EEMmu::GetTranslationGeneration();
 		const u32 status_key = cpuRegs.CP0.n.Status.val & 0x1e;
 		const u8 config_key = cpuRegs.CP0.n.Config & 0x7;
 		const u8 asid = static_cast<u8>(cpuRegs.CP0.n.EntryHi);
@@ -377,9 +377,12 @@ namespace EEMemory
 									   (static_cast<u32>(asid) << 1) ^ (static_cast<u32>(access_type) << 6)) &
 		                           (RECOMPILER_TRANSLATION_CACHE_SIZE - 1);
 		RecompilerTranslationCacheEntry& entry = s_recompiler_translation_cache[cache_index];
+		const bool generation_matches = entry.tlb_entry_index == RECOMPILER_TRANSLATION_NO_TLB_ENTRY ||
+		                                (entry.tlb_entry_index < EEMmu::TLB_ENTRY_COUNT &&
+											entry.translation_generation == EEMmu::GetTLBEntryGeneration(entry.tlb_entry_index));
 		if (entry.virtual_page == virtual_page &&
-			entry.translation_generation == translation_generation && entry.status_key == status_key &&
-			entry.config_key == config_key && entry.asid == asid && entry.access_type == access_type)
+			generation_matches && entry.status_key == status_key && entry.config_key == config_key &&
+			entry.asid == asid && entry.access_type == access_type)
 		{
 			EEMmu::TranslationResult result = entry.translation;
 			if (result.target == EEMmu::Target::Scratchpad)
@@ -395,7 +398,12 @@ namespace EEMemory
 		if (result.fault == EEMmu::Fault::None)
 		{
 			entry.virtual_page = virtual_page;
-			entry.translation_generation = translation_generation;
+			entry.tlb_entry_index = result.matched_tlb_index >= 0 ?
+			                            static_cast<u32>(result.matched_tlb_index) :
+			                            RECOMPILER_TRANSLATION_NO_TLB_ENTRY;
+			entry.translation_generation = entry.tlb_entry_index != RECOMPILER_TRANSLATION_NO_TLB_ENTRY ?
+			                                   EEMmu::GetTLBEntryGeneration(entry.tlb_entry_index) :
+			                                   0;
 			entry.status_key = status_key;
 			entry.config_key = config_key;
 			entry.asid = asid;
@@ -727,7 +735,12 @@ namespace EEMemory
 		entry.host_page = host_page;
 		entry.translation = packed_translation;
 		entry.context_key = GetRecompilerJitTranslationContextKey();
-		entry.translation_generation = EEMmu::GetTranslationGeneration();
+		entry.tlb_entry_index = translation.matched_tlb_index >= 0 ?
+		                            static_cast<u32>(translation.matched_tlb_index) :
+		                            RECOMPILER_TRANSLATION_NO_TLB_ENTRY;
+		entry.translation_generation = entry.tlb_entry_index != RECOMPILER_TRANSLATION_NO_TLB_ENTRY ?
+		                                   EEMmu::GetTLBEntryGeneration(entry.tlb_entry_index) :
+		                                   0;
 		entry.virtual_page = virtual_page;
 		return packed_translation;
 	}

@@ -10,6 +10,7 @@
 namespace EEMemory
 {
 	static constexpr u32 RECOMPILER_TRANSLATION_CACHE_SIZE = 64;
+	static constexpr u32 RECOMPILER_TRANSLATION_NO_TLB_ENTRY = 0xffffffffU;
 	static constexpr u32 RECOMPILER_TRANSLATION_SCRATCHPAD = 1U << 0;
 	static constexpr u32 RECOMPILER_TRANSLATION_NO_ACCESS = 1U << 1;
 	static constexpr u32 RECOMPILER_TRANSLATION_CACHE_MODE_SHIFT = 8;
@@ -20,7 +21,7 @@ namespace EEMemory
 		u32 virtual_page = 0xffffffff;
 		u32 translation_generation = 0;
 		u32 context_key = 0;
-		u32 reserved = 0;
+		u32 tlb_entry_index = RECOMPILER_TRANSLATION_NO_TLB_ENTRY;
 		u64 translation = 0;
 		u64 host_page = 0;
 	};

@@ -4,10 +4,16 @@
 #include "EEMmu.h"
 
 #include <algorithm>
+#include <array>
 
 namespace EEMmu
 {
 	static u32 s_translation_generation = 1;
+	static std::array<u32, TLB_ENTRY_COUNT> s_tlb_entry_generations = []() {
+		std::array<u32, TLB_ENTRY_COUNT> generations;
+		generations.fill(1);
+		return generations;
+	}();
 
 	static constexpr u32 STATUS_KSU_MASK = 0x18;
 	static constexpr u32 STATUS_ERL = 0x04;
@@ -398,10 +404,38 @@ namespace EEMmu
 		return &s_translation_generation;
 	}
 
-	void InvalidateTranslations()
+	u32 GetTLBEntryGeneration(size_t index)
+	{
+		return s_tlb_entry_generations[index];
+	}
+
+	const u32* GetTLBEntryGenerationAddress(size_t index)
+	{
+		return &s_tlb_entry_generations[index];
+	}
+
+	const u32* GetTLBEntryGenerationBase()
+	{
+		return s_tlb_entry_generations.data();
+	}
+
+	static void AdvanceGeneration(u32& generation)
 	{
 		// Zero is not special, but avoiding it makes wraparound diagnostics less ambiguous.
-		if (++s_translation_generation == 0)
-			s_translation_generation = 1;
+		if (++generation == 0)
+			generation = 1;
+	}
+
+	void InvalidateTLBEntry(size_t index)
+	{
+		AdvanceGeneration(s_tlb_entry_generations[index]);
+		AdvanceGeneration(s_translation_generation);
+	}
+
+	void InvalidateTranslations()
+	{
+		for (u32& generation : s_tlb_entry_generations)
+			AdvanceGeneration(generation);
+		AdvanceGeneration(s_translation_generation);
 	}
 } // namespace EEMmu

@@ -340,12 +340,18 @@ static void DynGenFullTLBTranslate(const xRegister32& original_address, EEMmu::A
 	xCMP(ptr32[cache_entry + static_cast<sptr>(offsetof(EEMemory::RecompilerJitTranslationCacheEntry, virtual_page))],
 		arg1regd);
 	xForwardJNE32 cache_miss_page;
-	xCMP(ptr32[cache_entry + offsetof(EEMemory::RecompilerJitTranslationCacheEntry, translation_generation)],
-		EEMmu::GetTranslationGeneration());
-	xForwardJNE32 cache_miss_generation;
 	xCMP(ptr32[cache_entry + offsetof(EEMemory::RecompilerJitTranslationCacheEntry, context_key)],
 		EEMemory::GetRecompilerJitTranslationContextKey());
 	xForwardJNE32 cache_miss_context;
+	xMOV(arg1regd, ptr32[cache_entry + offsetof(EEMemory::RecompilerJitTranslationCacheEntry, tlb_entry_index)]);
+	xCMP(arg1regd, EEMemory::RECOMPILER_TRANSLATION_NO_TLB_ENTRY);
+	xForwardJE8 cache_generation_matches;
+	xMOV(xRegister32(arg4reg.GetId()),
+		ptr32[xComplexAddress(arg2reg, const_cast<u32*>(EEMmu::GetTLBEntryGenerationBase()), arg1reg * 4)]);
+	xCMP(xRegister32(arg4reg.GetId()),
+		ptr32[cache_entry + offsetof(EEMemory::RecompilerJitTranslationCacheEntry, translation_generation)]);
+	xForwardJNE32 cache_miss_generation;
+	cache_generation_matches.SetTarget();
 	xMOV(arg4reg, ptr64[cache_entry + offsetof(EEMemory::RecompilerJitTranslationCacheEntry, host_page)]);
 	xMOV(rax, ptr64[cache_entry + offsetof(EEMemory::RecompilerJitTranslationCacheEntry, translation)]);
 	xForwardJump32 translation_ready;
