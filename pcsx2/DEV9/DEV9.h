@@ -75,7 +75,8 @@ typedef struct
 	u8 fifo[16 * 512];
 
 	// DMA
-	u8* dma_iop_ptr;
+	u32 dma_iop_addr;
+	bool dma_iop_active;
 	int dma_iop_transfered;
 	int dma_iop_size;
 } dev9Struct;
@@ -680,8 +681,8 @@ void _DEV9irq(int cause, int cycles);
 int DEV9irqHandler(void);
 void DEV9async(u32 cycles);
 void DEV9runFIFO();
-void DEV9writeDMA8Mem(u32* pMem, int size);
-void DEV9readDMA8Mem(u32* pMem, int size);
+void DEV9writeDMA8Mem(u32 madr, int size);
+void DEV9readDMA8Mem(u32 madr, int size);
 u8 DEV9read8(u32 addr);
 u16 DEV9read16(u32 addr);
 u32 DEV9read32(u32 addr);

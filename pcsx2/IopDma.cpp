@@ -12,6 +12,8 @@
 #include "Sif.h"
 #include "DEV9/DEV9.h"
 
+#include <limits>
+
 using namespace R3000A;
 
 // Dma0/1   in Mdec.c
@@ -151,18 +153,27 @@ void psxDma6(u32 madr, u32 bcr, u32 chcr)
 
 void psxDma8(u32 madr, u32 bcr, u32 chcr)
 {
-	const int size = (bcr >> 16) * (bcr & 0xFFFF) * 8;
+	// DEV9 consumes bytes. Calculate without signed overflow, since a wrapped negative
+	// length is converted to a huge size_t by memcpy.
+	const u64 size64 = static_cast<u64>(bcr >> 16) * static_cast<u64>(bcr & 0xFFFF) * sizeof(u32);
+	if (size64 > static_cast<u64>(std::numeric_limits<int>::max()))
+	{
+		Console.Error("DEV9: DMA8 transfer is too large: %llu bytes", static_cast<unsigned long long>(size64));
+		psxDMA8Interrupt();
+		return;
+	}
+	const int size = static_cast<int>(size64);
 
 	switch (chcr & 0x01000201)
 	{
 		case 0x01000201: //cpu to dev9 transfer
 			PSXDMA_LOG("*** DMA 8 - DEV9 mem2dev9 *** %lx addr = %lx size = %lx", chcr, madr, bcr);
-			DEV9writeDMA8Mem((u32*)iopPhysMem(madr), size);
+			DEV9writeDMA8Mem(madr, size);
 			break;
 
 		case 0x01000200: //dev9 to cpu transfer
 			PSXDMA_LOG("*** DMA 8 - DEV9 dev9mem *** %lx addr = %lx size = %lx", chcr, madr, bcr);
-			DEV9readDMA8Mem((u32*)iopPhysMem(madr), size);
+			DEV9readDMA8Mem(madr, size);
 			break;
 
 		default:

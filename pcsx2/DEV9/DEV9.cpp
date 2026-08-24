@@ -6,6 +6,7 @@
 #include "common/StringUtil.h"
 
 #include "IopDma.h"
+#include "IopMem.h"
 
 #ifdef _WIN32
 #include "common/RedtapeWindows.h"
@@ -216,7 +217,7 @@ void DEV9close()
 {
 	DevCon.WriteLn("DEV9: DEV9close");
 
-	dev9.dma_iop_ptr = nullptr;
+	dev9.dma_iop_active = false;
 	dev9.ata->Close();
 	TermNet();
 	isRunning = false;
@@ -295,9 +296,36 @@ void HDDReadFIFO()
 
 	dev9.fifo_bytes_read += write;
 }
+
+static void CopyToIOPRAM(u32 address, const u8* source, int length)
+{
+	while (length > 0)
+	{
+		const u32 offset = address & (Ps2MemSize::ExposedIopRam - 1);
+		const int chunk = std::min(length, static_cast<int>(Ps2MemSize::ExposedIopRam - offset));
+		std::memcpy(iopPhysMem(offset), source, chunk);
+		address += static_cast<u32>(chunk);
+		source += chunk;
+		length -= chunk;
+	}
+}
+
+static void CopyFromIOPRAM(u8* destination, u32 address, int length)
+{
+	while (length > 0)
+	{
+		const u32 offset = address & (Ps2MemSize::ExposedIopRam - 1);
+		const int chunk = std::min(length, static_cast<int>(Ps2MemSize::ExposedIopRam - offset));
+		std::memcpy(destination, iopPhysMem(offset), chunk);
+		destination += chunk;
+		address += static_cast<u32>(chunk);
+		length -= chunk;
+	}
+}
+
 void IOPReadFIFO()
 {
-	pxAssert((dev9.dma_iop_ptr != nullptr) && (dev9.xfr_ctrl & SPD_XFR_DMAEN));
+	pxAssert(dev9.dma_iop_active && (dev9.xfr_ctrl & SPD_XFR_DMAEN));
 	pxAssert((dev9.xfr_ctrl & SPD_XFR_WRITE) == 0);
 
 	const int unread = (dev9.fifo_bytes_write - dev9.fifo_bytes_read);
@@ -315,12 +343,12 @@ void IOPReadFIFO()
 	{
 		const int was = SPD_DBUF_AVAIL_MAX * 512 - base;
 
-		std::memcpy(dev9.dma_iop_ptr + dev9.dma_iop_transfered, dev9.fifo + base, was);
-		std::memcpy(dev9.dma_iop_ptr + dev9.dma_iop_transfered + was, dev9.fifo, read - was);
+		CopyToIOPRAM(dev9.dma_iop_addr + static_cast<u32>(dev9.dma_iop_transfered), dev9.fifo + base, was);
+		CopyToIOPRAM(dev9.dma_iop_addr + static_cast<u32>(dev9.dma_iop_transfered + was), dev9.fifo, read - was);
 	}
 	else
 	{
-		std::memcpy(dev9.dma_iop_ptr + dev9.dma_iop_transfered, dev9.fifo + base, read);
+		CopyToIOPRAM(dev9.dma_iop_addr + static_cast<u32>(dev9.dma_iop_transfered), dev9.fifo + base, read);
 	}
 
 	dev9.dma_iop_transfered += read;
@@ -330,7 +358,7 @@ void IOPReadFIFO()
 }
 void IOPWriteFIFO()
 {
-	pxAssert((dev9.dma_iop_ptr != nullptr) && (dev9.xfr_ctrl & SPD_XFR_DMAEN));
+	pxAssert(dev9.dma_iop_active && (dev9.xfr_ctrl & SPD_XFR_DMAEN));
 	pxAssert(dev9.xfr_ctrl & SPD_XFR_WRITE);
 
 	const int unread = (dev9.fifo_bytes_write - dev9.fifo_bytes_read);
@@ -349,12 +377,12 @@ void IOPWriteFIFO()
 	{
 		const int was = SPD_DBUF_AVAIL_MAX * 512 - base;
 
-		std::memcpy(dev9.fifo + base, dev9.dma_iop_ptr + dev9.dma_iop_transfered, was);
-		std::memcpy(dev9.fifo + base, dev9.dma_iop_ptr + dev9.dma_iop_transfered + was, write - was);
+		CopyFromIOPRAM(dev9.fifo + base, dev9.dma_iop_addr + static_cast<u32>(dev9.dma_iop_transfered), was);
+		CopyFromIOPRAM(dev9.fifo, dev9.dma_iop_addr + static_cast<u32>(dev9.dma_iop_transfered + was), write - was);
 	}
 	else
 	{
-		std::memcpy(dev9.fifo + base, dev9.dma_iop_ptr + dev9.dma_iop_transfered, write);
+		CopyFromIOPRAM(dev9.fifo + base, dev9.dma_iop_addr + static_cast<u32>(dev9.dma_iop_transfered), write);
 	}
 
 	dev9.dma_iop_transfered += write;
@@ -391,10 +419,10 @@ void FIFOIntr()
 	}
 
 	// is DMA finished
-	if ((dev9.dma_iop_ptr != nullptr) &&
+	if (dev9.dma_iop_active &&
 		(dev9.dma_iop_transfered == dev9.dma_iop_size))
 	{
-		dev9.dma_iop_ptr = nullptr;
+		dev9.dma_iop_active = false;
 		psxDMA8Interrupt();
 	}
 }
@@ -406,7 +434,7 @@ void DEV9runFIFO()
 	const bool iopWrite = dev9.xfr_ctrl & SPD_XFR_WRITE; // IOP writes to FIFO
 	const bool hddRead = dev9.if_ctrl & SPD_IF_READ; // HDD writes to FIFO
 
-	const bool iopXfer = (dev9.dma_iop_ptr != nullptr) && (dev9.xfr_ctrl & SPD_XFR_DMAEN);
+	const bool iopXfer = dev9.dma_iop_active && (dev9.xfr_ctrl & SPD_XFR_DMAEN);
 	const bool hddXfer = dev9.ata->dmaReady && (dev9.if_ctrl & SPD_IF_ATA_DMAEN);
 
 	// Order operations based on iopWrite to ensure DMA has data/space to work with.
@@ -468,7 +496,7 @@ static void DEV9runFIFOUntilStalled()
 			dev9.fifo_bytes_write -= completed_laps * fifo_size;
 		}
 
-		if (dev9.dma_iop_ptr == nullptr)
+		if (!dev9.dma_iop_active)
 			return;
 
 		if (dev9.dma_iop_transfered == transferred_before &&
@@ -791,10 +819,9 @@ void SpeedWrite(u32 addr, u16 value, int width)
 			//else
 			//	DevCon.WriteLn("DEV9: IF_CTRL Wait for ATA register read Disabled");
 
-			if (value & (1 << 4))
-				Console.Error("DEV9: IF_CTRL Unknown Bit 4 Set");
-			if (value & (1 << 5))
-				Console.Error("DEV9: IF_CTRL Unknown Bit 5 Set");
+			// PS2 Linux sets bits 4 and 5 frequently while polling the interface. Their
+			// hardware timing effects need proper testing, but preserving them in if_ctrl
+			// without logging avoids turning the poll loop into synchronous disk I/O.
 
 			if ((value & SPD_IF_HDD_RESET) == 0) //Maybe?
 			{
@@ -1109,18 +1136,16 @@ void DEV9write32(u32 addr, u32 value)
 	}
 }
 
-void DEV9readDMA8Mem(u32* pMem, int size)
+void DEV9readDMA8Mem(u32 madr, int size)
 {
 	if (!IsDEV9Enabled())
 		return;
-
-	size >>= 1;
 
 	DevCon.WriteLn("DEV9: *DEV9readDMA8Mem: size %x", size);
 
 	if (dev9.dma_ctrl & SPD_DMA_TO_SMAP)
 	{
-		smap_readDMA8Mem(pMem, size);
+		smap_readDMA8Mem(reinterpret_cast<u32*>(iopPhysMem(madr)), size);
 		psxDMA8Interrupt();
 	}
 	else
@@ -1129,7 +1154,8 @@ void DEV9readDMA8Mem(u32* pMem, int size)
 		{
 			const bool stream_large_dma = EmuConfig.Cpu.EnableExperimentalEETLB && size > SPD_DBUF_AVAIL_MAX * 512;
 			pxAssert(stream_large_dma || size <= SPD_DBUF_AVAIL_MAX * 512);
-			dev9.dma_iop_ptr = reinterpret_cast<u8*>(pMem);
+			dev9.dma_iop_addr = madr;
+			dev9.dma_iop_active = true;
 			dev9.dma_iop_size = size;
 			dev9.dma_iop_transfered = 0;
 
@@ -1148,18 +1174,16 @@ void DEV9readDMA8Mem(u32* pMem, int size)
 	//TODO, track if read was successful
 }
 
-void DEV9writeDMA8Mem(u32* pMem, int size)
+void DEV9writeDMA8Mem(u32 madr, int size)
 {
 	if (!IsDEV9Enabled())
 		return;
-
-	size >>= 1;
 
 	DevCon.WriteLn("DEV9: *DEV9writeDMA8Mem: size %x", size);
 
 	if (dev9.dma_ctrl & SPD_DMA_TO_SMAP)
 	{
-		smap_writeDMA8Mem(pMem, size);
+		smap_writeDMA8Mem(reinterpret_cast<u32*>(iopPhysMem(madr)), size);
 		psxDMA8Interrupt();
 	}
 	else
@@ -1168,7 +1192,8 @@ void DEV9writeDMA8Mem(u32* pMem, int size)
 		{
 			const bool stream_large_dma = EmuConfig.Cpu.EnableExperimentalEETLB && size > SPD_DBUF_AVAIL_MAX * 512;
 			pxAssert(stream_large_dma || size <= SPD_DBUF_AVAIL_MAX * 512);
-			dev9.dma_iop_ptr = reinterpret_cast<u8*>(pMem);
+			dev9.dma_iop_addr = madr;
+			dev9.dma_iop_active = true;
 			dev9.dma_iop_size = size;
 			dev9.dma_iop_transfered = 0;
 
