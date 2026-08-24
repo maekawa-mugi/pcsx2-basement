@@ -434,6 +434,38 @@ void DEV9runFIFO()
 	FIFOIntr();
 }
 
+static void DEV9runFIFOUntilStalled()
+{
+	for (;;)
+	{
+		const int transferred_before = dev9.dma_iop_transfered;
+		const int fifo_read_before = dev9.fifo_bytes_read;
+		const int fifo_write_before = dev9.fifo_bytes_write;
+
+		DEV9runFIFO();
+
+		// The guest normally resets these positions between small DMA requests. Large streamed
+		// requests must fold completed FIFO laps here to avoid overflowing their signed counters.
+		constexpr int fifo_size = SPD_DBUF_AVAIL_MAX * 512;
+		const int completed_laps = std::min(dev9.fifo_bytes_read, dev9.fifo_bytes_write) / fifo_size;
+		if (completed_laps > 0)
+		{
+			dev9.fifo_bytes_read -= completed_laps * fifo_size;
+			dev9.fifo_bytes_write -= completed_laps * fifo_size;
+		}
+
+		if (dev9.dma_iop_ptr == nullptr)
+			return;
+
+		if (dev9.dma_iop_transfered == transferred_before &&
+			dev9.fifo_bytes_read == fifo_read_before &&
+			dev9.fifo_bytes_write == fifo_write_before)
+		{
+			return;
+		}
+	}
+}
+
 u16 SpeedRead(u32 addr, int width)
 {
 	u16 hard = 0;
@@ -1081,12 +1113,21 @@ void DEV9readDMA8Mem(u32* pMem, int size)
 	{
 		if (!(dev9.xfr_ctrl & SPD_XFR_WRITE))
 		{
-			pxAssert(size <= SPD_DBUF_AVAIL_MAX * 512);
+			const bool stream_large_dma = EmuConfig.Cpu.EnableExperimentalEETLB && size > SPD_DBUF_AVAIL_MAX * 512;
+			pxAssert(stream_large_dma || size <= SPD_DBUF_AVAIL_MAX * 512);
 			dev9.dma_iop_ptr = reinterpret_cast<u8*>(pMem);
 			dev9.dma_iop_size = size;
 			dev9.dma_iop_transfered = 0;
 
-			DEV9runFIFO();
+			if (stream_large_dma)
+			{
+				// PS2 Linux submits transfers larger than SPEED's 8 KiB FIFO; this needs proper timing testing.
+				DEV9runFIFOUntilStalled();
+			}
+			else
+			{
+				DEV9runFIFO();
+			}
 		}
 	}
 
@@ -1111,12 +1152,21 @@ void DEV9writeDMA8Mem(u32* pMem, int size)
 	{
 		if (dev9.xfr_ctrl & SPD_XFR_WRITE)
 		{
-			pxAssert(size <= SPD_DBUF_AVAIL_MAX * 512);
+			const bool stream_large_dma = EmuConfig.Cpu.EnableExperimentalEETLB && size > SPD_DBUF_AVAIL_MAX * 512;
+			pxAssert(stream_large_dma || size <= SPD_DBUF_AVAIL_MAX * 512);
 			dev9.dma_iop_ptr = reinterpret_cast<u8*>(pMem);
 			dev9.dma_iop_size = size;
 			dev9.dma_iop_transfered = 0;
 
-			DEV9runFIFO();
+			if (stream_large_dma)
+			{
+				// PS2 Linux submits transfers larger than SPEED's 8 KiB FIFO; this needs proper timing testing.
+				DEV9runFIFOUntilStalled();
+			}
+			else
+			{
+				DEV9runFIFO();
+			}
 		}
 	}
 }
