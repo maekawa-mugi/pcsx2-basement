@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Common.h"
+#include "EEMemory.h"
+#include "EEMmu.h"
 
 #include "common/StringUtil.h"
 #include "ps2/BiosTools.h"
@@ -29,16 +31,16 @@
 
 #include "fmt/format.h"
 
-using namespace R5900;	// for R5900 disasm tools
+using namespace R5900; // for R5900 disasm tools
 
-s32 EEsCycle;		// used to sync the IOP to the EE
+s32 EEsCycle; // used to sync the IOP to the EE
 u64 EEoCycle;
 
 alignas(16) cpuRegistersPack _cpuRegistersPack;
 alignas(16) tlbs tlb[48];
 cachedTlbs_t cachedTlbs;
 
-R5900cpu *Cpu = NULL;
+R5900cpu* Cpu = NULL;
 
 static constexpr uint eeWaitCycles = 3072;
 
@@ -58,17 +60,24 @@ uptr g_argPtrs[kMaxArgs];
 
 void cpuReset()
 {
+	EEMemory::ResetFullTLBDiagnosticTrace();
 	std::memset(&cpuRegs, 0, sizeof(cpuRegs));
 	std::memset(&fpuRegs, 0, sizeof(fpuRegs));
 	std::memset(&tlb, 0, sizeof(tlb));
 	cachedTlbs.count = 0;
 
-	cpuRegs.pc				= 0xbfc00000; //set pc reg to stack
-	cpuRegs.CP0.n.Config	= 0x440;
-	cpuRegs.CP0.n.Status.val= 0x70400004; //0x10900000 <-- wrong; // COP0 enabled | BEV = 1 | TS = 1
-	cpuRegs.CP0.n.PRid		= 0x00002e20; // PRevID = Revision ID, same as R5900
-	fpuRegs.fprc[0]			= 0x00002e30; // fpu Revision..
-	fpuRegs.fprc[31]		= 0x01000001; // fpu Status/Control
+	cpuRegs.pc = 0xbfc00000; //set pc reg to stack
+	cpuRegs.CP0.n.Config = 0x440;
+	cpuRegs.CP0.n.Status.val = 0x70400004; //0x10900000 <-- wrong; // COP0 enabled | BEV = 1 | TS = 1
+	cpuRegs.CP0.n.PRid = 0x00002e20; // PRevID = Revision ID, same as R5900
+	fpuRegs.fprc[0] = 0x00002e30; // fpu Revision..
+	fpuRegs.fprc[31] = 0x01000001; // fpu Status/Control
+	if (EmuConfig.Cpu.EnableExperimentalEETLB)
+	{
+		cpuRegs.CP0.n.Random = 47;
+		cpuRegs.CP0.n.Wired = 0;
+		EEMmu::InvalidateTranslations();
+	}
 
 	cpuRegs.nextEventCycle = cpuRegs.cycle + 4;
 	EEsCycle = 0;
@@ -77,7 +86,7 @@ void cpuReset()
 	psxReset();
 	pgifInit();
 
-	extern void Deci2Reset();		// lazy, no good header for it yet.
+	extern void Deci2Reset(); // lazy, no good header for it yet.
 	Deci2Reset();
 
 	AllowParams1 = !VMManager::Internal::IsFastBootInProgress();
@@ -91,15 +100,69 @@ void cpuReset()
 	CBreakPoints::ClearSkipFirst();
 }
 
+void cpuEESynchronousException(u32 cause_code, u32 fault_pc, bool branch_delay)
+{
+	const EEMmu::ExceptionRegisters registers = {
+		cpuRegs.CP0.n.Status.val,
+		cpuRegs.CP0.n.Cause,
+		cpuRegs.CP0.n.EPC,
+		cpuRegs.CP0.n.BadVAddr,
+		cpuRegs.CP0.n.Context,
+		cpuRegs.CP0.n.EntryHi,
+	};
+	const bool capture_user_exception = EmuConfig.Cpu.EnableExperimentalEETLB &&
+	                                    EmuConfig.Cpu.EnableFullTLBDiagnosticTrace &&
+	                                    EEMmu::IsUserMode(registers.status);
+	const u64 trace_cycle = cpuRegs.cycle;
+	const u32 trace_instruction = cpuRegs.code;
+	const u32 trace_sp = cpuRegs.GPR.n.sp.UL[0];
+	const u32 trace_ra = cpuRegs.GPR.n.ra.UL[0];
+
+	const EEMmu::ExceptionResult result =
+		EEMmu::BuildSynchronousException(registers, cause_code, fault_pc, branch_delay);
+	cpuRegs.CP0.n.Status.val = result.registers.status;
+	cpuRegs.CP0.n.Cause = result.registers.cause;
+	cpuRegs.CP0.n.EPC = result.registers.epc;
+	cpuRegs.CP0.n.BadVAddr = result.registers.bad_vaddr;
+	cpuRegs.CP0.n.Context = result.registers.context;
+	cpuRegs.CP0.n.EntryHi = result.registers.entry_hi;
+	cpuRegs.pc = result.vector;
+	cpuRegs.branch = 0;
+	cpuUpdateOperationMode();
+
+	if (capture_user_exception)
+	{
+		EEMemory::RecordFullTLBUserException(cause_code, branch_delay, trace_cycle,
+			fault_pc, trace_instruction, trace_sp, trace_ra, registers);
+	}
+}
+
 __ri void cpuException(u32 code, u32 bd)
 {
+	const bool capture_user_exception = EmuConfig.Cpu.EnableExperimentalEETLB &&
+	                                    EmuConfig.Cpu.EnableFullTLBDiagnosticTrace &&
+	                                    EEMmu::IsUserMode(cpuRegs.CP0.n.Status.val) &&
+	                                    (code & 0x7c) != 0; // Exclude periodic interrupts from the bounded trace.
+	const EEMmu::ExceptionRegisters trace_registers = {
+		cpuRegs.CP0.n.Status.val,
+		cpuRegs.CP0.n.Cause,
+		cpuRegs.CP0.n.EPC,
+		cpuRegs.CP0.n.BadVAddr,
+		cpuRegs.CP0.n.Context,
+		cpuRegs.CP0.n.EntryHi,
+	};
+	const u64 trace_cycle = cpuRegs.cycle;
+	const u32 trace_pc = cpuRegs.pc;
+	const u32 trace_instruction = cpuRegs.code;
+	const u32 trace_sp = cpuRegs.GPR.n.sp.UL[0];
+	const u32 trace_ra = cpuRegs.GPR.n.ra.UL[0];
 	bool errLevel2, checkStatus;
 	u32 offset = 0;
 
-    cpuRegs.branch = 0;		// Tells the interpreter that an exception occurred during a branch.
+	cpuRegs.branch = 0; // Tells the interpreter that an exception occurred during a branch.
 	cpuRegs.CP0.n.Cause = code & 0xffff;
 
-	if(cpuRegs.CP0.n.Status.b.ERL == 0)
+	if (cpuRegs.CP0.n.Status.b.ERL == 0)
 	{
 		//Error Level 0-1
 		errLevel2 = false;
@@ -119,12 +182,14 @@ __ri void cpuException(u32 code, u32 bd)
 		checkStatus = (cpuRegs.CP0.n.Status.b.DEV == 0); // for perf/debug exceptions
 
 		Console.Error("*PCSX2* FIX ME: Level 2 cpuException");
-		if ((code & 0x38000) <= 0x8000 )
+		if ((code & 0x38000) <= 0x8000)
 		{
 			//Reset / NMI
 			cpuRegs.pc = 0xBFC00000;
 			Console.Warning("Reset request");
 			cpuUpdateOperationMode();
+			if (EmuConfig.Cpu.EnableExperimentalEETLB && Cpu == &recCpu)
+				Cpu->Reset();
 			return;
 		}
 		else if ((code & 0x38000) == 0x10000)
@@ -153,7 +218,8 @@ __ri void cpuException(u32 code, u32 bd)
 	else
 	{
 		offset = 0x180; //Override the cause
-		if (errLevel2) Console.Warning("cpuException: Status.EXL = 1 cause %x", code);
+		if (errLevel2)
+			Console.Warning("cpuException: Status.EXL = 1 cause %x", code);
 	}
 
 	if (checkStatus)
@@ -162,14 +228,48 @@ __ri void cpuException(u32 code, u32 bd)
 		cpuRegs.pc = 0xBFC00200 + offset;
 
 	cpuUpdateOperationMode();
+	if (capture_user_exception)
+	{
+		EEMemory::RecordFullTLBUserException(code, bd != 0, trace_cycle, trace_pc,
+			trace_instruction, trace_sp, trace_ra, trace_registers);
+	}
+}
+
+bool cpuEETlbException(
+	EEMmu::Fault fault, EEMmu::AccessType access_type, u32 vaddr, u32 fault_pc, bool branch_delay)
+{
+	const EEMmu::ExceptionRegisters registers = {
+		cpuRegs.CP0.n.Status.val,
+		cpuRegs.CP0.n.Cause,
+		cpuRegs.CP0.n.EPC,
+		cpuRegs.CP0.n.BadVAddr,
+		cpuRegs.CP0.n.Context,
+		cpuRegs.CP0.n.EntryHi,
+	};
+	const EEMmu::ExceptionResult result =
+		EEMmu::BuildException(registers, {fault, access_type, vaddr, fault_pc, branch_delay});
+	if (!result.taken)
+		return false;
+
+	cpuRegs.CP0.n.Status.val = result.registers.status;
+	cpuRegs.CP0.n.Cause = result.registers.cause;
+	cpuRegs.CP0.n.EPC = result.registers.epc;
+	cpuRegs.CP0.n.BadVAddr = result.registers.bad_vaddr;
+	cpuRegs.CP0.n.Context = result.registers.context;
+	cpuRegs.CP0.n.EntryHi = result.registers.entry_hi;
+	cpuRegs.pc = result.vector;
+	cpuRegs.branch = 0;
+	cpuUpdateOperationMode();
+	return true;
 }
 
 void cpuTlbMiss(u32 addr, u32 bd, u32 excode)
 {
 	// Avoid too much spamming on the interpreter
-	if (Cpu != &intCpu || IsDebugBuild) {
+	if (Cpu != &intCpu || IsDebugBuild)
+	{
 		Console.Error("cpuTlbMiss pc:%x, cycl:%llx, addr: %x, status=%x, code=%x",
-				cpuRegs.pc, cpuRegs.cycle, addr, cpuRegs.CP0.n.Status.val, excode);
+			cpuRegs.pc, cpuRegs.cycle, addr, cpuRegs.CP0.n.Status.val, excode);
 	}
 
 	cpuRegs.CP0.n.BadVAddr = addr;
@@ -181,47 +281,48 @@ void cpuTlbMiss(u32 addr, u32 bd, u32 excode)
 	cpuException(excode, bd);
 }
 
-void cpuTlbMissR(u32 addr, u32 bd) {
+void cpuTlbMissR(u32 addr, u32 bd)
+{
 	cpuTlbMiss(addr, bd, EXC_CODE_TLBL);
 }
 
-void cpuTlbMissW(u32 addr, u32 bd) {
+void cpuTlbMissW(u32 addr, u32 bd)
+{
 	cpuTlbMiss(addr, bd, EXC_CODE_TLBS);
 }
 
 // sets a branch test to occur some time from an arbitrary starting point.
-__fi void cpuSetNextEvent( u64 startCycle, s32 delta )
+__fi void cpuSetNextEvent(u64 startCycle, s32 delta)
 {
 	// typecast the conditional to signed so that things don't blow up
 	// if startCycle is greater than our next branch cycle.
 
-	if( (int)(cpuRegs.nextEventCycle - startCycle) > delta )
+	if ((int)(cpuRegs.nextEventCycle - startCycle) > delta)
 	{
 		cpuRegs.nextEventCycle = startCycle + delta;
 	}
 }
 
 // sets a branch to occur some time from the current cycle
-__fi void cpuSetNextEventDelta( s32 delta )
+__fi void cpuSetNextEventDelta(s32 delta)
 {
-	cpuSetNextEvent( cpuRegs.cycle, delta );
+	cpuSetNextEvent(cpuRegs.cycle, delta);
 }
 
 __fi int cpuGetCycles(int interrupt)
 {
-	if(interrupt == VU_MTVU_BUSY && (!THREAD_VU1 || INSTANT_VU1))
+	if (interrupt == VU_MTVU_BUSY && (!THREAD_VU1 || INSTANT_VU1))
 		return 1;
 	else
 	{
 		const int cycles = (cpuRegs.sCycle[interrupt] + cpuRegs.eCycle[interrupt]) - cpuRegs.cycle;
 		return std::max(1, cycles);
 	}
-
 }
 
 // tests the cpu cycle against the given start and delta values.
 // Returns true if the delta time has passed.
-__fi int cpuTestCycle( u64 startCycle, s32 delta )
+__fi int cpuTestCycle(u64 startCycle, s32 delta)
 {
 	// typecast the conditional to signed so that things don't explode
 	// if the startCycle is ahead of our current cpu cycle.
@@ -235,24 +336,25 @@ __fi void cpuSetEvent()
 	cpuRegs.nextEventCycle = cpuRegs.cycle;
 }
 
-__fi void cpuClearInt( uint i )
+__fi void cpuClearInt(uint i)
 {
-	pxAssume( i < 32 );
+	pxAssume(i < 32);
 	cpuRegs.interrupt &= ~(1 << i);
 	cpuRegs.dmastall &= ~(1 << i);
 }
 
-static __fi void TESTINT( u8 n, void (*callback)() )
+static __fi void TESTINT(u8 n, void (*callback)())
 {
-	if( !(cpuRegs.interrupt & (1 << n)) ) return;
+	if (!(cpuRegs.interrupt & (1 << n)))
+		return;
 
-	if(CHECK_INSTANTDMAHACK || cpuTestCycle( cpuRegs.sCycle[n], cpuRegs.eCycle[n] ) )
+	if (CHECK_INSTANTDMAHACK || cpuTestCycle(cpuRegs.sCycle[n], cpuRegs.eCycle[n]))
 	{
-		cpuClearInt( n );
+		cpuClearInt(n);
 		callback();
 	}
 	else
-		cpuSetNextEvent( cpuRegs.sCycle[n], cpuRegs.eCycle[n] );
+		cpuSetNextEvent(cpuRegs.sCycle[n], cpuRegs.eCycle[n]);
 }
 
 // [TODO] move this function to Dmac.cpp, and remove most of the DMAC-related headers from
@@ -260,7 +362,7 @@ static __fi void TESTINT( u8 n, void (*callback)() )
 static __fi bool _cpuTestInterrupts()
 {
 
-	if (!dmacRegs.ctrl.DMAE || (psHu8(DMAC_ENABLER+2) & 1))
+	if (!dmacRegs.ctrl.DMAE || (psHu8(DMAC_ENABLER + 2) & 1))
 	{
 		//Console.Write("DMAC Disabled or suspended");
 		return false;
@@ -281,9 +383,7 @@ static __fi bool _cpuTestInterrupts()
 		// The following ints are rarely called.  Encasing them in a conditional
 		// as follows helps speed up most games.
 
-		if (cpuRegs.interrupt & ((1 << DMAC_VIF0) | (1 << DMAC_FROM_IPU) | (1 << DMAC_TO_IPU)
-			| (1 << DMAC_FROM_SPR) | (1 << DMAC_TO_SPR) | (1 << DMAC_MFIFO_VIF) | (1 << DMAC_MFIFO_GIF)
-			| (1 << VIF_VU0_FINISH) | (1 << VIF_VU1_FINISH) | (1 << IPU_PROCESS)))
+		if (cpuRegs.interrupt & ((1 << DMAC_VIF0) | (1 << DMAC_FROM_IPU) | (1 << DMAC_TO_IPU) | (1 << DMAC_FROM_SPR) | (1 << DMAC_TO_SPR) | (1 << DMAC_MFIFO_VIF) | (1 << DMAC_MFIFO_GIF) | (1 << VIF_VU0_FINISH) | (1 << VIF_VU1_FINISH) | (1 << IPU_PROCESS)))
 		{
 			TESTINT(DMAC_VIF0, vif0Interrupt);
 
@@ -325,10 +425,10 @@ static __fi void _cpuTestTIMR()
 	// A proper fix would schedule the TIMR to trigger at a specific cycle anytime
 	// the Count or Compare registers are modified.
 
-	if ( (cpuRegs.CP0.n.Status.val & 0x8000) &&
-		cpuRegs.CP0.n.Count >= cpuRegs.CP0.n.Compare && cpuRegs.CP0.n.Count < cpuRegs.CP0.n.Compare+1000 )
+	if ((cpuRegs.CP0.n.Status.val & 0x8000) &&
+		cpuRegs.CP0.n.Count >= cpuRegs.CP0.n.Compare && cpuRegs.CP0.n.Count < cpuRegs.CP0.n.Compare + 1000)
 	{
-		Console.WriteLn( Color_Magenta, "timr intr: %x, %x", cpuRegs.CP0.n.Count, cpuRegs.CP0.n.Compare);
+		Console.WriteLn(Color_Magenta, "timr intr: %x, %x", cpuRegs.CP0.n.Count, cpuRegs.CP0.n.Compare);
 		cpuException(0x808000, cpuRegs.branch);
 	}
 }
@@ -353,7 +453,7 @@ static bool cpuIntsEnabled(int Interrupt)
 	bool IntType = !!(cpuRegs.CP0.n.Status.val & Interrupt); //Choose either INTC or DMAC, depending on what called it
 
 	return IntType && cpuRegs.CP0.n.Status.b.EIE && cpuRegs.CP0.n.Status.b.IE &&
-		!cpuRegs.CP0.n.Status.b.EXL && (cpuRegs.CP0.n.Status.b.ERL == 0);
+	       !cpuRegs.CP0.n.Status.b.EXL && (cpuRegs.CP0.n.Status.b.ERL == 0);
 }
 
 // Shared portion of the branch test, called from both the Interpreter
@@ -518,7 +618,7 @@ __fi void CPU_SET_DMASTALL(EE_EventType n, bool set)
 		cpuRegs.dmastall &= ~(1 << n);
 }
 
-__fi void CPU_INT( EE_EventType n, s32 ecycle)
+__fi void CPU_INT(EE_EventType n, s32 ecycle)
 {
 	// If it's retunning too quick, just rerun the DMA, there's no point in running the EE for < 4 cycles.
 	// This causes a huge uplift in performance for ONI FMV's.
@@ -563,10 +663,10 @@ int ParseArgumentString(u32 arg_block)
 
 	int argc = 0;
 	bool wasSpace = true; // status of last char. scanned
-	int args_len = strlen((char *)PSM(arg_block));
+	int args_len = strlen((char*)PSM(arg_block));
 	for (int i = 0; i < args_len; i++)
 	{
-		char curchar = *(char *)PSM(arg_block + i);
+		char curchar = *(char*)PSM(arg_block + i);
 		if (curchar == '\0')
 			break; // should never reach this
 
@@ -592,7 +692,7 @@ int ParseArgumentString(u32 arg_block)
 	// Check our args block
 	Console.WriteLn("ParseArgumentString: Saving these strings:");
 	for (int a = 0; a < argc; a++)
-		Console.WriteLn("%p -> '%s'.", g_argPtrs[a], (char *)PSM(g_argPtrs[a]));
+		Console.WriteLn("%p -> '%s'.", g_argPtrs[a], (char*)PSM(g_argPtrs[a]));
 #endif
 	return argc;
 }
@@ -609,7 +709,7 @@ void eeloadHook()
 			argc, memRead32(cpuRegs.GPR.n.a1.UD[0] - 4));
 		for (int a = 0; a < argc; a++)
 			Console.WriteLn("argv[%d]: %p -> %p -> '%s'", a, cpuRegs.GPR.n.a1.UL[0] + (a * 4),
-				memRead32(cpuRegs.GPR.n.a1.UD[0] + (a * 4)), (char *)PSM(memRead32(cpuRegs.GPR.n.a1.UD[0] + (a * 4))));
+				memRead32(cpuRegs.GPR.n.a1.UD[0] + (a * 4)), (char*)PSM(memRead32(cpuRegs.GPR.n.a1.UD[0] + (a * 4))));
 #endif
 		if (argc > 1)
 			elfname = (char*)PSM(memRead32(cpuRegs.GPR.n.a1.UD[0] + 4)); // argv[1] in OSDSYS's invocation "EELOAD <game ELF>"
@@ -621,7 +721,7 @@ void eeloadHook()
 		// then we add the desired launch arguments. PS2LOGO passes those on to the game itself as it calls EELOAD a third time.
 		if (!EmuConfig.CurrentGameArgs.empty() && elfname == "rom0:PS2LOGO")
 		{
-			const char *argString = EmuConfig.CurrentGameArgs.c_str();
+			const char* argString = EmuConfig.CurrentGameArgs.c_str();
 			Console.WriteLn("eeloadHook: Supplying launch argument(s) '%s' to module '%s'...", argString, elfname.c_str());
 
 			// Join all arguments by space characters so they can be processed as one string by ParseArgumentString(), then add the
@@ -631,13 +731,13 @@ void eeloadHook()
 			for (int a = 0; a < argc; a++)
 			{
 				arg_ptr = memRead32(cpuRegs.GPR.n.a1.UD[0] + (a * 4));
-				arg_len = strlen((char *)PSM(arg_ptr));
+				arg_len = strlen((char*)PSM(arg_ptr));
 				memset(PSM(arg_ptr + arg_len), 0x20, 1);
 			}
-			strcpy((char *)PSM(arg_ptr + arg_len + 1), EmuConfig.CurrentGameArgs.c_str());
+			strcpy((char*)PSM(arg_ptr + arg_len + 1), EmuConfig.CurrentGameArgs.c_str());
 			u32 first_arg_ptr = memRead32(cpuRegs.GPR.n.a1.UD[0]);
 #if DEBUG_LAUNCHARG
-			Console.WriteLn("eeloadHook: arg block is '%s'.", (char *)PSM(first_arg_ptr));
+			Console.WriteLn("eeloadHook: arg block is '%s'.", (char*)PSM(first_arg_ptr));
 #endif
 			argc = ParseArgumentString(first_arg_ptr);
 
@@ -650,7 +750,7 @@ void eeloadHook()
 			Console.WriteLn("eeloadHook: New arguments are:");
 			for (int a = 0; a < argc; a++)
 				Console.WriteLn("argv[%d]: %p -> '%s'", a, memRead32(cpuRegs.GPR.n.a1.UD[0] + (a * 4)),
-				(char *)PSM(memRead32(cpuRegs.GPR.n.a1.UD[0] + (a * 4))));
+					(char*)PSM(memRead32(cpuRegs.GPR.n.a1.UD[0] + (a * 4))));
 #endif
 		}
 		// else it's presumed that the invocation is "EELOAD <game ELF> <<launch args>>", coming from PS2LOGO, and we needn't do
@@ -739,16 +839,16 @@ void eeloadHook2()
 		return;
 	}
 
-	const char *argString = EmuConfig.CurrentGameArgs.c_str();
-	Console.WriteLn("eeloadHook2: Supplying launch argument(s) '%s' to ELF '%s'.", argString, (char *)PSM(g_osdsys_str));
+	const char* argString = EmuConfig.CurrentGameArgs.c_str();
+	Console.WriteLn("eeloadHook2: Supplying launch argument(s) '%s' to ELF '%s'.", argString, (char*)PSM(g_osdsys_str));
 
 	// Add args string after game's ELF name that was written over "rom0:OSDSYS" by eeloadHook(). In between the ELF name and args
 	// string we insert a space character so that ParseArgumentString() has one continuous string to process.
-	int game_len = strlen((char *)PSM(g_osdsys_str));
+	int game_len = strlen((char*)PSM(g_osdsys_str));
 	memset(PSM(g_osdsys_str + game_len), 0x20, 1);
-	strcpy((char *)PSM(g_osdsys_str + game_len + 1), EmuConfig.CurrentGameArgs.c_str());
+	strcpy((char*)PSM(g_osdsys_str + game_len + 1), EmuConfig.CurrentGameArgs.c_str());
 #if DEBUG_LAUNCHARG
-	Console.WriteLn("eeloadHook2: arg block is '%s'.", (char *)PSM(g_osdsys_str));
+	Console.WriteLn("eeloadHook2: arg block is '%s'.", (char*)PSM(g_osdsys_str));
 #endif
 	int argc = ParseArgumentString(g_osdsys_str);
 
@@ -772,7 +872,17 @@ void eeloadHook2()
 
 inline bool isBranchOrJump(u32 addr)
 {
-	u32 op = memRead32(addr);
+	u32 op;
+	if (EmuConfig.Cpu.EnableExperimentalEETLB)
+	{
+		// Debugger lookahead must not use the legacy VTLB or raise an exception before the real fetch.
+		if (!EEMemory::TryFetch32(addr, &op))
+			return false;
+	}
+	else
+	{
+		op = memRead32(addr);
+	}
 	const OPCODE& opcode = GetInstruction(op);
 
 	// Return false for eret & syscall as they are branch type in pcsx2 debugging tools,
@@ -794,7 +904,7 @@ int isBreakpointNeeded(u32 addr)
 		bpFlags += 1;
 
 	// there may be a breakpoint in the delay slot
-	if (isBranchOrJump(addr) && CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, addr+4))
+	if (isBranchOrJump(addr) && CBreakPoints::IsAddressBreakPoint(BREAKPOINT_EE, addr + 4))
 		bpFlags += 2;
 
 	return bpFlags;

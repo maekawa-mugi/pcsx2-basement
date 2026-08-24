@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Common.h"
+#include "EEMemory.h"
 #include "R5900OpcodeTables.h"
 #include "VMManager.h"
 #include "Elfheader.h"
@@ -126,7 +127,18 @@ void intCheckMemcheck()
 	if (needed == 0)
 		return;
 
-	const u32 op = memRead32(needed == 2 ? pc + 4 : pc);
+	u32 op;
+	const u32 instruction_address = needed == 2 ? pc + 4 : pc;
+	if (EmuConfig.Cpu.EnableExperimentalEETLB)
+	{
+		// Leave faults to the actual instruction fetch so EPC/BD state is not changed by debugger lookahead.
+		if (!EEMemory::TryFetch32(instruction_address, &op))
+			return;
+	}
+	else
+	{
+		op = memRead32(instruction_address);
+	}
 	const OPCODE& opcode = GetInstruction(op);
 
 	const bool store = (opcode.flags & IS_STORE) != 0;
@@ -169,12 +181,25 @@ static void execI()
 #endif
 
 	const u32 pc = cpuRegs.pc;
+	if (EmuConfig.Cpu.EnableExperimentalEETLB)
+	{
+		EEMmu::Warning warnings = EEMmu::Warning::None;
+		cpuRegs.CP0.n.Random = EEMmu::AdvanceRandom(cpuRegs.CP0.n.Random, cpuRegs.CP0.n.Wired, &warnings);
+#ifdef PCSX2_DEVBUILD
+		static bool reported_invalid_wired = false;
+		if (!reported_invalid_wired && EEMmu::HasWarning(warnings, EEMmu::Warning::InvalidWired))
+		{
+			reported_invalid_wired = true;
+			Console.Warning("Experimental EE Random saw Wired > 47; using deterministic fallback (needs proper testing)");
+		}
+#endif
+	}
 	// We need to increase the pc before executing the memRead32. An exception could appears
 	// and it expects the PC counter to be pre-incremented
 	cpuRegs.pc += 4;
 
 	// interprete instruction
-	cpuRegs.code = memRead32( pc );
+	cpuRegs.code = EmuConfig.Cpu.EnableExperimentalEETLB ? EEMemory::Fetch32(pc) : memRead32(pc);
 
 	const OPCODE& opcode = GetCurrentInstruction();
 #if 0

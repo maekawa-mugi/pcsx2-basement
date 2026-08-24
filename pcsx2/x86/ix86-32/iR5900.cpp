@@ -4,6 +4,7 @@
 #include "Common.h"
 #include "CDVD/CDVD.h"
 #include "DebugTools/Breakpoints.h"
+#include "EEMemory.h"
 #include "Elfheader.h"
 #include "GS.h"
 #include "Host.h"
@@ -21,6 +22,10 @@
 #include "common/FastJmp.h"
 #include "common/HeapArray.h"
 #include "common/Perf.h"
+
+#include <array>
+#include <memory>
+#include <unordered_map>
 
 // Only for MOVQ workaround.
 #include "common/emitter/internal.h"
@@ -52,7 +57,10 @@ u32 maxrecmem = 0;
 alignas(16) static uptr recLUT[_64kb];
 alignas(16) static u32 hwLUT[_64kb];
 
-static __fi u32 HWADDR(u32 mem) { return hwLUT[mem >> 16] + mem; }
+static __fi u32 HWADDR(u32 mem)
+{
+	return EmuConfig.Cpu.EnableExperimentalEETLB ? mem : hwLUT[mem >> 16] + mem;
+}
 
 u32 s_nBlockCycles = 0; // cycles of current block recompiling
 bool s_nBlockInterlocked = false; // Block is VU0 interlocked
@@ -73,6 +81,9 @@ eeProfiler EE::Profiler;
 static DynamicHeapArray<u8, 4096> recRAMCopy;
 static DynamicHeapArray<BASEBLOCK, 4096> recLutReserve_RAM;
 static DynamicHeapArray<BASEBLOCK, 4096> recLutUnmapped;
+static std::unordered_map<u32, std::unique_ptr<BASEBLOCK[]>> s_full_tlb_rec_pages;
+static EEMemory::FetchPage s_rec_fetch_page;
+static bool s_rec_lut_uses_full_tlb = false;
 static size_t recLutEntries;
 static bool extraRam;
 
@@ -123,7 +134,7 @@ static void pauseAAA()
 static ZydisFormatterFunc s_old_print_address;
 static ZydisFormatterFunc s_old_print_disp;
 
-static bool Address2Symbol(u64 address, SmallString &buf)
+static bool Address2Symbol(u64 address, SmallString& buf)
 {
 
 #define A(x) ((u64)(x))
@@ -221,7 +232,8 @@ static ZyanStatus ZydisFormatterPrintDisplacement(const ZydisFormatter* formatte
 	SmallString buf;
 
 	// hardcoded RTEXTPTR
-	if (context->operand->mem.base == ZYDIS_REGISTER_RBX) {
+	if (context->operand->mem.base == ZYDIS_REGISTER_RBX)
+	{
 		did_print = Address2Symbol(address, buf);
 	}
 
@@ -386,6 +398,20 @@ static void recRecompile(const u32 startpc);
 static void dyna_block_discard(u32 start, u32 sz);
 static void dyna_page_reset(u32 start, u32 sz);
 static void recError(u32 error);
+static void ClearRecLUT(BASEBLOCK* base, int memsize);
+
+static void recMapFullTLBPage(u32 address)
+{
+	const u32 page = address >> 16;
+	if (s_full_tlb_rec_pages.find(page) != s_full_tlb_rec_pages.end())
+		return;
+
+	auto blocks = std::make_unique<BASEBLOCK[]>(_64kb / 4);
+	ClearRecLUT(blocks.get(), _64kb);
+	recLUT[page] = reinterpret_cast<uptr>(blocks.get()) -
+	               static_cast<uptr>(page) * (_64kb / 4) * sizeof(BASEBLOCK);
+	s_full_tlb_rec_pages.emplace(page, std::move(blocks));
+}
 
 static const void* DispatcherEvent = nullptr;
 static const void* DispatcherReg = nullptr;
@@ -493,7 +519,9 @@ static const void* _DynGen_DispatchBlockDiscard()
 {
 	u8* retval = xGetPtr();
 	xFastCall((const void*)dyna_block_discard);
-	xJMP(DispatcherReg);
+	// A stale Full-TLB block can otherwise discard and redispatch forever without
+	// observing a VM shutdown request. Discards are rare, so always test events here.
+	xJMP(DispatcherEvent);
 	return retval;
 }
 
@@ -508,7 +536,15 @@ static const void* _DynGen_DispatchPageReset()
 static const void* _DynGen_UnmappedRecLUTPage()
 {
 	u8* retval = xGetPtr();
-	xFastCall((const void*)recError, 0);
+	if (EmuConfig.Cpu.EnableExperimentalEETLB)
+	{
+		xFastCall((const void*)recMapFullTLBPage, ptr32[&cpuRegs.pc]);
+		xJMP(DispatcherEvent);
+	}
+	else
+	{
+		xFastCall((const void*)recError, 0);
+	}
 	return retval;
 }
 
@@ -641,7 +677,8 @@ alignas(16) static u8 manual_counter[Ps2MemSize::TotalRam >> 12];
 ////////////////////////////////////////////////////
 static void recResetRaw()
 {
-	Console.WriteLn(Color_StrongBlack, "EE/iR5900 Recompiler Reset");
+	if (!EmuConfig.Cpu.EnableExperimentalEETLB)
+		Console.WriteLn(Color_StrongBlack, "EE/iR5900 Recompiler Reset");
 
 	if (CHECK_EXTRAMEM != extraRam)
 	{
@@ -657,8 +694,22 @@ static void recResetRaw()
 	vtlb_DynGenDispatchers();
 	recPtr = xGetPtr();
 
-	ClearRecLUT(recLutReserve_RAM.data(),
-		Ps2MemSize::ExposedRam + Ps2MemSize::Rom + Ps2MemSize::Rom1 + Ps2MemSize::Rom2);
+	if (EmuConfig.Cpu.EnableExperimentalEETLB)
+	{
+		s_full_tlb_rec_pages.clear();
+		BASEBLOCK* unmapped = recLutUnmapped.data();
+		for (u32 i = 0; i < _64kb; i++)
+			recLUT_SetPage(recLUT, hwLUT, unmapped, i, 0, 0);
+		s_rec_lut_uses_full_tlb = true;
+	}
+	else
+	{
+		if (s_rec_lut_uses_full_tlb)
+			recReserveRAM();
+		ClearRecLUT(recLutReserve_RAM.data(),
+			Ps2MemSize::ExposedRam + Ps2MemSize::Rom + Ps2MemSize::Rom1 + Ps2MemSize::Rom2);
+		s_rec_lut_uses_full_tlb = false;
+	}
 
 	for (int i = 0; i < _64kb / 4; i++)
 		recLutUnmapped.data()[i].SetFnptr((uptr)UnmappedRecLUTPage);
@@ -682,6 +733,8 @@ static void recResetRaw()
 
 void recShutdown()
 {
+	s_full_tlb_rec_pages.clear();
+	s_rec_lut_uses_full_tlb = false;
 	recRAMCopy.deallocate();
 	recLutReserve_RAM.deallocate();
 
@@ -746,7 +799,10 @@ static void recResetEE()
 
 static void recCancelInstruction()
 {
-	pxFailRel("recCancelInstruction() called, this should never happen!");
+	if (EmuConfig.Cpu.EnableExperimentalEETLB)
+		recExitExecution();
+	else
+		pxFailRel("recCancelInstruction() called, this should never happen!");
 }
 
 static void recExecute()
@@ -780,7 +836,7 @@ static void recExecute()
 void R5900::Dynarec::OpcodeImpl::recSYSCALL()
 {
 	EE::Profiler.EmitOp(eeOpcode::SYSCALL);
-	if (GPR_IS_CONST1(3))
+	if (!EmuConfig.Cpu.EnableExperimentalEETLB && GPR_IS_CONST1(3))
 	{
 		// If it's FlushCache or iFlushCache, we can skip it since we don't support cache in the JIT.
 		if (g_cpuConstRegs[3].UC[0] == 0x64 || g_cpuConstRegs[3].UC[0] == 0x68)
@@ -807,6 +863,14 @@ void R5900::Dynarec::OpcodeImpl::recBREAK()
 // Size is in dwords (4 bytes)
 void recClear(u32 addr, u32 size)
 {
+	if (EmuConfig.Cpu.EnableExperimentalEETLB)
+	{
+		// Full TLB blocks are keyed by virtual address and can have multiple aliases.
+		// The first correctness version invalidates all aliases instead of maintaining a reverse map.
+		recResetEE();
+		return;
+	}
+
 	if ((addr) >= maxrecmem || !(recLUT[(addr) >> 16] + (addr & ~0xFFFFUL)))
 		return;
 	addr = HWADDR(addr);
@@ -879,6 +943,69 @@ void recClear(u32 addr, u32 size)
 
 static int* s_pCode;
 
+static constexpr u32 FULL_TLB_RANDOM_FALLBACK = 47;
+
+static bool recInstructionHasDelaySlot(u32 instruction)
+{
+	const u32 flags = GetInstruction(instruction).flags;
+	if ((flags & IS_BRANCH) == 0)
+		return false;
+
+	const u32 branch_type = flags & BRANCHTYPE_MASK;
+	return branch_type != BRANCHTYPE_SYSCALL && branch_type != BRANCHTYPE_ERET;
+}
+
+static void recExecuteCrossPageBranchInterpreter(u32 branch_pc)
+{
+	pxAssert(cpuRegs.pc == branch_pc);
+
+	// A taken branch executes its delay slot inside the interpreter helper. A normal
+	// not-taken branch leaves PC at the delay slot, so execute that instruction explicitly
+	// while retaining BD state. This path is only used until the delay-slot page is mapped
+	// and needs proper testing with nested branches in a delay slot.
+	intCpu.Step();
+	if (cpuRegs.pc != branch_pc + 4)
+		return;
+
+	intUpdateCPUCycles();
+	cpuRegs.branch = 1;
+	intCpu.Step();
+	cpuRegs.branch = 0;
+	intUpdateCPUCycles();
+}
+
+static void recAdvanceFullTLBRandomInline()
+{
+	// Wired is part of the Full TLB block context. MTC0 Wired ends its block, so valid
+	// Random values can use a branchless decrement/wrap while retaining exact semantics.
+	const u32 wired = cpuRegs.CP0.n.Wired;
+	if (wired > 47)
+	{
+		xMOV(ptr32[&cpuRegs.CP0.n.Random], FULL_TLB_RANDOM_FALLBACK);
+		return;
+	}
+
+	const xRegister32 random(_allocX86reg(X86TYPE_TEMP, 0, MODE_CALLEESAVED));
+	xMOV(random, ptr32[&cpuRegs.CP0.n.Random]);
+	xDEC(random);
+	xCMP(random, wired);
+	xCMOVL(random, ptr32[&FULL_TLB_RANDOM_FALLBACK]);
+	xMOV(ptr32[&cpuRegs.CP0.n.Random], random);
+	_freeX86reg(random.GetId());
+}
+
+u32 recFetchInstruction(u32 address)
+{
+	if (!EmuConfig.Cpu.EnableExperimentalEETLB)
+		return *(u32*)PSM(address);
+
+	if ((address & ~vtlb_private::VTLB_PAGE_MASK) == s_rec_fetch_page.virtual_page)
+		return EEMemory::Fetch32(s_rec_fetch_page, address);
+
+	// Delay slots can straddle a 4KB boundary. Keep the common block-page translation cached,
+	// and translate only the exceptional cross-page fetch (needs proper testing).
+	return EEMemory::Fetch32(address);
+}
 
 // Branch to a runtime variable target
 // pass the target in eax
@@ -938,10 +1065,13 @@ u8* recEndThunk()
 bool TrySwapDelaySlot(u32 rs, u32 rt, u32 rd, bool allow_loadstore)
 {
 #if 1
+	if (EmuConfig.Cpu.EnableExperimentalEETLB)
+		return false;
+
 	if (g_recompilingDelaySlot)
 		return false;
 
-	const u32 opcode_encoded = *(u32*)PSM(pc);
+	const u32 opcode_encoded = recFetchInstruction(pc);
 	if (opcode_encoded == 0)
 	{
 		recompileNextInstruction(true, true);
@@ -1335,6 +1465,58 @@ static u32 scaleblockcycles()
 
 	return scaled;
 }
+
+void recEmitFullTLBAccessFaultExit()
+{
+	pxAssert(EmuConfig.Cpu.EnableExperimentalEETLB);
+
+	// Calls into EEMemory leave callee-saved guest allocations live on success. On
+	// an exception, emit writebacks only on the side-exit path and restore the
+	// compile-time allocator state before continuing to generate the success path.
+	// This needs proper testing with faults in swapped and nested delay slots.
+	_x86regs saved_x86regs[iREGCNT_GPR];
+	_xmmregs saved_xmmregs[iREGCNT_XMM];
+	std::memcpy(saved_x86regs, x86regs, sizeof(saved_x86regs));
+	std::memcpy(saved_xmmregs, xmmregs, sizeof(saved_xmmregs));
+	const u32 saved_has_const = g_cpuHasConstReg;
+	const u32 saved_flushed_const = g_cpuFlushedConstReg;
+
+	xCMP(ptr8[EEMemory::GetRecompilerAccessFaultAddress()], 0);
+	xForwardJZ32 no_fault;
+	_eeFlushAllDirty();
+	xADD(ptr64[&cpuRegs.cycle], scaleblockcycles());
+	xJMP(DispatcherReg);
+
+	std::memcpy(x86regs, saved_x86regs, sizeof(saved_x86regs));
+	std::memcpy(xmmregs, saved_xmmregs, sizeof(saved_xmmregs));
+	g_cpuHasConstReg = saved_has_const;
+	g_cpuFlushedConstReg = saved_flushed_const;
+	no_fault.SetTarget();
+}
+
+void recPrepareFullTLBAccessContext()
+{
+	pxAssert(EmuConfig.Cpu.EnableExperimentalEETLB);
+	if (g_recompilingDelaySlot)
+	{
+		// Interpreter memory helpers expect pc to point one instruction past the
+		// faulting delay-slot instruction and use branch to construct EPC/BD.
+		xMOV(ptr32[&cpuRegs.pc], pc + 4);
+		xMOV(ptr32[&cpuRegs.branch], 1);
+	}
+	else
+	{
+		xMOV(ptr32[&cpuRegs.pc], pc);
+		xMOV(ptr32[&cpuRegs.branch], 0);
+	}
+}
+
+void recFinishFullTLBAccessContext()
+{
+	xMOV(ptr32[&cpuRegs.branch], 0);
+	recEmitFullTLBAccessFaultExit();
+}
+
 u32 scaleblockcycles_clear()
 {
 	u32 scaled = scaleblockcycles_calculation();
@@ -1388,7 +1570,7 @@ static void iBranchTest(u32 newpc)
 	//    cpuRegs.cycle += blockcycles;
 	//    if ( cpuRegs.cycle > g_nextEventCycle ) { DoEvents(); }
 
-	if (EmuConfig.Speedhacks.WaitLoop && s_nBlockFF && newpc == s_branchTo)
+	if (!EmuConfig.Cpu.EnableExperimentalEETLB && EmuConfig.Speedhacks.WaitLoop && s_nBlockFF && newpc == s_branchTo)
 	{
 		xMOV(rax, ptr64[&cpuRegs.nextEventCycle]);
 		xADD(ptr64[&cpuRegs.cycle], scaleblockcycles());
@@ -1562,7 +1744,16 @@ void dynarecCheckBreakpoint()
 
 void dynarecMemcheck(size_t i)
 {
-	const u32 op = memRead32(cpuRegs.pc);
+	u32 op;
+	if (EmuConfig.Cpu.EnableExperimentalEETLB)
+	{
+		if (!EEMemory::TryFetch32(cpuRegs.pc, &op))
+			return;
+	}
+	else
+	{
+		op = memRead32(cpuRegs.pc);
+	}
 	const OPCODE& opcode = GetInstruction(op);
 	if (CBreakPoints::CheckSkipFirst(BREAKPOINT_EE, pc) != 0)
 	{
@@ -1660,7 +1851,7 @@ bool encodeMemcheck()
 	if (needed == 0)
 		return false;
 
-	const u32 op = memRead32(needed == 2 ? pc + 4 : pc);
+	const u32 op = recFetchInstruction(needed == 2 ? pc + 4 : pc);
 	const OPCODE& opcode = GetInstruction(op);
 
 	const bool store = (opcode.flags & IS_STORE) != 0;
@@ -1693,14 +1884,14 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 	// add breakpoint
 	if (!delayslot)
 	{
-		if(encodeBreakpoint() || encodeMemcheck())
+		if (encodeBreakpoint() || encodeMemcheck())
 			xFastCall((void*)CBreakPoints::CommitClearSkipFirst, BREAKPOINT_EE);
 	}
 	else
 	{
 #ifdef DUMP_BLOCKS
 		std::string disasm;
-		disR5900Fasm(disasm, *(u32*)PSM(pc), pc, false);
+		disR5900Fasm(disasm, recFetchInstruction(pc), pc, false);
 		fprintf(stderr, "Compiling delay slot %08X %s\n", pc, disasm.c_str());
 #endif
 
@@ -1708,8 +1899,9 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 		_clearNeededXMMregs();
 	}
 
-	s_pCode = (int*)PSM(pc);
-	pxAssert(s_pCode);
+	const u32 instruction = recFetchInstruction(pc);
+	s_pCode = EmuConfig.Cpu.EnableExperimentalEETLB ? nullptr : (int*)PSM(pc);
+	pxAssert(EmuConfig.Cpu.EnableExperimentalEETLB || s_pCode);
 
 #if 0
 	// acts as a tag for delimiting recompiled instructions when viewing x86 disasm.
@@ -1722,7 +1914,9 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 	const int old_code = cpuRegs.code;
 	EEINST* old_inst_info = g_pCurInstInfo;
 
-	cpuRegs.code = *(int*)s_pCode;
+	cpuRegs.code = instruction;
+	if (EmuConfig.Cpu.EnableExperimentalEETLB)
+		recAdvanceFullTLBRandomInline();
 
 	if (!delayslot)
 	{
@@ -1901,7 +2095,7 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 			int cycles = COP2DivUnitTimings(cpuRegs.code);
 			for (u32 p = pc; cycles > 0 && p < s_nEndBlock; p += 4, cycles--)
 			{
-				cpuRegs.code = memRead32(p);
+				cpuRegs.code = EmuConfig.Cpu.EnableExperimentalEETLB ? recFetchInstruction(p) : memRead32(p);
 
 				if ((_Opcode_ == 022) && (cpuRegs.code & 0x7FC) == 0x3BC) // WaitQ or another DIV op hit (stalled), we're safe
 					break;
@@ -1912,10 +2106,10 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 					for (u32 i = s_pCurBlockEx->startpc; i < s_nEndBlock; i += 4)
 					{
 						std::string disasm = "";
-						disR5900Fasm(disasm, memRead32(i), i, false);
+						disR5900Fasm(disasm, EmuConfig.Cpu.EnableExperimentalEETLB ? recFetchInstruction(i) : memRead32(i), i, false);
 						Console.Warning("%x %s%08X %s", i, i == pc - 4 ? "*" : i == p ? "=" :
 																						" ",
-							memRead32(i), disasm.c_str());
+							EmuConfig.Cpu.EnableExperimentalEETLB ? recFetchInstruction(i) : memRead32(i), disasm.c_str());
 					}
 					break;
 				}
@@ -1928,7 +2122,7 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 			for (u32 p = pc; s != 0 && p < s_nEndBlock && all_count < 10 && cop2m_count < 5 && cop2o_count < 4; p += 4)
 			{
 				// I am so sorry.
-				cpuRegs.code = memRead32(p);
+				cpuRegs.code = EmuConfig.Cpu.EnableExperimentalEETLB ? recFetchInstruction(p) : memRead32(p);
 				if (_Opcode_ == 022 && _Rs_ == 2) // CFC2
 					// rd is fs
 					if ((_Rd_ == 16 && s & 1) || (_Rd_ == 17 && s & 2) || (_Rd_ == 18 && s & 4))
@@ -1938,10 +2132,10 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 						for (u32 i = s_pCurBlockEx->startpc; i < s_nEndBlock; i += 4)
 						{
 							disasm = "";
-							disR5900Fasm(disasm, memRead32(i), i, false);
+							disR5900Fasm(disasm, EmuConfig.Cpu.EnableExperimentalEETLB ? recFetchInstruction(i) : memRead32(i), i, false);
 							Console.Warning("%x %s%08X %s", i, i == pc - 4 ? "*" : i == p ? "=" :
 																							" ",
-								memRead32(i), disasm.c_str());
+								EmuConfig.Cpu.EnableExperimentalEETLB ? recFetchInstruction(i) : memRead32(i), disasm.c_str());
 						}
 						break;
 					}
@@ -1956,7 +2150,7 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 			}
 		}
 	}
-	cpuRegs.code = *s_pCode;
+	cpuRegs.code = instruction;
 
 	if (swapped_delay_slot)
 	{
@@ -2028,6 +2222,17 @@ static void PreBlockCheck(u32 blockpc)
 void dyna_block_discard(u32 start, u32 sz)
 {
 	eeRecPerfLog.Write(Color_StrongGray, "Clearing Manual Block @ 0x%08X  [size=%d]", start, sz * 4);
+	if (EmuConfig.Cpu.EnableExperimentalEETLB)
+	{
+		const int index = recBlocks.Index(start);
+		BASEBLOCKEX* block = recBlocks[index];
+		if (block && block->startpc == start)
+		{
+			PC_GETBLOCK(start)->SetFnptr((uptr)JITCompile);
+			recBlocks.Remove(index, index);
+		}
+		return;
+	}
 	recClear(start, sz);
 }
 
@@ -2043,6 +2248,113 @@ void dyna_page_reset(u32 start, u32 sz)
 
 static void memory_protect_recompiled_code(u32 startpc, u32 size)
 {
+	if (EmuConfig.Cpu.EnableExperimentalEETLB)
+	{
+		struct ProtectedFetchPage
+		{
+			EEMemory::FetchPage fetch;
+			const u32* write_generation_address = nullptr;
+			u32 write_generation = 0;
+			u8* writable_code_page = nullptr;
+		};
+
+		const u32 translation_generation = EEMmu::GetTranslationGeneration();
+		const u32 status_key = cpuRegs.CP0.n.Status.val & 0x1e;
+		const u32 config_key = cpuRegs.CP0.n.Config & 0x7;
+		const u32 asid_key = cpuRegs.CP0.n.EntryHi & 0xff;
+		const u32 wired_key = cpuRegs.CP0.n.Wired;
+		const u32 first_virtual_page = startpc & ~vtlb_private::VTLB_PAGE_MASK;
+		const u32 last_address = startpc + (size - 1) * sizeof(u32);
+		const u32 last_virtual_page = last_address & ~vtlb_private::VTLB_PAGE_MASK;
+		const u32 protected_page_count = first_virtual_page == last_virtual_page ? 1 : 2;
+		std::array<ProtectedFetchPage, 2> protected_pages;
+		protected_pages[0].fetch = s_rec_fetch_page;
+		if (protected_page_count == 2)
+		{
+			// A branch in the final word of a page includes its delay slot from the next
+			// virtual page. That page need not be physically contiguous with the first.
+			protected_pages[1].fetch = EEMemory::TranslateFetchPage(last_address);
+		}
+
+		for (u32 i = 0; i < protected_page_count; i++)
+		{
+			ProtectedFetchPage& page = protected_pages[i];
+			if (page.fetch.translation.target == EEMmu::Target::Scratchpad)
+			{
+				page.write_generation_address = EEMemory::GetScratchpadWriteGenerationAddress();
+				page.writable_code_page = &eeMem->Scratch[page.fetch.translation.scratch_offset & 0x3fff];
+			}
+			else
+			{
+				const u32 physical_page = page.fetch.translation.paddr;
+				page.write_generation_address = EEMemory::GetPhysicalWriteGenerationAddress(physical_page);
+				// BIOS ROM pages are immutable. RAM remains content-checked because a few DMA paths
+				// write through raw host pointers and cannot advance the EE write generation yet.
+				if (physical_page < 0x1e000000)
+					page.writable_code_page = static_cast<u8*>(PSM(physical_page));
+			}
+			page.write_generation = *page.write_generation_address;
+		}
+
+		// Avoid a runtime TLB lookup at every block entry. TLB writes advance the mapping
+		// generation, while the small execution-context key permits user blocks to survive
+		// an interrupt/ERET round trip. This needs proper testing with unusual context changes.
+		xMOV(eax, ptr32[&cpuRegs.CP0.n.Status.val]);
+		xAND(eax, 0x1e);
+		xCMP(eax, status_key);
+		xForwardJNE8 mapping_changed_status;
+		xMOV(eax, ptr32[&cpuRegs.CP0.n.Config]);
+		xAND(eax, 0x7);
+		xCMP(eax, config_key);
+		xForwardJNE8 mapping_changed_config;
+		xMOV(eax, ptr32[&cpuRegs.CP0.n.EntryHi]);
+		xAND(eax, 0xff);
+		xCMP(eax, asid_key);
+		xForwardJNE8 mapping_changed_asid;
+		xCMP(ptr32[EEMmu::GetTranslationGenerationAddress()], translation_generation);
+		xForwardJNE8 mapping_changed_generation;
+		xCMP(ptr32[&cpuRegs.CP0.n.Wired], wired_key);
+		xForwardJE8 mapping_matches;
+
+		mapping_changed_status.SetTarget();
+		mapping_changed_config.SetTarget();
+		mapping_changed_asid.SetTarget();
+		mapping_changed_generation.SetTarget();
+		xMOV(arg1regd, startpc);
+		xMOV(arg2regd, size);
+		xJMP(DispatchBlockDiscard);
+		mapping_matches.SetTarget();
+
+		// All Full TLB EE writes advance a physical-page generation. DMA and external writers
+		// already call Cpu::Clear(). Check both pages when a cross-page delay slot is present.
+		for (u32 i = 0; i < protected_page_count; i++)
+		{
+			xCMP(ptr32[protected_pages[i].write_generation_address], protected_pages[i].write_generation);
+			xForwardJE8 page_unchanged;
+			xMOV(arg1regd, startpc);
+			xMOV(arg2regd, size);
+			xJMP(DispatchBlockDiscard);
+			page_unchanged.SetTarget();
+		}
+
+		xMOV(arg1regd, startpc);
+		xMOV(arg2regd, size);
+		for (u32 i = 0; i < size; i++)
+		{
+			const u32 address = startpc + i * sizeof(u32);
+			const u32 page_index = (address & ~vtlb_private::VTLB_PAGE_MASK) == first_virtual_page ? 0 : 1;
+			const ProtectedFetchPage& page = protected_pages[page_index];
+			if (!page.writable_code_page)
+				continue;
+
+			const u32 page_offset = address & vtlb_private::VTLB_PAGE_MASK;
+			const u32 instruction = EEMemory::Fetch32(page.fetch, address);
+			xCMP(ptr32[page.writable_code_page + page_offset], instruction);
+			xJNE(DispatchBlockDiscard);
+		}
+		return;
+	}
+
 	u32 inpage_ptr = HWADDR(startpc);
 	const u32 inpage_sz = size * 4;
 
@@ -2126,19 +2438,19 @@ static void memory_protect_recompiled_code(u32 startpc, u32 size)
 // Skip MPEG Game-Fix
 static bool skipMPEG_By_Pattern(u32 sPC)
 {
-
-	if (!CHECK_SKIPMPEGHACK)
+	if (EmuConfig.Cpu.EnableExperimentalEETLB || !CHECK_SKIPMPEGHACK)
 		return 0;
 
 	// sceMpegIsEnd: lw reg, 0x40(a0); jr ra; lw v0, 0(reg)
-	if ((s_nEndBlock == sPC + 12) && (memRead32(sPC + 4) == 0x03e00008))
+	if ((s_nEndBlock == sPC + 12) &&
+		(EmuConfig.Cpu.EnableExperimentalEETLB ? recFetchInstruction(sPC + 4) : memRead32(sPC + 4)) == 0x03e00008)
 	{
-		const u32 code = memRead32(sPC);
+		const u32 code = EmuConfig.Cpu.EnableExperimentalEETLB ? recFetchInstruction(sPC) : memRead32(sPC);
 		const u32 p1 = 0x8c800040;
 		const u32 p2 = 0x8c020000 | (code & 0x1f0000) << 5;
 		if ((code & 0xffe0ffff) != p1)
 			return 0;
-		if (memRead32(sPC + 8) != p2)
+		if ((EmuConfig.Cpu.EnableExperimentalEETLB ? recFetchInstruction(sPC + 8) : memRead32(sPC + 8)) != p2)
 			return 0;
 		xMOV(ptr32[&cpuRegs.GPR.n.v0.UL[0]], 1);
 		xMOV(ptr32[&cpuRegs.GPR.n.v0.UL[1]], 0);
@@ -2155,7 +2467,7 @@ static bool skipMPEG_By_Pattern(u32 sPC)
 
 static bool recSkipTimeoutLoop(s32 reg, bool is_timeout_loop)
 {
-	if (!EmuConfig.Speedhacks.WaitLoop || !is_timeout_loop)
+	if (EmuConfig.Cpu.EnableExperimentalEETLB || !EmuConfig.Speedhacks.WaitLoop || !is_timeout_loop)
 		return false;
 
 	DevCon.WriteLn("[EE] Skipping timeout loop at 0x%08X -> 0x%08X", s_pCurBlockEx->startpc, s_nEndBlock);
@@ -2212,6 +2524,42 @@ static void recRecompile(const u32 startpc)
 	{
 		eeRecNeedsReset = false;
 		recResetRaw();
+	}
+
+	if (EmuConfig.Cpu.EnableExperimentalEETLB)
+	{
+		// recResetRaw() can run from this function when the code cache rolls over.
+		// It deliberately returns every recLUT page to the shared unmapped page, so
+		// restore this block's private virtual page before obtaining s_pCurBlock.
+		// Otherwise the compiled pointer is written into recLutUnmapped and aliases
+		// every virtual address with the same 64KB offset (needs proper testing).
+		recMapFullTLBPage(startpc);
+		s_rec_fetch_page = EEMemory::TranslateFetchPage(startpc);
+		// A miss raised while JITCompile is resolving the block start must enter the
+		// guest exception vector without publishing a block compiled from paddr 0.
+		if (s_rec_fetch_page.translation.fault != EEMmu::Fault::None)
+			return;
+
+		// Compiling a branch in the last word of a mapped page must not fetch an
+		// unmapped delay-slot page before earlier guest instructions have run. If the
+		// branch itself is the block entry, execute it through the precise interpreter
+		// path; the TLB fault then reports EPC=branch_pc with Cause.BD set.
+		const u32 start_instruction = EEMemory::Fetch32(s_rec_fetch_page, startpc);
+		if ((startpc & vtlb_private::VTLB_PAGE_MASK) == vtlb_private::VTLB_PAGE_MASK - 3 &&
+			recInstructionHasDelaySlot(start_instruction))
+		{
+			u32 delay_instruction;
+			if (!EEMemory::TryFetch32(startpc + 4, &delay_instruction))
+			{
+				if (EmuConfig.Cpu.EnableFullTLBDiagnosticTrace)
+				{
+					Console.WriteLn("[FullTLBTrace] cross-page delay fallback branch=%08x delay=%08x",
+						startpc, startpc + 4);
+				}
+				recExecuteCrossPageBranchInterpreter(startpc);
+				return;
+			}
+		}
 	}
 
 	xSetTextPtr(R5900_TEXTPTR);
@@ -2358,7 +2706,24 @@ static void recRecompile(const u32 startpc)
 		}
 
 		//HUH ? PSM ? whut ? THIS IS VIRTUAL ACCESS GOD DAMMIT
-		cpuRegs.code = *(int*)PSM(i);
+		cpuRegs.code = recFetchInstruction(i);
+
+		if (EmuConfig.Cpu.EnableExperimentalEETLB &&
+			(i & vtlb_private::VTLB_PAGE_MASK) == vtlb_private::VTLB_PAGE_MASK - 3 &&
+			recInstructionHasDelaySlot(cpuRegs.code))
+		{
+			u32 delay_instruction;
+			if (!EEMemory::TryFetch32(i + 4, &delay_instruction))
+			{
+				// Publish and run the mapped prefix first. Dispatching the final branch as
+				// a new block will then use the interpreter fallback above, preserving the
+				// architectural order of the prefix and the delay-slot fetch exception.
+				pxAssert(i != startpc);
+				willbranch3 = 1;
+				s_nEndBlock = i;
+				break;
+			}
+		}
 
 		if (is_timeout_loop)
 		{
@@ -2373,7 +2738,8 @@ static void recRecompile(const u32 startpc)
 			else if ((cpuRegs.code >> 26) == 5)
 			{
 				// bne
-				if (timeout_reg != static_cast<s32>(_Rs_) || _Rt_ != 0 || memRead32(i + 4) != 0)
+				if (timeout_reg != static_cast<s32>(_Rs_) || _Rt_ != 0 ||
+					(EmuConfig.Cpu.EnableExperimentalEETLB ? recFetchInstruction(i + 4) : memRead32(i + 4)) != 0)
 					is_timeout_loop = false;
 			}
 			else if (cpuRegs.code != 0)
@@ -2484,7 +2850,7 @@ StartRecomp:
 		{
 			if (i == s_nEndBlock - 8)
 				continue;
-			cpuRegs.code = *(u32*)PSM(i);
+			cpuRegs.code = recFetchInstruction(i);
 			// nop
 			if (cpuRegs.code == 0)
 				continue;
@@ -2573,7 +2939,7 @@ StartRecomp:
 
 		for (i = s_nEndBlock; i > startpc; i -= 4)
 		{
-			cpuRegs.code = *(int*)PSM(i - 4);
+			cpuRegs.code = recFetchInstruction(i - 4);
 			pcur[-1] = pcur[0];
 			recBackpropBSC(cpuRegs.code, pcur - 1, pcur);
 			pcur--;
@@ -2628,7 +2994,7 @@ StartRecomp:
 			if (dump_block)
 			{
 				std::string disasm;
-				disR5900Fasm(disasm, *(u32*)PSM(pc), pc, false);
+				disR5900Fasm(disasm, recFetchInstruction(pc), pc, false);
 				fprintf(stderr, "Compiling %08X %s\n", pc, disasm.c_str());
 
 				const u8* inst_start = x86Ptr;
@@ -2673,7 +3039,7 @@ StartRecomp:
 	pxAssert((pc - startpc) >> 2 <= 0xffff);
 	s_pCurBlockEx->size = (pc - startpc) >> 2;
 
-	if (HWADDR(pc) <= Ps2MemSize::ExposedRam)
+	if (!EmuConfig.Cpu.EnableExperimentalEETLB && HWADDR(pc) <= Ps2MemSize::ExposedRam)
 	{
 		BASEBLOCKEX* oldBlock;
 		int i;
@@ -2703,7 +3069,7 @@ StartRecomp:
 
 	s_pCurBlock->SetFnptr((uptr)recPtr);
 
-	if (!(pc & 0x10000000))
+	if (!EmuConfig.Cpu.EnableExperimentalEETLB && !(pc & 0x10000000))
 		maxrecmem = std::max((pc & ~0xa0000000), maxrecmem);
 
 	if (g_branch == 2)

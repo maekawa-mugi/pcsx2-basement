@@ -143,6 +143,28 @@ static void recLoad(u32 bits, bool sign)
 	}
 }
 
+static void recLoadDiscardAligned64()
+{
+	_freeX86reg(eax);
+	_freeX86reg(arg1regd);
+
+	if (GPR_IS_CONST1(_Rs_))
+	{
+		const u32 srcadr = (g_cpuConstRegs[_Rs_].UL[0] + _Imm_) & ~0x07;
+		vtlb_DynGenReadNonQuad_Const(64, false, false, srcadr, RETURN_READ_IN_RAX);
+	}
+	else
+	{
+		_eeMoveGPRtoR(arg1regd, _Rs_);
+		if (_Imm_ != 0)
+			xADD(arg1regd, _Imm_);
+		xAND(arg1regd, ~0x07);
+		vtlb_DynGenReadNonQuad(64, false, false, arg1regd.GetId(), RETURN_READ_IN_RAX);
+	}
+
+	_freeX86reg(eax);
+}
+
 //////////////////////////////////////////////////////////////////////////////////////////
 //
 
@@ -199,6 +221,35 @@ static void recStore(u32 bits)
 }
 
 
+static void recFullTLBMergeStore(u32 bits, bool left)
+{
+	pxAssert(EmuConfig.Cpu.EnableExperimentalEETLB && (bits == 32 || bits == 64));
+	int value_reg = _allocX86reg(X86TYPE_GPR, _Rt_, MODE_READ);
+
+	if (GPR_IS_CONST1(_Rs_))
+	{
+		const u32 addr = g_cpuConstRegs[_Rs_].UL[0] + _Imm_;
+		vtlb_DynGenFullTLBMergeWrite_Const(bits, left, addr, value_reg);
+		return;
+	}
+
+	int value_temp = -1;
+	if (value_reg == arg1regd.GetId())
+	{
+		value_temp = _allocX86reg(X86TYPE_TEMP, 0, MODE_CALLEESAVED);
+		xMOV(xRegister64(value_temp), xRegister64(value_reg));
+		value_reg = value_temp;
+	}
+
+	_freeX86reg(arg1regd);
+	_eeMoveGPRtoR(arg1regd, _Rs_);
+	if (_Imm_ != 0)
+		xADD(arg1regd, _Imm_);
+	vtlb_DynGenFullTLBMergeWrite(bits, left, arg1regd.GetId(), value_reg);
+
+	if (value_temp >= 0)
+		_freeX86reg(value_temp);
+}
 //////////////////////////////////////////////////////////////////////////////////////////
 //
 void recLB()
@@ -364,6 +415,8 @@ void recLWR()
 	}
 
 	const int treg = _allocX86reg(X86TYPE_GPR, _Rt_, MODE_READ | MODE_WRITE);
+	const xRegister64 saved_upper(_allocX86reg(X86TYPE_TEMP, 0, MODE_CALLEESAVED));
+	xMOV(saved_upper, xRegister64(treg));
 	xAND(temp, 3);
 
 	xForwardJE8 nomask;
@@ -380,11 +433,17 @@ void recLWR()
 	xSHR(eax, cl);
 	xOR(xRegister32(treg), eax);
 
+	// The 32-bit merge clears the host register's upper word, so restore the guest upper word.
+	xSHR(saved_upper, 32);
+	xSHL(saved_upper, 32);
+	xOR(xRegister64(treg), saved_upper);
+
 	xForwardJump8 end;
 	nomask.SetTarget();
 	// NOTE: This might look wrong, but it's correct - see interpreter.
 	xMOVSX(xRegister64(treg), eax);
 	end.SetTarget();
+	_freeX86reg(saved_upper.GetId());
 	_freeX86reg(temp);
 #else
 	iFlushCall(FLUSH_INTERPRETER);
@@ -401,6 +460,12 @@ void recLWR()
 
 void recSWL()
 {
+	if (EmuConfig.Cpu.EnableExperimentalEETLB)
+	{
+		recFullTLBMergeStore(32, true);
+		EE::Profiler.EmitOp(eeOpcode::SWL);
+		return;
+	}
 #ifdef REC_STORES
 	// avoid flushing and immediately reading back
 	_addNeededX86reg(X86TYPE_GPR, _Rs_);
@@ -478,6 +543,12 @@ void recSWL()
 ////////////////////////////////////////////////////
 void recSWR()
 {
+	if (EmuConfig.Cpu.EnableExperimentalEETLB)
+	{
+		recFullTLBMergeStore(32, false);
+		EE::Profiler.EmitOp(eeOpcode::SWR);
+		return;
+	}
 #ifdef REC_STORES
 	// avoid flushing and immediately reading back
 	_addNeededX86reg(X86TYPE_GPR, _Rs_);
@@ -586,10 +657,14 @@ static void ldlrhelper(const xRegister32& maskamt, const xImpl_Group2& maskshift
 
 void recLDL()
 {
-	if (!_Rt_)
-		return;
-
 #ifdef REC_LOADS
+	if (!_Rt_)
+	{
+		recLoadDiscardAligned64();
+		EE::Profiler.EmitOp(eeOpcode::LDL);
+		return;
+	}
+
 	// avoid flushing and immediately reading back
 	if (_Rt_)
 		_addNeededX86reg(X86TYPE_GPR, _Rt_);
@@ -673,10 +748,14 @@ void recLDL()
 ////////////////////////////////////////////////////
 void recLDR()
 {
-	if (!_Rt_)
-		return;
-
 #ifdef REC_LOADS
+	if (!_Rt_)
+	{
+		recLoadDiscardAligned64();
+		EE::Profiler.EmitOp(eeOpcode::LDR);
+		return;
+	}
+
 	// avoid flushing and immediately reading back
 	if (_Rt_)
 		_addNeededX86reg(X86TYPE_GPR, _Rt_);
@@ -789,6 +868,12 @@ static void sdlrhelper(const xRegister32& maskamt, const xImpl_Group2& maskshift
 
 void recSDL()
 {
+	if (EmuConfig.Cpu.EnableExperimentalEETLB)
+	{
+		recFullTLBMergeStore(64, true);
+		EE::Profiler.EmitOp(eeOpcode::SDL);
+		return;
+	}
 #ifdef REC_STORES
 	// avoid flushing and immediately reading back
 	if (_Rt_)
@@ -876,6 +961,12 @@ void recSDL()
 ////////////////////////////////////////////////////
 void recSDR()
 {
+	if (EmuConfig.Cpu.EnableExperimentalEETLB)
+	{
+		recFullTLBMergeStore(64, false);
+		EE::Profiler.EmitOp(eeOpcode::SDR);
+		return;
+	}
 #ifdef REC_STORES
 	// avoid flushing and immediately reading back
 	if (_Rt_)

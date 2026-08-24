@@ -579,7 +579,8 @@ bool Pcsx2Config::CpuOptions::CpusChanged(const CpuOptions& right) const
 	return (Recompiler.EnableEE != right.Recompiler.EnableEE ||
 			Recompiler.EnableIOP != right.Recompiler.EnableIOP ||
 			Recompiler.EnableVU0 != right.Recompiler.EnableVU0 ||
-			Recompiler.EnableVU1 != right.Recompiler.EnableVU1);
+			Recompiler.EnableVU1 != right.Recompiler.EnableVU1 ||
+			EnableExperimentalEETLB != right.EnableExperimentalEETLB);
 }
 
 bool Pcsx2Config::CpuOptions::operator!=(const CpuOptions& right) const
@@ -589,11 +590,12 @@ bool Pcsx2Config::CpuOptions::operator!=(const CpuOptions& right) const
 
 bool Pcsx2Config::CpuOptions::operator==(const CpuOptions& right) const
 {
-	return OpEqu(FPUFPCR) && OpEqu(FPUDivFPCR) && OpEqu(VU0FPCR) && OpEqu(VU1FPCR) && OpEqu(Recompiler);
+	return OpEqu(bitset) && OpEqu(FPUFPCR) && OpEqu(FPUDivFPCR) && OpEqu(VU0FPCR) && OpEqu(VU1FPCR) && OpEqu(Recompiler);
 }
 
 Pcsx2Config::CpuOptions::CpuOptions()
 {
+	bitset = 0;
 	FPUFPCR = DEFAULT_FPU_FP_CONTROL_REGISTER;
 
 	// Rounding defaults to nearest to match old behavior.
@@ -603,6 +605,8 @@ Pcsx2Config::CpuOptions::CpuOptions()
 	VU0FPCR = DEFAULT_VU_FP_CONTROL_REGISTER;
 	VU1FPCR = DEFAULT_VU_FP_CONTROL_REGISTER;
 	ExtraMemory = false;
+	EnableExperimentalEETLB = false;
+	EnableFullTLBDiagnosticTrace = false;
 }
 
 void Pcsx2Config::CpuOptions::ApplySanityCheck()
@@ -632,6 +636,8 @@ void Pcsx2Config::CpuOptions::LoadSave(SettingsWrapper& wrap)
 	read_fpcr(VU1FPCR, "VU1");
 
 	SettingsWrapBitBool(ExtraMemory);
+	SettingsWrapBitBool(EnableExperimentalEETLB);
+	SettingsWrapBitBool(EnableFullTLBDiagnosticTrace);
 
 	Recompiler.LoadSave(wrap);
 }

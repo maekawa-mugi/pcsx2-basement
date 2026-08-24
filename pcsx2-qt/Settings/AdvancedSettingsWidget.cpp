@@ -23,6 +23,8 @@ AdvancedSettingsWidget::AdvancedSettingsWidget(SettingsWindow* settings_dialog, 
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.eeFastmem, "EmuCore/CPU/Recompiler", "EnableFastmem", true);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.pauseOnTLBMiss, "EmuCore/CPU/Recompiler", "PauseOnTLBMiss", false);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.extraMemory, "EmuCore/CPU", "ExtraMemory", false);
+	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.experimentalEETLB, "EmuCore/CPU", "EnableExperimentalEETLB", false);
+	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.fullTLBDiagnosticTrace, "EmuCore/CPU", "EnableFullTLBDiagnosticTrace", false);
 
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.vu0Recompiler, "EmuCore/CPU/Recompiler", "EnableVU0", true);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.vu1Recompiler, "EmuCore/CPU/Recompiler", "EnableVU1", true);
@@ -98,6 +100,11 @@ AdvancedSettingsWidget::AdvancedSettingsWidget(SettingsWindow* settings_dialog, 
 
 	dialog()->registerWidgetHelp(m_ui.extraMemory, tr("Enable Extended RAM (Dev Console)"), tr("Unchecked"),
 		tr("Exposes additional memory to the virtual machine, expanding the EE and IOP memory to 128MB and 8MB respectively."));
+
+	dialog()->registerWidgetHelp(m_ui.experimentalEETLB, tr("Experimental EE Full TLB"), tr("Unchecked"),
+		tr("Full 48-entry EE TLB implementation for PS2 Linux and MMU validation. The EE Recompiler uses tagged translation caches and direct-mapped kernel segments, but remains slower than standard Fastmem."));
+	dialog()->registerWidgetHelp(m_ui.fullTLBDiagnosticTrace, tr("Full TLB Diagnostic Trace"), tr("Unchecked"),
+		tr("Keeps a bounded in-memory history of Full TLB translations and user exceptions. It also forces the shared reference memory path for comparison, which is substantially slower. The history is written to emulog.txt when the virtual machine is paused."));
 
 	dialog()->registerWidgetHelp(m_ui.vu0RoundingMode, tr("VU0 Rounding Mode"), tr("Chop/Zero (Default)"), tr("Changes how PCSX2 handles rounding while emulating the Emotion Engine's Vector Unit 0 (EE VU0). "
 																											  "The default value handles the vast majority of games; <b>modifying this setting when a game is not having a visible problem will cause stability issues and/or crashes.</b>"));

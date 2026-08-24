@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Common.h"
+#include "EEMemory.h"
 #include "vtlb.h"
 #include "x86/iCore.h"
 #include "x86/iR5900.h"
@@ -10,6 +11,14 @@
 
 using namespace vtlb_private;
 using namespace x86Emitter;
+
+namespace vtlb_private
+{
+	static void DynGen_DirectRead(u32 bits, bool sign);
+	static void DynGen_DirectWrite(u32 bits);
+} // namespace vtlb_private
+
+static u8* GetIndirectDispatcherPtr(int mode, int operandsize, int sign);
 
 // we need enough for a 32-bit jump forwards (5 bytes)
 static constexpr u32 LOADSTORE_PADDING = 5;
@@ -36,6 +45,874 @@ static u32 GetAllocatedXMMBitmask()
 			mask |= (1u << i);
 	}
 	return mask;
+}
+
+static const void* GetFullTLBReadFunction(u32 bits)
+{
+	switch (bits)
+	{
+		case 8:
+			return reinterpret_cast<const void*>(EEMemory::RecompilerRead8);
+		case 16:
+			return reinterpret_cast<const void*>(EEMemory::RecompilerRead16);
+		case 32:
+			return reinterpret_cast<const void*>(EEMemory::RecompilerRead32);
+		case 64:
+			return reinterpret_cast<const void*>(EEMemory::RecompilerRead64);
+		case 128:
+			return reinterpret_cast<const void*>(EEMemory::RecompilerRead128);
+		default:
+			pxFailRel("Invalid Full TLB read size");
+			return nullptr;
+	}
+}
+
+static const void* GetFullTLBWriteFunction(u32 bits)
+{
+	switch (bits)
+	{
+		case 8:
+			return reinterpret_cast<const void*>(EEMemory::RecompilerWrite8);
+		case 16:
+			return reinterpret_cast<const void*>(EEMemory::RecompilerWrite16);
+		case 32:
+			return reinterpret_cast<const void*>(EEMemory::RecompilerWrite32);
+		case 64:
+			return reinterpret_cast<const void*>(EEMemory::RecompilerWrite64);
+		case 128:
+			return reinterpret_cast<const void*>(EEMemory::RecompilerWrite128);
+		default:
+			pxFailRel("Invalid Full TLB write size");
+			return nullptr;
+	}
+}
+
+static void EmitFullTLBReadResultExtension(u32 bits, bool sign)
+{
+	switch (bits)
+	{
+		case 8:
+			sign ? xMOVSX(rax, al) : xMOVZX(eax, al);
+			break;
+		case 16:
+			sign ? xMOVSX(rax, ax) : xMOVZX(eax, ax);
+			break;
+		case 32:
+			if (sign)
+				xMOVSX(rax, eax);
+			break;
+		case 64:
+			break;
+		default:
+			pxFailRel("Invalid Full TLB scalar read size");
+			break;
+	}
+}
+
+static bool CanUseFullTLBDirectSegmentFastPath()
+{
+	// The block-entry context guard makes this compile-time specialization safe until
+	// Status changes. Individual kseg0 accesses still honor EEMemory's cache semantics.
+	return EEMmu::IsKernelMode(cpuRegs.CP0.n.Status.val);
+}
+
+static bool IsFullTLBDirectSegmentAddress(u32 address)
+{
+	if (address >= 0xa0000000 && address < 0xc0000000)
+		return true;
+	return address >= 0x80000000 && address < 0xa0000000 &&
+	       (!CHECK_CACHE || (cpuRegs.CP0.n.Config & 0x7) != 3);
+}
+
+static bool CanUseFullTLBKseg0FastPath()
+{
+	return !CHECK_CACHE || (cpuRegs.CP0.n.Config & 0x7) != 3;
+}
+
+static bool CanUseFullTLBInlineMemoryPath()
+{
+	// The apparent inline-memory corruption was an instruction-ordering bug when a
+	// branch delay slot crossed into an unmapped page. Keep the shared C++ path as a
+	// diagnostic reference, while normal execution uses the tagged read/write micro-TLB
+	// and direct-segment fast paths (needs proper testing with broader Linux workloads).
+	return !EmuConfig.Cpu.EnableFullTLBDiagnosticTrace;
+}
+
+static bool TryDynGenFullTLBConstReadNonQuad(u32 bits, bool sign, bool xmm, u32 address,
+	vtlb_ReadRegAllocCallback dest_reg_alloc, int* result_reg)
+{
+	if (!CanUseFullTLBDirectSegmentFastPath() || !IsFullTLBDirectSegmentAddress(address) ||
+		(address & ((bits / 8) - 1)) != 0)
+	{
+		return false;
+	}
+
+	const auto mapping = vtlbdata.vmap[address >> VTLB_PAGE_BITS];
+	if (mapping.isHandler(address))
+		return false;
+
+	EE::Profiler.EmitConstMem(address);
+	const void* pointer = reinterpret_cast<const void*>(mapping.assumePtr(address));
+	if (!xmm)
+	{
+		const int reg = dest_reg_alloc ? dest_reg_alloc() : (_freeX86reg(eax), eax.GetId());
+		const xRegister64 dst(reg);
+		switch (bits)
+		{
+			case 8:
+				sign ? xMOVSX(dst, ptr8[pointer]) : xMOVZX(xRegister32(dst), ptr8[pointer]);
+				break;
+			case 16:
+				sign ? xMOVSX(dst, ptr16[pointer]) : xMOVZX(xRegister32(dst), ptr16[pointer]);
+				break;
+			case 32:
+				sign ? xMOVSX(dst, ptr32[pointer]) : xMOV(xRegister32(dst), ptr32[pointer]);
+				break;
+			case 64:
+				xMOV(dst, ptr64[pointer]);
+				break;
+			default:
+				pxFailRel("Invalid Full TLB direct read size");
+				break;
+		}
+		*result_reg = reg;
+	}
+	else
+	{
+		pxAssert(bits == 32);
+		const int reg = dest_reg_alloc ? dest_reg_alloc() : (_freeXMMreg(0), 0);
+		xMOVDZX(xRegisterSSE(reg), ptr32[pointer]);
+		*result_reg = reg;
+	}
+	return true;
+}
+
+static bool TryDynGenFullTLBConstReadQuad(u32 address, vtlb_ReadRegAllocCallback dest_reg_alloc,
+	int* result_reg)
+{
+	if (!CanUseFullTLBDirectSegmentFastPath() || !IsFullTLBDirectSegmentAddress(address) ||
+		(address & 0xf) != 0)
+	{
+		return false;
+	}
+
+	const auto mapping = vtlbdata.vmap[address >> VTLB_PAGE_BITS];
+	if (mapping.isHandler(address))
+		return false;
+
+	EE::Profiler.EmitConstMem(address);
+	const int reg = dest_reg_alloc ? dest_reg_alloc() : (_freeXMMreg(0), 0);
+	if (reg >= 0)
+		xMOVAPS(xRegisterSSE(reg), ptr128[reinterpret_cast<const void*>(mapping.assumePtr(address))]);
+	*result_reg = reg;
+	return true;
+}
+
+static bool TryDynGenFullTLBConstWrite(u32 bits, bool xmm, u32 address, int value_reg)
+{
+	if (!CanUseFullTLBDirectSegmentFastPath() || !IsFullTLBDirectSegmentAddress(address) ||
+		(address & ((bits / 8) - 1)) != 0)
+	{
+		return false;
+	}
+
+	const auto mapping = vtlbdata.vmap[address >> VTLB_PAGE_BITS];
+	if (mapping.isHandler(address))
+		return false;
+
+	EE::Profiler.EmitConstMem(address);
+	void* pointer = reinterpret_cast<void*>(mapping.assumePtr(address));
+	if (!xmm)
+	{
+		switch (bits)
+		{
+			case 8:
+				xMOV(ptr8[pointer], xRegister8(xRegister32(value_reg)));
+				break;
+			case 16:
+				xMOV(ptr16[pointer], xRegister16(value_reg));
+				break;
+			case 32:
+				xMOV(ptr32[pointer], xRegister32(value_reg));
+				break;
+			case 64:
+				xMOV(ptr64[pointer], xRegister64(value_reg));
+				break;
+			default:
+				pxFailRel("Invalid Full TLB direct write size");
+				break;
+		}
+	}
+	else if (bits == 32)
+	{
+		xMOVSS(ptr32[pointer], xRegisterSSE(value_reg));
+	}
+	else
+	{
+		pxAssert(bits == 128);
+		xMOVAPS(ptr128[pointer], xRegisterSSE(value_reg));
+	}
+	xADD(ptr32[EEMemory::GetPhysicalWriteGenerationAddress(address & 0x1fffffff)], 1);
+	return true;
+}
+
+static int GetFullTLBOperandSizeIndex(u32 bits)
+{
+	switch (bits)
+	{
+		case 8:
+			return 0;
+		case 16:
+			return 1;
+		case 32:
+			return 2;
+		case 64:
+			return 3;
+		case 128:
+			return 4;
+		default:
+			pxFailRel("Invalid Full TLB access size");
+			return 0;
+	}
+}
+
+static void PreserveFullTLBXMMForCall(int xmm_reg)
+{
+	if (xmm_reg < 0 || !xRegisterSSE::IsCallerSaved(xmm_reg))
+		return;
+	xSUB(rsp, 16);
+	xMOVAPS(ptr128[rsp], xRegisterSSE(xmm_reg));
+}
+
+static void RestoreFullTLBXMMFromCall(int xmm_reg)
+{
+	if (xmm_reg < 0 || !xRegisterSSE::IsCallerSaved(xmm_reg))
+		return;
+	xMOVAPS(xRegisterSSE(xmm_reg), ptr128[rsp]);
+	xADD(rsp, 16);
+}
+
+// Returns a packed {attributes, translated 4K page} value in RAX and, when the
+// page is directly accessible, its host base in arg4reg. Cache hits execute
+// entirely in generated code; only a miss enters the MMU resolver.
+static void DynGenFullTLBTranslate(const xRegister32& original_address, EEMmu::AccessType access_type,
+	u32 alignment_mask, int preserved_xmm_reg = -1)
+{
+	if (alignment_mask != 0)
+	{
+		xTEST(original_address, alignment_mask);
+		xForwardJZ32 aligned;
+		xMOV(arg1regd, original_address);
+		xMOV(arg2regd, static_cast<u32>(access_type));
+		PreserveFullTLBXMMForCall(preserved_xmm_reg);
+		recPrepareFullTLBAccessContext();
+		xFastCall(reinterpret_cast<const void*>(EEMemory::RaiseRecompilerAddressError));
+		RestoreFullTLBXMMFromCall(preserved_xmm_reg);
+		recFinishFullTLBAccessContext();
+		aligned.SetTarget();
+	}
+	_freeX86reg(arg4reg.GetId());
+
+	std::optional<xForwardJNE32> translated_segment_miss;
+	std::optional<xForwardJump32> translated_segment_ready;
+	if (CanUseFullTLBDirectSegmentFastPath())
+	{
+		xMOV(eax, original_address);
+		xAND(eax, CanUseFullTLBKseg0FastPath() ? 0xc0000000 : 0xe0000000);
+		xCMP(eax, CanUseFullTLBKseg0FastPath() ? 0x80000000 : 0xa0000000);
+		translated_segment_miss.emplace();
+		xMOV(eax, original_address);
+		xAND(eax, 0x1ffff000);
+		xXOR(arg4reg, arg4reg);
+		translated_segment_ready.emplace();
+		translated_segment_miss->SetTarget();
+	}
+
+	xMOV(eax, original_address);
+	xSHR(eax, VTLB_PAGE_BITS);
+	xMOV(arg1regd, eax);
+	xAND(eax, EEMemory::RECOMPILER_TRANSLATION_CACHE_SIZE - 1);
+	xSHL(eax, 5);
+	_freeX86reg(arg3reg.GetId());
+	EEMemory::RecompilerJitTranslationCacheEntry* const cache =
+		EEMemory::GetRecompilerJitTranslationCacheBase(access_type);
+	const xAddressVoid cache_entry = xComplexAddress(arg3reg, cache, rax);
+	xCMP(ptr32[cache_entry + static_cast<sptr>(offsetof(EEMemory::RecompilerJitTranslationCacheEntry, virtual_page))],
+		arg1regd);
+	xForwardJNE32 cache_miss_page;
+	xCMP(ptr32[cache_entry + offsetof(EEMemory::RecompilerJitTranslationCacheEntry, translation_generation)],
+		EEMmu::GetTranslationGeneration());
+	xForwardJNE32 cache_miss_generation;
+	xCMP(ptr32[cache_entry + offsetof(EEMemory::RecompilerJitTranslationCacheEntry, context_key)],
+		EEMemory::GetRecompilerJitTranslationContextKey());
+	xForwardJNE32 cache_miss_context;
+	xMOV(arg4reg, ptr64[cache_entry + offsetof(EEMemory::RecompilerJitTranslationCacheEntry, host_page)]);
+	xMOV(rax, ptr64[cache_entry + offsetof(EEMemory::RecompilerJitTranslationCacheEntry, translation)]);
+	xForwardJump32 translation_ready;
+
+	cache_miss_page.SetTarget();
+	cache_miss_generation.SetTarget();
+	cache_miss_context.SetTarget();
+	xMOV(arg1regd, original_address);
+	xMOV(arg2regd, static_cast<u32>(access_type));
+	PreserveFullTLBXMMForCall(preserved_xmm_reg);
+	recPrepareFullTLBAccessContext();
+	xFastCall(reinterpret_cast<const void*>(EEMemory::ResolveRecompilerJitTranslation));
+	RestoreFullTLBXMMFromCall(preserved_xmm_reg);
+	recFinishFullTLBAccessContext();
+	// The resolver publishes host_page before virtual_page. Recompute the direct-mapped
+	// entry after the call because all argument registers are caller-saved.
+	xMOV(xRegister32(arg4reg.GetId()), original_address);
+	xSHR(xRegister32(arg4reg.GetId()), VTLB_PAGE_BITS);
+	xAND(xRegister32(arg4reg.GetId()), EEMemory::RECOMPILER_TRANSLATION_CACHE_SIZE - 1);
+	xSHL(xRegister32(arg4reg.GetId()), 5);
+	xMOV(arg4reg,
+		ptr64[xComplexAddress(arg3reg, cache, arg4reg) +
+			  offsetof(EEMemory::RecompilerJitTranslationCacheEntry, host_page)]);
+	translation_ready.SetTarget();
+	if (translated_segment_ready.has_value())
+		translated_segment_ready->SetTarget();
+}
+
+static void DynGenFullTLBPhysicalRead(u32 bits, bool sign, const xRegister32& original_address)
+{
+	// RAX holds packed translation here. Test attributes before replacing the virtual address.
+	xMOV(arg3reg, rax);
+	xSHR(arg3reg, 32);
+	xTEST(xRegister32(arg3reg.GetId()), EEMemory::RECOMPILER_TRANSLATION_NO_ACCESS);
+	xForwardJNZ32 no_access;
+	std::optional<xForwardJE32> cached_access;
+	std::optional<xForwardJump32> cached_done;
+	if (CHECK_CACHE)
+	{
+		xMOV(arg1regd, xRegister32(arg3reg.GetId()));
+		xAND(arg1regd, EEMemory::RECOMPILER_TRANSLATION_CACHE_MODE_MASK);
+		xCMP(arg1regd, 3U << EEMemory::RECOMPILER_TRANSLATION_CACHE_MODE_SHIFT);
+		cached_access.emplace();
+	}
+	xTEST(arg4reg, arg4reg);
+	xForwardJZ32 host_page_miss;
+	xMOV(arg1regd, original_address);
+	xAND(arg1regd, VTLB_PAGE_MASK);
+	xADD(arg1reg, arg4reg);
+	vtlb_private::DynGen_DirectRead(bits, sign);
+	xForwardJump32 host_page_done;
+	host_page_miss.SetTarget();
+	xTEST(xRegister32(arg3reg.GetId()), EEMemory::RECOMPILER_TRANSLATION_SCRATCHPAD);
+	xForwardJNZ32 scratchpad;
+
+	xMOV(arg1regd, original_address);
+	xAND(arg1regd, VTLB_PAGE_MASK);
+	xMOV(original_address, eax);
+	xADD(original_address, arg1regd);
+	xMOV(eax, original_address);
+	xSHR(eax, VTLB_PAGE_BITS);
+	xMOV(rax, ptrNative[xComplexAddress(arg3reg, vtlbdata.pmap, rax * wordsize)]);
+	xTEST(rax, rax);
+	xForwardJS32 physical_handler;
+	xMOV(arg1regd, original_address);
+	xAND(arg1regd, VTLB_PAGE_MASK);
+	xADD(arg1reg, rax);
+	vtlb_private::DynGen_DirectRead(bits, sign);
+	xForwardJump32 physical_direct_done;
+
+	physical_handler.SetTarget();
+	xMOV(arg1regd, original_address);
+	xADD(arg1reg, rax);
+	xFastCall(GetIndirectDispatcherPtr(0, GetFullTLBOperandSizeIndex(bits), sign && bits < 64));
+	xForwardJump32 physical_handler_done;
+
+	scratchpad.SetTarget();
+	xMOV(arg1regd, original_address);
+	xAND(arg1regd, VTLB_PAGE_MASK);
+	xMOV(original_address, eax);
+	xADD(original_address, arg1regd);
+	xAND(original_address, 0x3fff);
+	xLoadFarAddr(rax, eeMem->Scratch);
+	xMOV(arg1regd, original_address);
+	xADD(arg1reg, rax);
+	vtlb_private::DynGen_DirectRead(bits, sign);
+	xForwardJump32 scratchpad_done;
+
+	if (CHECK_CACHE)
+	{
+		cached_access->SetTarget();
+		xMOV(arg1regd, original_address);
+		recPrepareFullTLBAccessContext();
+		xFastCall(GetFullTLBReadFunction(bits));
+		recFinishFullTLBAccessContext();
+		cached_done.emplace();
+	}
+
+	no_access.SetTarget();
+	if (bits == 128)
+		xPXOR(xmm0, xmm0);
+	else
+		xXOR(rax, rax);
+	physical_direct_done.SetTarget();
+	physical_handler_done.SetTarget();
+	scratchpad_done.SetTarget();
+	host_page_done.SetTarget();
+	if (cached_done.has_value())
+		cached_done->SetTarget();
+}
+
+static int DynGenFullTLBReadNonQuad(u32 bits, bool sign, bool xmm, int addr_reg,
+	vtlb_ReadRegAllocCallback dest_reg_alloc, const u32* addr_const)
+{
+	const u32 load_signature = cpuRegs.code & 0xffff0000U;
+	const bool trace_gp_related_load = EmuConfig.Cpu.EnableFullTLBDiagnosticTrace && bits == 32 && sign &&
+	                                   (load_signature == 0x8f990000U || // lw t9, imm(gp)
+										   load_signature == 0x8fbc0000U); // lw gp, imm(sp)
+	const int original_reg = _allocX86reg(X86TYPE_TEMP, 0, MODE_CALLEESAVED);
+	const xRegister32 original_address(original_reg);
+	if (!addr_const)
+	{
+		pxAssert(addr_reg == arg1regd.GetId());
+		xMOV(original_address, arg1regd);
+	}
+	iFlushCall(FLUSH_FULLVTLB);
+	if (addr_const)
+	{
+		EE::Profiler.EmitConstMem(*addr_const);
+		xMOV(original_address, *addr_const);
+	}
+	else
+	{
+		EE::Profiler.EmitMem(addr_reg);
+	}
+	if (trace_gp_related_load)
+		xMOV(ptr32[EEMemory::GetFullTLBDiagnosticReadVAddrAddress()], original_address);
+
+	if (CanUseFullTLBInlineMemoryPath())
+	{
+		DynGenFullTLBTranslate(original_address, EEMmu::AccessType::Load, (bits / 8) - 1);
+		DynGenFullTLBPhysicalRead(bits, sign, original_address);
+	}
+	else
+	{
+		xMOV(arg1regd, original_address);
+		recPrepareFullTLBAccessContext();
+		xFastCall(GetFullTLBReadFunction(bits));
+		recFinishFullTLBAccessContext();
+	}
+	if (trace_gp_related_load)
+	{
+		xMOV(arg1reg, rax);
+		xMOV(arg2regd, pc - 4);
+		xMOV(xRegister32(arg3reg.GetId()), cpuRegs.code);
+		xFastCall(reinterpret_cast<const void*>(EEMemory::RecordFullTLBDiagnosticReadResult));
+	}
+	_freeX86reg(original_reg);
+	EmitFullTLBReadResultExtension(bits, sign);
+
+	if (!xmm)
+	{
+		const int reg = dest_reg_alloc ? dest_reg_alloc() : (_freeX86reg(eax), eax.GetId());
+		xMOV(xRegister64(reg), rax);
+		return reg;
+	}
+
+	pxAssert(bits == 32);
+	const int reg = dest_reg_alloc ? dest_reg_alloc() : (_freeXMMreg(0), 0);
+	xMOVDZX(xRegisterSSE(reg), eax);
+	return reg;
+}
+
+static int DynGenFullTLBReadQuad(int addr_reg, vtlb_ReadRegAllocCallback dest_reg_alloc,
+	const u32* addr_const)
+{
+	const int original_reg = _allocX86reg(X86TYPE_TEMP, 0, MODE_CALLEESAVED);
+	const xRegister32 original_address(original_reg);
+	if (!addr_const)
+	{
+		pxAssert(addr_reg == arg1regd.GetId());
+		xMOV(original_address, arg1regd);
+	}
+	iFlushCall(FLUSH_FULLVTLB);
+	if (addr_const)
+	{
+		EE::Profiler.EmitConstMem(*addr_const);
+		xMOV(original_address, *addr_const);
+	}
+	else
+	{
+		EE::Profiler.EmitMem(addr_reg);
+	}
+
+	if (CanUseFullTLBInlineMemoryPath())
+	{
+		DynGenFullTLBTranslate(original_address, EEMmu::AccessType::Load, 0xf);
+		DynGenFullTLBPhysicalRead(128, false, original_address);
+	}
+	else
+	{
+		xMOV(arg1regd, original_address);
+		recPrepareFullTLBAccessContext();
+		xFastCall(GetFullTLBReadFunction(128));
+		recFinishFullTLBAccessContext();
+	}
+	_freeX86reg(original_reg);
+	const int reg = dest_reg_alloc ? dest_reg_alloc() : (_freeXMMreg(0), 0);
+	if (reg >= 0)
+		xMOVAPS(xRegisterSSE(reg), xmm0);
+	return reg;
+}
+
+static void DynGenFullTLBPrepareWriteValue(u32 bits, bool xmm, int saved_value_reg)
+{
+	if (!xmm)
+	{
+		xMOV(arg2reg, xRegister64(saved_value_reg));
+	}
+	else if (bits == 32)
+	{
+		xMOVD(arg2regd, xRegisterSSE(saved_value_reg));
+	}
+	else
+	{
+		pxAssert(bits == 128);
+		const xRegisterSSE argreg(xRegisterSSE::GetArgRegister(1, 0));
+		if (argreg.GetId() != saved_value_reg)
+		{
+			_freeXMMreg(argreg.GetId());
+			xMOVAPS(argreg, xRegisterSSE(saved_value_reg));
+		}
+	}
+}
+
+alignas(32) static constexpr u32 s_full_tlb_merge_left_masks32[4] = {
+	0xffffff00, 0xffff0000, 0xff000000, 0};
+alignas(32) static constexpr u32 s_full_tlb_merge_right_masks32[4] = {
+	0, 0xff, 0xffff, 0xffffff};
+alignas(64) static constexpr u64 s_full_tlb_merge_left_masks64[8] = {
+	0xffffffffffffff00ULL, 0xffffffffffff0000ULL, 0xffffffffff000000ULL,
+	0xffffffff00000000ULL, 0xffffff0000000000ULL, 0xffff000000000000ULL,
+	0xff00000000000000ULL, 0};
+alignas(64) static constexpr u64 s_full_tlb_merge_right_masks64[8] = {
+	0, 0xff, 0xffff, 0xffffff, 0xffffffffULL, 0xffffffffffULL,
+	0xffffffffffffULL, 0xffffffffffffffULL};
+
+static void DynGenFullTLBMergeValue(u32 bits, bool left, const xRegister32& index,
+	const xRegister64& saved_value)
+{
+	pxAssert(bits == 32 || bits == 64);
+	if (bits == 32)
+	{
+		const u32* masks = left ? s_full_tlb_merge_left_masks32 : s_full_tlb_merge_right_masks32;
+		xAND(eax, ptr32[xComplexAddress(arg3reg, const_cast<u32*>(masks), xAddressReg(index) * 4)]);
+		xMOV(arg2regd, xRegister32(saved_value));
+	}
+	else
+	{
+		const u64* masks = left ? s_full_tlb_merge_left_masks64 : s_full_tlb_merge_right_masks64;
+		xAND(rax, ptr64[xComplexAddress(arg3reg, const_cast<u64*>(masks), xAddressReg(index) * 8)]);
+		xMOV(arg2reg, saved_value);
+	}
+
+	xMOV(ecx, index);
+	if (left)
+	{
+		xXOR(ecx, (bits / 8) - 1);
+		xSHL(ecx, 3);
+		bits == 32 ? xSHR(arg2regd, cl) : xSHR(arg2reg, cl);
+	}
+	else
+	{
+		xSHL(ecx, 3);
+		bits == 32 ? xSHL(arg2regd, cl) : xSHL(arg2reg, cl);
+	}
+	bits == 32 ? xOR(arg2regd, eax) : xOR(arg2reg, rax);
+}
+
+static void DynGenFullTLBMergePhysicalWrite(u32 bits, bool left, const xRegister32& original_address,
+	const xRegister32& merge_index, const xRegister64& saved_value, const void* cache_function)
+{
+	xMOV(arg3reg, rax);
+	xSHR(arg3reg, 32);
+	xTEST(xRegister32(arg3reg.GetId()), EEMemory::RECOMPILER_TRANSLATION_NO_ACCESS);
+	xForwardJNZ32 no_access_done;
+	std::optional<xForwardJE32> cached_access;
+	if (CHECK_CACHE)
+	{
+		xMOV(arg1regd, xRegister32(arg3reg.GetId()));
+		xAND(arg1regd, EEMemory::RECOMPILER_TRANSLATION_CACHE_MODE_MASK);
+		xCMP(arg1regd, 3U << EEMemory::RECOMPILER_TRANSLATION_CACHE_MODE_SHIFT);
+		cached_access.emplace();
+	}
+	xTEST(xRegister32(arg3reg.GetId()), EEMemory::RECOMPILER_TRANSLATION_SCRATCHPAD);
+	xForwardJNZ32 scratchpad;
+
+	// The virtual address was aligned before translation, so the packed page plus
+	// its low 12 bits is also the aligned physical RMW address.
+	xMOV(arg1regd, original_address);
+	xAND(arg1regd, VTLB_PAGE_MASK);
+	xMOV(original_address, eax);
+	xADD(original_address, arg1regd);
+	xMOV(eax, original_address);
+	xSHR(eax, VTLB_PAGE_BITS);
+	xMOV(rax, ptrNative[xComplexAddress(arg3reg, vtlbdata.pmap, rax * wordsize)]);
+	xTEST(rax, rax);
+	xForwardJS32 physical_handler;
+	xMOV(arg1regd, original_address);
+	xAND(arg1regd, VTLB_PAGE_MASK);
+	xADD(arg1reg, rax);
+	vtlb_private::DynGen_DirectRead(bits, false);
+	DynGenFullTLBMergeValue(bits, left, merge_index, saved_value);
+	xMOV(eax, original_address);
+	xSHR(eax, VTLB_PAGE_BITS);
+	xADD(ptr32[xComplexAddress(arg3reg, EEMemory::GetPhysicalWriteGenerationBase(), rax * 4)], 1);
+	xMOV(eax, original_address);
+	xSHR(eax, VTLB_PAGE_BITS);
+	xMOV(rax, ptrNative[xComplexAddress(arg3reg, vtlbdata.pmap, rax * wordsize)]);
+	xMOV(arg1regd, original_address);
+	xAND(arg1regd, VTLB_PAGE_MASK);
+	xADD(arg1reg, rax);
+	vtlb_private::DynGen_DirectWrite(bits);
+	xForwardJump32 physical_direct_done;
+
+	physical_handler.SetTarget();
+	xMOV(arg1regd, original_address);
+	xADD(arg1reg, rax);
+	xFastCall(GetIndirectDispatcherPtr(0, GetFullTLBOperandSizeIndex(bits), 0));
+	DynGenFullTLBMergeValue(bits, left, merge_index, saved_value);
+	xMOV(eax, original_address);
+	xSHR(eax, VTLB_PAGE_BITS);
+	xADD(ptr32[xComplexAddress(arg3reg, EEMemory::GetPhysicalWriteGenerationBase(), rax * 4)], 1);
+	xMOV(eax, original_address);
+	xSHR(eax, VTLB_PAGE_BITS);
+	xMOV(rax, ptrNative[xComplexAddress(arg3reg, vtlbdata.pmap, rax * wordsize)]);
+	xMOV(arg1regd, original_address);
+	xADD(arg1reg, rax);
+	xFastCall(GetIndirectDispatcherPtr(1, GetFullTLBOperandSizeIndex(bits), 0));
+	xForwardJump32 physical_handler_done;
+
+	scratchpad.SetTarget();
+	xMOV(arg1regd, original_address);
+	xAND(arg1regd, VTLB_PAGE_MASK);
+	xMOV(original_address, eax);
+	xADD(original_address, arg1regd);
+	xAND(original_address, 0x3fff);
+	xLoadFarAddr(rax, eeMem->Scratch);
+	xMOV(arg1regd, original_address);
+	xADD(arg1reg, rax);
+	vtlb_private::DynGen_DirectRead(bits, false);
+	DynGenFullTLBMergeValue(bits, left, merge_index, saved_value);
+	xADD(ptr32[EEMemory::GetScratchpadWriteGenerationAddress()], 1);
+	xLoadFarAddr(rax, eeMem->Scratch);
+	xMOV(arg1regd, original_address);
+	xADD(arg1reg, rax);
+	vtlb_private::DynGen_DirectWrite(bits);
+	xForwardJump32 scratchpad_done;
+
+	if (CHECK_CACHE)
+	{
+		cached_access->SetTarget();
+		xMOV(arg1regd, original_address);
+		xADD(arg1regd, merge_index);
+		xMOV(arg2reg, saved_value);
+		recPrepareFullTLBAccessContext();
+		xFastCall(cache_function);
+		recFinishFullTLBAccessContext();
+	}
+	no_access_done.SetTarget();
+	physical_direct_done.SetTarget();
+	physical_handler_done.SetTarget();
+	scratchpad_done.SetTarget();
+}
+
+static void DynGenFullTLBMergeWrite(u32 bits, bool left, int addr_reg, int value_reg,
+	const u32* addr_const, const void* cache_function)
+{
+	const u32 address_mask = (bits / 8) - 1;
+	const int original_reg = _allocX86reg(X86TYPE_TEMP, 0, MODE_CALLEESAVED);
+	const int index_reg = _allocX86reg(X86TYPE_TEMP, 0, MODE_CALLEESAVED);
+	const int saved_value_reg = _allocX86reg(X86TYPE_TEMP, 0, MODE_CALLEESAVED);
+	const xRegister32 original_address(original_reg);
+	const xRegister32 merge_index(index_reg);
+	const xRegister64 saved_value(saved_value_reg);
+	xMOV(saved_value, xRegister64(value_reg));
+	if (!addr_const)
+	{
+		pxAssert(addr_reg == arg1regd.GetId());
+		xMOV(original_address, arg1regd);
+		xMOV(merge_index, arg1regd);
+	}
+	iFlushCall(FLUSH_FULLVTLB);
+	if (addr_const)
+	{
+		EE::Profiler.EmitConstMem(*addr_const);
+		xMOV(original_address, *addr_const);
+		xMOV(merge_index, *addr_const);
+	}
+	else
+	{
+		EE::Profiler.EmitMem(addr_reg);
+	}
+	xAND(merge_index, address_mask);
+	xAND(original_address, ~address_mask);
+	if (CanUseFullTLBInlineMemoryPath())
+	{
+		DynGenFullTLBTranslate(original_address, EEMmu::AccessType::Store, 0);
+		DynGenFullTLBMergePhysicalWrite(
+			bits, left, original_address, merge_index, saved_value, cache_function);
+	}
+	else
+	{
+		xMOV(arg1regd, original_address);
+		xADD(arg1regd, merge_index);
+		xMOV(arg2reg, saved_value);
+		recPrepareFullTLBAccessContext();
+		xFastCall(cache_function);
+		recFinishFullTLBAccessContext();
+	}
+	_freeX86reg(saved_value_reg);
+	_freeX86reg(index_reg);
+	_freeX86reg(original_reg);
+}
+
+static void DynGenFullTLBPhysicalWrite(u32 bits, bool xmm, const xRegister32& original_address,
+	int saved_value_reg, const void* cache_function)
+{
+	xMOV(arg3reg, rax);
+	xSHR(arg3reg, 32);
+	xTEST(xRegister32(arg3reg.GetId()), EEMemory::RECOMPILER_TRANSLATION_NO_ACCESS);
+	xForwardJNZ32 no_access_done;
+	std::optional<xForwardJE32> cached_access;
+	if (CHECK_CACHE)
+	{
+		xMOV(arg1regd, xRegister32(arg3reg.GetId()));
+		xAND(arg1regd, EEMemory::RECOMPILER_TRANSLATION_CACHE_MODE_MASK);
+		xCMP(arg1regd, 3U << EEMemory::RECOMPILER_TRANSLATION_CACHE_MODE_SHIFT);
+		cached_access.emplace();
+	}
+	xTEST(arg4reg, arg4reg);
+	xForwardJZ32 host_page_miss;
+	xTEST(xRegister32(arg3reg.GetId()), EEMemory::RECOMPILER_TRANSLATION_SCRATCHPAD);
+	xForwardJNZ32 host_scratchpad;
+	xSHR(eax, VTLB_PAGE_BITS);
+	xADD(ptr32[xComplexAddress(arg3reg, EEMemory::GetPhysicalWriteGenerationBase(), rax * 4)], 1);
+	xForwardJump32 host_generation_done;
+	host_scratchpad.SetTarget();
+	xADD(ptr32[EEMemory::GetScratchpadWriteGenerationAddress()], 1);
+	host_generation_done.SetTarget();
+	xMOV(arg1regd, original_address);
+	xAND(arg1regd, VTLB_PAGE_MASK);
+	xADD(arg1reg, arg4reg);
+	DynGenFullTLBPrepareWriteValue(bits, xmm, saved_value_reg);
+	vtlb_private::DynGen_DirectWrite(bits);
+	xForwardJump32 host_page_done;
+	host_page_miss.SetTarget();
+	xTEST(xRegister32(arg3reg.GetId()), EEMemory::RECOMPILER_TRANSLATION_SCRATCHPAD);
+	xForwardJNZ32 scratchpad;
+
+	xMOV(arg1regd, original_address);
+	xAND(arg1regd, VTLB_PAGE_MASK);
+	xMOV(original_address, eax);
+	xADD(original_address, arg1regd);
+	xMOV(eax, original_address);
+	xSHR(eax, VTLB_PAGE_BITS);
+	xADD(ptr32[xComplexAddress(arg3reg, EEMemory::GetPhysicalWriteGenerationBase(), rax * 4)], 1);
+	xMOV(eax, original_address);
+	xSHR(eax, VTLB_PAGE_BITS);
+	xMOV(rax, ptrNative[xComplexAddress(arg3reg, vtlbdata.pmap, rax * wordsize)]);
+	xTEST(rax, rax);
+	xForwardJS32 physical_handler;
+	xMOV(arg1regd, original_address);
+	xAND(arg1regd, VTLB_PAGE_MASK);
+	xADD(arg1reg, rax);
+	DynGenFullTLBPrepareWriteValue(bits, xmm, saved_value_reg);
+	vtlb_private::DynGen_DirectWrite(bits);
+	xForwardJump32 physical_direct_done;
+
+	physical_handler.SetTarget();
+	xMOV(arg1regd, original_address);
+	xADD(arg1reg, rax);
+	DynGenFullTLBPrepareWriteValue(bits, xmm, saved_value_reg);
+	xFastCall(GetIndirectDispatcherPtr(1, GetFullTLBOperandSizeIndex(bits), 0));
+	xForwardJump32 physical_handler_done;
+
+	scratchpad.SetTarget();
+	xMOV(arg1regd, original_address);
+	xAND(arg1regd, VTLB_PAGE_MASK);
+	xMOV(original_address, eax);
+	xADD(original_address, arg1regd);
+	xAND(original_address, 0x3fff);
+	xADD(ptr32[EEMemory::GetScratchpadWriteGenerationAddress()], 1);
+	xLoadFarAddr(rax, eeMem->Scratch);
+	xMOV(arg1regd, original_address);
+	xADD(arg1reg, rax);
+	DynGenFullTLBPrepareWriteValue(bits, xmm, saved_value_reg);
+	vtlb_private::DynGen_DirectWrite(bits);
+	xForwardJump32 scratchpad_done;
+
+	if (CHECK_CACHE)
+	{
+		cached_access->SetTarget();
+		xMOV(arg1regd, original_address);
+		DynGenFullTLBPrepareWriteValue(bits, xmm, saved_value_reg);
+		recPrepareFullTLBAccessContext();
+		xFastCall(cache_function);
+		recFinishFullTLBAccessContext();
+	}
+	no_access_done.SetTarget();
+	physical_direct_done.SetTarget();
+	physical_handler_done.SetTarget();
+	scratchpad_done.SetTarget();
+	host_page_done.SetTarget();
+}
+
+static void DynGenFullTLBWrite(u32 bits, bool xmm, int addr_reg, int value_reg,
+	const u32* addr_const)
+{
+	const int original_reg = _allocX86reg(X86TYPE_TEMP, 0, MODE_CALLEESAVED);
+	const xRegister32 original_address(original_reg);
+	if (!addr_const)
+	{
+		pxAssert(addr_reg == arg1regd.GetId());
+		xMOV(original_address, arg1regd);
+	}
+	int saved_value_reg;
+	if (!xmm)
+	{
+		saved_value_reg = _allocX86reg(X86TYPE_TEMP, 0, MODE_CALLEESAVED);
+		xMOV(xRegister64(saved_value_reg), xRegister64(value_reg));
+	}
+	iFlushCall(FLUSH_FULLVTLB);
+	if (xmm)
+	{
+		saved_value_reg = _allocTempXMMreg(XMMT_INT);
+		xMOVAPS(xRegisterSSE(saved_value_reg), xRegisterSSE(value_reg));
+	}
+	if (addr_const)
+	{
+		EE::Profiler.EmitConstMem(*addr_const);
+		xMOV(original_address, *addr_const);
+	}
+	else
+	{
+		EE::Profiler.EmitMem(addr_reg);
+	}
+
+	if (CanUseFullTLBInlineMemoryPath())
+	{
+		DynGenFullTLBTranslate(original_address, EEMmu::AccessType::Store, (bits / 8) - 1,
+			xmm ? saved_value_reg : -1);
+		DynGenFullTLBPhysicalWrite(bits, xmm, original_address, saved_value_reg, GetFullTLBWriteFunction(bits));
+	}
+	else
+	{
+		xMOV(arg1regd, original_address);
+		DynGenFullTLBPrepareWriteValue(bits, xmm, saved_value_reg);
+		recPrepareFullTLBAccessContext();
+		xFastCall(GetFullTLBWriteFunction(bits));
+		recFinishFullTLBAccessContext();
+	}
+	if (xmm)
+		_freeXMMreg(saved_value_reg);
+	else
+		_freeX86reg(saved_value_reg);
+	_freeX86reg(original_reg);
 }
 
 /*
@@ -191,7 +1068,7 @@ namespace vtlb_private
 				xMOVAPS(xmm0, ptr128[arg1reg]);
 				break;
 
-			jNO_DEFAULT
+				jNO_DEFAULT
 		}
 	}
 
@@ -250,12 +1127,22 @@ static void DynGen_HandlerTest(const GenDirectFn& gen_direct, int mode, int bits
 	int szidx = 0;
 	switch (bits)
 	{
-		case   8: szidx = 0; break;
-		case  16: szidx = 1; break;
-		case  32: szidx = 2; break;
-		case  64: szidx = 3; break;
-		case 128: szidx = 4; break;
-		jNO_DEFAULT;
+		case 8:
+			szidx = 0;
+			break;
+		case 16:
+			szidx = 1;
+			break;
+		case 32:
+			szidx = 2;
+			break;
+		case 64:
+			szidx = 3;
+			break;
+		case 128:
+			szidx = 4;
+			break;
+			jNO_DEFAULT;
 	}
 	xForwardJS8 to_handler;
 	gen_direct();
@@ -366,6 +1253,8 @@ void vtlb_DynGenDispatchers()
 int vtlb_DynGenReadNonQuad(u32 bits, bool sign, bool xmm, int addr_reg, vtlb_ReadRegAllocCallback dest_reg_alloc)
 {
 	pxAssume(bits <= 64);
+	if (EmuConfig.Cpu.EnableExperimentalEETLB)
+		return DynGenFullTLBReadNonQuad(bits, sign, xmm, addr_reg, dest_reg_alloc, nullptr);
 
 	int x86_dest_reg;
 	if (!CHECK_FASTMEM || vtlb_IsFaultingPC(pc))
@@ -401,20 +1290,20 @@ int vtlb_DynGenReadNonQuad(u32 bits, bool sign, bool xmm, int addr_reg, vtlb_Rea
 		const xRegister64 x86reg(x86_dest_reg);
 		switch (bits)
 		{
-		case 8:
-			sign ? xMOVSX(x86reg, ptr8[RFASTMEMBASE + x86addr]) : xMOVZX(xRegister32(x86reg), ptr8[RFASTMEMBASE + x86addr]);
-			break;
-		case 16:
-			sign ? xMOVSX(x86reg, ptr16[RFASTMEMBASE + x86addr]) : xMOVZX(xRegister32(x86reg), ptr16[RFASTMEMBASE + x86addr]);
-			break;
-		case 32:
-			sign ? xMOVSX(x86reg, ptr32[RFASTMEMBASE + x86addr]) : xMOV(xRegister32(x86reg), ptr32[RFASTMEMBASE + x86addr]);
-			break;
-		case 64:
-			xMOV(x86reg, ptr64[RFASTMEMBASE + x86addr]);
-			break;
+			case 8:
+				sign ? xMOVSX(x86reg, ptr8[RFASTMEMBASE + x86addr]) : xMOVZX(xRegister32(x86reg), ptr8[RFASTMEMBASE + x86addr]);
+				break;
+			case 16:
+				sign ? xMOVSX(x86reg, ptr16[RFASTMEMBASE + x86addr]) : xMOVZX(xRegister32(x86reg), ptr16[RFASTMEMBASE + x86addr]);
+				break;
+			case 32:
+				sign ? xMOVSX(x86reg, ptr32[RFASTMEMBASE + x86addr]) : xMOV(xRegister32(x86reg), ptr32[RFASTMEMBASE + x86addr]);
+				break;
+			case 64:
+				xMOV(x86reg, ptr64[RFASTMEMBASE + x86addr]);
+				break;
 
-			jNO_DEFAULT
+				jNO_DEFAULT
 		}
 	}
 	else
@@ -448,6 +1337,14 @@ int vtlb_DynGenReadNonQuad(u32 bits, bool sign, bool xmm, int addr_reg, vtlb_Rea
 //
 int vtlb_DynGenReadNonQuad_Const(u32 bits, bool sign, bool xmm, u32 addr_const, vtlb_ReadRegAllocCallback dest_reg_alloc)
 {
+	if (EmuConfig.Cpu.EnableExperimentalEETLB)
+	{
+		int result_reg;
+		if (TryDynGenFullTLBConstReadNonQuad(bits, sign, xmm, addr_const, dest_reg_alloc, &result_reg))
+			return result_reg;
+		return DynGenFullTLBReadNonQuad(bits, sign, xmm, -1, dest_reg_alloc, &addr_const);
+	}
+
 	EE::Profiler.EmitConstMem(addr_const);
 
 	int x86_dest_reg;
@@ -460,21 +1357,21 @@ int vtlb_DynGenReadNonQuad_Const(u32 bits, bool sign, bool xmm, u32 addr_const, 
 			x86_dest_reg = dest_reg_alloc ? dest_reg_alloc() : (_freeX86reg(eax), eax.GetId());
 			switch (bits)
 			{
-			case 8:
-				sign ? xMOVSX(xRegister64(x86_dest_reg), ptr8[(u8*)ppf]) : xMOVZX(xRegister32(x86_dest_reg), ptr8[(u8*)ppf]);
-				break;
+				case 8:
+					sign ? xMOVSX(xRegister64(x86_dest_reg), ptr8[(u8*)ppf]) : xMOVZX(xRegister32(x86_dest_reg), ptr8[(u8*)ppf]);
+					break;
 
-			case 16:
-				sign ? xMOVSX(xRegister64(x86_dest_reg), ptr16[(u16*)ppf]) : xMOVZX(xRegister32(x86_dest_reg), ptr16[(u16*)ppf]);
-				break;
+				case 16:
+					sign ? xMOVSX(xRegister64(x86_dest_reg), ptr16[(u16*)ppf]) : xMOVZX(xRegister32(x86_dest_reg), ptr16[(u16*)ppf]);
+					break;
 
-			case 32:
-				sign ? xMOVSX(xRegister64(x86_dest_reg), ptr32[(u32*)ppf]) : xMOV(xRegister32(x86_dest_reg), ptr32[(u32*)ppf]);
-				break;
+				case 32:
+					sign ? xMOVSX(xRegister64(x86_dest_reg), ptr32[(u32*)ppf]) : xMOV(xRegister32(x86_dest_reg), ptr32[(u32*)ppf]);
+					break;
 
-			case 64:
-				xMOV(xRegister64(x86_dest_reg), ptr64[(u64*)ppf]);
-				break;
+				case 64:
+					xMOV(xRegister64(x86_dest_reg), ptr64[(u64*)ppf]);
+					break;
 			}
 		}
 		else
@@ -491,10 +1388,18 @@ int vtlb_DynGenReadNonQuad_Const(u32 bits, bool sign, bool xmm, u32 addr_const, 
 		int szidx = 0;
 		switch (bits)
 		{
-			case  8: szidx = 0; break;
-			case 16: szidx = 1; break;
-			case 32: szidx = 2; break;
-			case 64: szidx = 3; break;
+			case 8:
+				szidx = 0;
+				break;
+			case 16:
+				szidx = 1;
+				break;
+			case 32:
+				szidx = 2;
+				break;
+			case 64:
+				szidx = 3;
+				break;
 		}
 
 		// Shortcut for the INTC_STAT register, which many games like to spin on heavily.
@@ -523,22 +1428,22 @@ int vtlb_DynGenReadNonQuad_Const(u32 bits, bool sign, bool xmm, u32 addr_const, 
 				x86_dest_reg = dest_reg_alloc ? dest_reg_alloc() : (_freeX86reg(eax), eax.GetId());
 				switch (bits)
 				{
-					// save REX prefix by using 32bit dest for zext
-				case 8:
-					sign ? xMOVSX(xRegister64(x86_dest_reg), al) : xMOVZX(xRegister32(x86_dest_reg), al);
-					break;
+						// save REX prefix by using 32bit dest for zext
+					case 8:
+						sign ? xMOVSX(xRegister64(x86_dest_reg), al) : xMOVZX(xRegister32(x86_dest_reg), al);
+						break;
 
-				case 16:
-					sign ? xMOVSX(xRegister64(x86_dest_reg), ax) : xMOVZX(xRegister32(x86_dest_reg), ax);
-					break;
+					case 16:
+						sign ? xMOVSX(xRegister64(x86_dest_reg), ax) : xMOVZX(xRegister32(x86_dest_reg), ax);
+						break;
 
-				case 32:
-					sign ? xMOVSX(xRegister64(x86_dest_reg), eax) : xMOV(xRegister32(x86_dest_reg), eax);
-					break;
+					case 32:
+						sign ? xMOVSX(xRegister64(x86_dest_reg), eax) : xMOV(xRegister32(x86_dest_reg), eax);
+						break;
 
-				case 64:
-					xMOV(xRegister64(x86_dest_reg), rax);
-					break;
+					case 64:
+						xMOV(xRegister64(x86_dest_reg), rax);
+						break;
 				}
 			}
 			else
@@ -555,13 +1460,15 @@ int vtlb_DynGenReadNonQuad_Const(u32 bits, bool sign, bool xmm, u32 addr_const, 
 int vtlb_DynGenReadQuad(u32 bits, int addr_reg, vtlb_ReadRegAllocCallback dest_reg_alloc)
 {
 	pxAssume(bits == 128);
+	if (EmuConfig.Cpu.EnableExperimentalEETLB)
+		return DynGenFullTLBReadQuad(addr_reg, dest_reg_alloc, nullptr);
 
 	if (!CHECK_FASTMEM || vtlb_IsFaultingPC(pc))
 	{
 		iFlushCall(FLUSH_FULLVTLB);
 
 		DynGen_PrepRegs(arg1regd.GetId(), -1, bits, true);
-		DynGen_HandlerTest([bits]() {DynGen_DirectRead(bits, false); },  0, bits);
+		DynGen_HandlerTest([bits]() { DynGen_DirectRead(bits, false); }, 0, bits);
 
 		const int reg = dest_reg_alloc ? dest_reg_alloc() : (_freeXMMreg(0), 0); // Handler returns in xmm0
 		if (reg >= 0)
@@ -594,6 +1501,13 @@ int vtlb_DynGenReadQuad(u32 bits, int addr_reg, vtlb_ReadRegAllocCallback dest_r
 int vtlb_DynGenReadQuad_Const(u32 bits, u32 addr_const, vtlb_ReadRegAllocCallback dest_reg_alloc)
 {
 	pxAssert(bits == 128);
+	if (EmuConfig.Cpu.EnableExperimentalEETLB)
+	{
+		int result_reg;
+		if (TryDynGenFullTLBConstReadQuad(addr_const, dest_reg_alloc, &result_reg))
+			return result_reg;
+		return DynGenFullTLBReadQuad(-1, dest_reg_alloc, &addr_const);
+	}
 
 	EE::Profiler.EmitConstMem(addr_const);
 
@@ -627,6 +1541,11 @@ int vtlb_DynGenReadQuad_Const(u32 bits, u32 addr_const, vtlb_ReadRegAllocCallbac
 
 void vtlb_DynGenWrite(u32 sz, bool xmm, int addr_reg, int value_reg)
 {
+	if (EmuConfig.Cpu.EnableExperimentalEETLB)
+	{
+		DynGenFullTLBWrite(sz, xmm, addr_reg, value_reg, nullptr);
+		return;
+	}
 #ifdef LOG_STORES
 	{
 		xSUB(rsp, 16 * 16);
@@ -697,20 +1616,20 @@ void vtlb_DynGenWrite(u32 sz, bool xmm, int addr_reg, int value_reg)
 	{
 		switch (sz)
 		{
-		case 8:
-			xMOV(ptr8[RFASTMEMBASE + vaddr_reg], xRegister8(xRegister32(value_reg)));
-			break;
-		case 16:
-			xMOV(ptr16[RFASTMEMBASE + vaddr_reg], xRegister16(value_reg));
-			break;
-		case 32:
-			xMOV(ptr32[RFASTMEMBASE + vaddr_reg], xRegister32(value_reg));
-			break;
-		case 64:
-			xMOV(ptr64[RFASTMEMBASE + vaddr_reg], xRegister64(value_reg));
-			break;
+			case 8:
+				xMOV(ptr8[RFASTMEMBASE + vaddr_reg], xRegister8(xRegister32(value_reg)));
+				break;
+			case 16:
+				xMOV(ptr16[RFASTMEMBASE + vaddr_reg], xRegister16(value_reg));
+				break;
+			case 32:
+				xMOV(ptr32[RFASTMEMBASE + vaddr_reg], xRegister32(value_reg));
+				break;
+			case 64:
+				xMOV(ptr64[RFASTMEMBASE + vaddr_reg], xRegister64(value_reg));
+				break;
 
-			jNO_DEFAULT
+				jNO_DEFAULT
 		}
 	}
 	else
@@ -718,14 +1637,14 @@ void vtlb_DynGenWrite(u32 sz, bool xmm, int addr_reg, int value_reg)
 		pxAssert(sz == 32 || sz == 128);
 		switch (sz)
 		{
-		case 32:
-			xMOVSS(ptr32[RFASTMEMBASE + vaddr_reg], xRegisterSSE(value_reg));
-			break;
-		case 128:
-			xMOVAPS(ptr128[RFASTMEMBASE + vaddr_reg], xRegisterSSE(value_reg));
-			break;
+			case 32:
+				xMOVSS(ptr32[RFASTMEMBASE + vaddr_reg], xRegisterSSE(value_reg));
+				break;
+			case 128:
+				xMOVAPS(ptr128[RFASTMEMBASE + vaddr_reg], xRegisterSSE(value_reg));
+				break;
 
-			jNO_DEFAULT
+				jNO_DEFAULT
 		}
 	}
 
@@ -746,6 +1665,14 @@ void vtlb_DynGenWrite(u32 sz, bool xmm, int addr_reg, int value_reg)
 // recompiler if the TLB is changed.
 void vtlb_DynGenWrite_Const(u32 bits, bool xmm, u32 addr_const, int value_reg)
 {
+	if (EmuConfig.Cpu.EnableExperimentalEETLB)
+	{
+		if (TryDynGenFullTLBConstWrite(bits, xmm, addr_const, value_reg))
+			return;
+		DynGenFullTLBWrite(bits, xmm, -1, value_reg, &addr_const);
+		return;
+	}
+
 	EE::Profiler.EmitConstMem(addr_const);
 
 #ifdef LOG_STORES
@@ -753,7 +1680,7 @@ void vtlb_DynGenWrite_Const(u32 bits, bool xmm, u32 addr_const, int value_reg)
 		xSUB(rsp, 16 * 16);
 		for (u32 i = 0; i < 16; i++)
 			xMOVAPS(ptr[rsp + i * 16], xRegisterSSE::GetInstance(i));
-		for (const auto& reg : { rbx, rcx, rdx, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15, rbp })
+		for (const auto& reg : {rbx, rcx, rdx, rsi, rdi, r8, r9, r10, r11, r12, r13, r14, r15, rbp})
 			xPUSH(reg);
 
 		xPUSH(xRegister64(value_reg));
@@ -897,6 +1824,73 @@ void vtlb_DynGenWrite_Const(u32 bits, bool xmm, u32 addr_const, int value_reg)
 	}
 }
 
+void vtlb_DynGenFullTLBMergeWrite(u32 bits, bool left, int addr_reg, int value_reg)
+{
+	pxAssert(EmuConfig.Cpu.EnableExperimentalEETLB);
+	const void* function = nullptr;
+	if (bits == 32)
+		function = left ? reinterpret_cast<const void*>(EEMemory::RecompilerWriteLeft32) :
+		                  reinterpret_cast<const void*>(EEMemory::RecompilerWriteRight32);
+	else
+	{
+		pxAssert(bits == 64);
+		function = left ? reinterpret_cast<const void*>(EEMemory::RecompilerWriteLeft64) :
+		                  reinterpret_cast<const void*>(EEMemory::RecompilerWriteRight64);
+	}
+	DynGenFullTLBMergeWrite(bits, left, addr_reg, value_reg, nullptr, function);
+}
+
+void vtlb_DynGenFullTLBMergeWrite_Const(u32 bits, bool left, u32 addr_const, int value_reg)
+{
+	pxAssert(EmuConfig.Cpu.EnableExperimentalEETLB);
+	const void* function = nullptr;
+	if (bits == 32)
+		function = left ? reinterpret_cast<const void*>(EEMemory::RecompilerWriteLeft32) :
+		                  reinterpret_cast<const void*>(EEMemory::RecompilerWriteRight32);
+	else
+	{
+		pxAssert(bits == 64);
+		function = left ? reinterpret_cast<const void*>(EEMemory::RecompilerWriteLeft64) :
+		                  reinterpret_cast<const void*>(EEMemory::RecompilerWriteRight64);
+	}
+	DynGenFullTLBMergeWrite(bits, left, -1, value_reg, &addr_const, function);
+}
+
+static void DynGenFullTLBCacheTranslate(int addr_reg, const u32* addr_const)
+{
+	const int original_reg = _allocX86reg(X86TYPE_TEMP, 0, MODE_CALLEESAVED);
+	const xRegister32 original_address(original_reg);
+	if (!addr_const)
+	{
+		pxAssert(addr_reg == arg1regd.GetId());
+		xMOV(original_address, arg1regd);
+	}
+	iFlushCall(FLUSH_FULLVTLB);
+	if (addr_const)
+	{
+		EE::Profiler.EmitConstMem(*addr_const);
+		xMOV(original_address, *addr_const);
+	}
+	else
+	{
+		EE::Profiler.EmitMem(addr_reg);
+	}
+	DynGenFullTLBTranslate(original_address, EEMmu::AccessType::Cache, 0);
+	_freeX86reg(original_reg);
+}
+
+void vtlb_DynGenFullTLBCacheTranslate(int addr_reg)
+{
+	pxAssert(EmuConfig.Cpu.EnableExperimentalEETLB);
+	DynGenFullTLBCacheTranslate(addr_reg, nullptr);
+}
+
+void vtlb_DynGenFullTLBCacheTranslate_Const(u32 addr_const)
+{
+	pxAssert(EmuConfig.Cpu.EnableExperimentalEETLB);
+	DynGenFullTLBCacheTranslate(-1, &addr_const);
+}
+
 //////////////////////////////////////////////////////////////////////////////////////////
 //							Extra Implementations
 
@@ -984,7 +1978,7 @@ void vtlb_DynBackpatchLoadStore(uptr code_address, u32 code_size, u32 guest_pc, 
 	if (is_load)
 	{
 		DynGen_PrepRegs(address_register, -1, size_in_bits, is_xmm);
-		DynGen_HandlerTest([size_in_bits, is_signed]() {DynGen_DirectRead(size_in_bits, is_signed); },  0, size_in_bits, is_signed && size_in_bits <= 32);
+		DynGen_HandlerTest([size_in_bits, is_signed]() { DynGen_DirectRead(size_in_bits, is_signed); }, 0, size_in_bits, is_signed && size_in_bits <= 32);
 
 		if (size_in_bits == 128)
 		{

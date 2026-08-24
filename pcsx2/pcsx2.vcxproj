@@ -517,6 +517,8 @@
     </ClCompile>
     <ClCompile Include="COP0.cpp" />
     <ClCompile Include="COP2.cpp" />
+    <ClCompile Include="EEMemory.cpp" />
+    <ClCompile Include="EEMmu.cpp" />
     <ClCompile Include="FPU.cpp" />
     <ClCompile Include="Interpreter.cpp" />
     <ClCompile Include="MMI.cpp" />
@@ -909,6 +911,8 @@
     <ClInclude Include="SPR.h" />
     <ClInclude Include="Gif.h" />
     <ClInclude Include="R5900.h" />
+    <ClInclude Include="EEMemory.h" />
+    <ClInclude Include="EEMmu.h" />
     <ClInclude Include="R5900OpcodeTables.h" />
     <ClInclude Include="COP0.h" />
     <ClInclude Include="x86\iCOP0.h" />

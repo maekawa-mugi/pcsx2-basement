@@ -1743,7 +1743,7 @@ void FullscreenUI::DoCopyGameSettings()
 	SetSettingsChanged(s_game_settings_interface.get());
 
 	ShowToast(ICON_FA_CIRCLE_CHECK, fmt::format(FSUI_FSTR("Game settings initialized with global settings for '{}'."),
-								 Path::GetFileTitle(s_game_settings_interface->GetFileName())));
+										Path::GetFileTitle(s_game_settings_interface->GetFileName())));
 }
 
 void FullscreenUI::DoClearGameSettings()
@@ -3095,7 +3095,7 @@ void FullscreenUI::DrawGraphicsSettingsPage(SettingsInterface* bsi, bool show_ad
 		{
 			DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_LAYER_GROUP, "Rasterizer Ordered View"),
 				FSUI_CSTR("Enables Rasterizer Ordered View (ROV), which allows feedback loops to be executed with fewer draw calls. Can improve performance in feedback heavy games "
-					  "with higher accuracy settings."),
+						  "with higher accuracy settings."),
 				"EmuCore/GS", "HWROV", false);
 		}
 	}
@@ -4648,7 +4648,7 @@ void FullscreenUI::DrawAchievementsLoginWindow()
 				if (!result)
 				{
 					ShowToast(ICON_FA_TRIANGLE_EXCLAMATION, fmt::format(FSUI_FSTR("Login failed.\nError: {}\n\nPlease check your username and password, and try again."),
-												 error.GetDescription()));
+																error.GetDescription()));
 					return;
 				}
 
@@ -5613,6 +5613,12 @@ void FullscreenUI::DrawAdvancedSettingsPage()
 		DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_MEMORY, "Enable Extended RAM (Dev Console)"),
 			FSUI_CSTR("Exposes additional memory to the virtual machine, expanding the EE and IOP memory to 128MB and 8MB respectively."),
 			"EmuCore/CPU", "ExtraMemory", false);
+		DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_MEMORY, "Experimental EE Full TLB"),
+			FSUI_CSTR("Full 48-entry EE TLB implementation for PS2 Linux/MMU validation. The EE Recompiler uses tagged translation caches and direct-mapped kernel segments, but remains slower than standard Fastmem."),
+			"EmuCore/CPU", "EnableExperimentalEETLB", false);
+		DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_BUG, "Full TLB Diagnostic Trace"),
+			FSUI_CSTR("Keeps a bounded history of Full TLB translations and user exceptions, and writes it to emulog.txt when the virtual machine is paused. It forces the substantially slower shared reference memory path for comparison."),
+			"EmuCore/CPU", "EnableFullTLBDiagnosticTrace", false);
 
 		MenuHeading(FSUI_CSTR("Vector Units"));
 		DrawIntListSetting(bsi, FSUI_ICONSTR(ICON_FA_ARROW_TREND_DOWN, "VU0 Rounding Mode"),
@@ -6824,6 +6830,8 @@ TRANSLATE_NOOP("FullscreenUI", "Wait Loop Detection");
 TRANSLATE_NOOP("FullscreenUI", "Enable Fast Memory Access");
 TRANSLATE_NOOP("FullscreenUI", "Pause On TLB Miss");
 TRANSLATE_NOOP("FullscreenUI", "Enable Extended RAM (Dev Console)");
+TRANSLATE_NOOP("FullscreenUI", "Experimental EE Full TLB");
+TRANSLATE_NOOP("FullscreenUI", "Full TLB Diagnostic Trace");
 TRANSLATE_NOOP("FullscreenUI", "VU0 Rounding Mode");
 TRANSLATE_NOOP("FullscreenUI", "VU0 Clamping Mode");
 TRANSLATE_NOOP("FullscreenUI", "VU1 Rounding Mode");

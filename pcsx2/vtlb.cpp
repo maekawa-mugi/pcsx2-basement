@@ -323,6 +323,120 @@ template void vtlb_memWrite<mem32_t>(u32 mem, mem32_t data);
 template void vtlb_memWrite<mem64_t>(u32 mem, mem64_t data);
 
 template <typename DataType>
+DataType vtlb_physRead(u32 paddr)
+{
+	constexpr size_t width = sizeof(DataType) * 8;
+	const VTLBPhysical mapping = (paddr < VTLB_PMAP_SZ) ?
+	                                 vtlbdata.pmap[paddr >> VTLB_PAGE_BITS] :
+	                                 VTLBPhysical::fromHandler(UnmappedPhyHandler);
+
+	if (!mapping.isHandler())
+		return *reinterpret_cast<const DataType*>(mapping.assumePtr() + (paddr & VTLB_PAGE_MASK));
+
+	using Handler = typename vtlbMemFP<width, false>::fn;
+	return reinterpret_cast<Handler*>(vtlbdata.RWFT[vtlbMemFP<width, false>::Index][0][mapping.assumeHandler()])(paddr);
+}
+
+RETURNS_R128 vtlb_physRead128(u32 paddr)
+{
+	const VTLBPhysical mapping = (paddr < VTLB_PMAP_SZ) ?
+	                                 vtlbdata.pmap[paddr >> VTLB_PAGE_BITS] :
+	                                 VTLBPhysical::fromHandler(UnmappedPhyHandler);
+
+	if (!mapping.isHandler())
+		return r128_load(reinterpret_cast<const void*>(mapping.assumePtr() + (paddr & VTLB_PAGE_MASK)));
+
+	using Handler = typename vtlbMemFP<128, false>::fn;
+	return reinterpret_cast<Handler*>(vtlbdata.RWFT[vtlbMemFP<128, false>::Index][0][mapping.assumeHandler()])(paddr);
+}
+
+template <typename DataType>
+void vtlb_physWrite(u32 paddr, DataType value)
+{
+	constexpr size_t width = sizeof(DataType) * 8;
+	const VTLBPhysical mapping = (paddr < VTLB_PMAP_SZ) ?
+	                                 vtlbdata.pmap[paddr >> VTLB_PAGE_BITS] :
+	                                 VTLBPhysical::fromHandler(UnmappedPhyHandler);
+
+	if (!mapping.isHandler())
+	{
+		*reinterpret_cast<DataType*>(mapping.assumePtr() + (paddr & VTLB_PAGE_MASK)) = value;
+		return;
+	}
+
+	using Handler = typename vtlbMemFP<width, true>::fn;
+	reinterpret_cast<Handler*>(vtlbdata.RWFT[vtlbMemFP<width, true>::Index][1][mapping.assumeHandler()])(paddr, value);
+}
+
+void TAKES_R128 vtlb_physWrite128(u32 paddr, r128 value)
+{
+	const VTLBPhysical mapping = (paddr < VTLB_PMAP_SZ) ?
+	                                 vtlbdata.pmap[paddr >> VTLB_PAGE_BITS] :
+	                                 VTLBPhysical::fromHandler(UnmappedPhyHandler);
+
+	if (!mapping.isHandler())
+	{
+		r128_store_unaligned(reinterpret_cast<void*>(mapping.assumePtr() + (paddr & VTLB_PAGE_MASK)), value);
+		return;
+	}
+
+	using Handler = typename vtlbMemFP<128, true>::fn;
+	reinterpret_cast<Handler*>(vtlbdata.RWFT[vtlbMemFP<128, true>::Index][1][mapping.assumeHandler()])(paddr, value);
+}
+
+bool vtlb_IsPhysicalAddressMapped(u32 paddr)
+{
+	if (paddr >= VTLB_PMAP_SZ)
+		return false;
+
+	const VTLBPhysical mapping = vtlbdata.pmap[paddr >> VTLB_PAGE_BITS];
+	if (!mapping.isHandler())
+		return true;
+
+	const vtlbHandler handler = mapping.assumeHandler();
+	return handler != DefaultPhyHandler && handler != UnmappedPhyHandler;
+}
+
+template <typename DataType>
+DataType vtlb_sprRead(u32 offset)
+{
+	return *reinterpret_cast<const DataType*>(&eeMem->Scratch[offset & (Ps2MemSize::Scratch - 1)]);
+}
+
+RETURNS_R128 vtlb_sprRead128(u32 offset)
+{
+	return r128_load(&eeMem->Scratch[offset & (Ps2MemSize::Scratch - 1)]);
+}
+
+template <typename DataType>
+void vtlb_sprWrite(u32 offset, DataType value)
+{
+	*reinterpret_cast<DataType*>(&eeMem->Scratch[offset & (Ps2MemSize::Scratch - 1)]) = value;
+}
+
+void TAKES_R128 vtlb_sprWrite128(u32 offset, r128 value)
+{
+	r128_store_unaligned(&eeMem->Scratch[offset & (Ps2MemSize::Scratch - 1)], value);
+}
+
+template mem8_t vtlb_physRead<mem8_t>(u32 paddr);
+template mem16_t vtlb_physRead<mem16_t>(u32 paddr);
+template mem32_t vtlb_physRead<mem32_t>(u32 paddr);
+template mem64_t vtlb_physRead<mem64_t>(u32 paddr);
+template void vtlb_physWrite<mem8_t>(u32 paddr, mem8_t value);
+template void vtlb_physWrite<mem16_t>(u32 paddr, mem16_t value);
+template void vtlb_physWrite<mem32_t>(u32 paddr, mem32_t value);
+template void vtlb_physWrite<mem64_t>(u32 paddr, mem64_t value);
+template mem8_t vtlb_sprRead<mem8_t>(u32 offset);
+template mem16_t vtlb_sprRead<mem16_t>(u32 offset);
+template mem32_t vtlb_sprRead<mem32_t>(u32 offset);
+template mem64_t vtlb_sprRead<mem64_t>(u32 offset);
+template void vtlb_sprWrite<mem8_t>(u32 offset, mem8_t value);
+template void vtlb_sprWrite<mem16_t>(u32 offset, mem16_t value);
+template void vtlb_sprWrite<mem32_t>(u32 offset, mem32_t value);
+template void vtlb_sprWrite<mem64_t>(u32 offset, mem64_t value);
+
+template <typename DataType>
 DataType vtlb_ramRead(u32 addr, bool* result)
 {
 	const auto vmv = vtlbdata.vmap[addr >> VTLB_PAGE_BITS];
@@ -1518,8 +1632,8 @@ PageFaultHandler::HandlerResult PageFaultHandler::HandlePageFault(void* exceptio
 			// fprintf(stderr, "Trying backpatching vaddr %08X\n", vaddr);
 			return vtlb_BackpatchLoadStore(reinterpret_cast<uptr>(exception_pc),
 					   reinterpret_cast<uptr>(fault_address)) ?
-					   HandlerResult::ContinueExecution :
-					   HandlerResult::ExecuteNextHandler;
+			           HandlerResult::ContinueExecution :
+			           HandlerResult::ExecuteNextHandler;
 		}
 	}
 	else

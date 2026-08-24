@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Common.h"
+#include "EEMemory.h"
 
 #include <cmath>
 
@@ -391,15 +392,34 @@ void SUBA_S() {
 void LWC1() {
 	u32 addr;
 	addr = cpuRegs.GPR.r[_Rs_].UL[0] + (s16)(cpuRegs.code & 0xffff);	// force sign extension to 32bit
-	if (addr & 0x00000003) { Console.Error( "FPU (LWC1 Opcode): Invalid Unaligned Memory Address" ); return; }  // Should signal an exception?
-	fpuRegs.fpr[_Rt_].UL = memRead32(addr);
+	if (addr & 0x00000003) {
+		if (EmuConfig.Cpu.EnableExperimentalEETLB) {
+			cpuEETlbException(EEMmu::Fault::AddressError, EEMmu::AccessType::Load,
+				addr, cpuRegs.pc - 4, cpuRegs.branch != 0);
+			Cpu->CancelInstruction();
+			return;
+		}
+		Console.Error( "FPU (LWC1 Opcode): Invalid Unaligned Memory Address" ); return;
+	}
+	fpuRegs.fpr[_Rt_].UL = EmuConfig.Cpu.EnableExperimentalEETLB ? EEMemory::Read32(addr) : memRead32(addr);
 }
 
 void SWC1() {
 	u32 addr;
 	addr = cpuRegs.GPR.r[_Rs_].UL[0] + (s16)(cpuRegs.code & 0xffff);	// force sign extension to 32bit
-	if (addr & 0x00000003) { Console.Error( "FPU (SWC1 Opcode): Invalid Unaligned Memory Address" ); return; }  // Should signal an exception?
-	memWrite32(addr, fpuRegs.fpr[_Rt_].UL);
+	if (addr & 0x00000003) {
+		if (EmuConfig.Cpu.EnableExperimentalEETLB) {
+			cpuEETlbException(EEMmu::Fault::AddressError, EEMmu::AccessType::Store,
+				addr, cpuRegs.pc - 4, cpuRegs.branch != 0);
+			Cpu->CancelInstruction();
+			return;
+		}
+		Console.Error( "FPU (SWC1 Opcode): Invalid Unaligned Memory Address" ); return;
+	}
+	if (EmuConfig.Cpu.EnableExperimentalEETLB)
+		EEMemory::Write32(addr, fpuRegs.fpr[_Rt_].UL);
+	else
+		memWrite32(addr, fpuRegs.fpr[_Rt_].UL);
 }
 
 } } }

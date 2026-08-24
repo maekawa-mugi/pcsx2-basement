@@ -10,6 +10,7 @@
 */
 
 #include "Common.h"
+#include "EEMemory.h"
 
 #include <cmath>
 
@@ -52,7 +53,7 @@ __fi void _vu0run(bool breakOnMbit, bool addCycles, bool sync_only) {
 		return;
 	}
 
-	if(!EmuConfig.Cpu.Recompiler.EnableEE)
+	if (!EmuConfig.Cpu.IsEERecompilerEnabled())
 		intUpdateCPUCycles();
 
 	u64 startcycle = cpuRegs.cycle;
@@ -94,6 +95,18 @@ namespace OpcodeImpl
 	void LQC2() {
 		vu0Sync();
 		u32 addr = cpuRegs.GPR.r[_Rs_].UL[0] + (s16)cpuRegs.code;
+		if (EmuConfig.Cpu.EnableExperimentalEETLB) {
+			if (addr & 0xf) [[unlikely]] {
+				cpuEETlbException(EEMmu::Fault::AddressError, EEMmu::AccessType::Load,
+					addr, cpuRegs.pc - 4, cpuRegs.branch != 0);
+				Cpu->CancelInstruction();
+				return;
+			}
+			const u128 value = EEMemory::Read128(addr);
+			if (_Ft_)
+				VU0.VF[_Ft_].UQ = value;
+			return;
+		}
 		if (_Ft_) {
 			memRead128(addr, VU0.VF[_Ft_].UQ);
 		} else {
@@ -108,7 +121,17 @@ namespace OpcodeImpl
 	void SQC2() {
 		vu0Sync();
 		u32 addr = _Imm_ + cpuRegs.GPR.r[_Rs_].UL[0];
-		memWrite128(addr, VU0.VF[_Ft_].UQ);
+		if (EmuConfig.Cpu.EnableExperimentalEETLB) {
+			if (addr & 0xf) [[unlikely]] {
+				cpuEETlbException(EEMmu::Fault::AddressError, EEMmu::AccessType::Store,
+					addr, cpuRegs.pc - 4, cpuRegs.branch != 0);
+				Cpu->CancelInstruction();
+				return;
+			}
+			EEMemory::Write128(addr, VU0.VF[_Ft_].UQ);
+		} else {
+			memWrite128(addr, VU0.VF[_Ft_].UQ);
+		}
 	}
 }}}
 

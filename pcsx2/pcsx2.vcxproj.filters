@@ -584,6 +584,12 @@
     <ClCompile Include="COP0.cpp">
       <Filter>System\Ps2\EmotionEngine\EE\Interpreter</Filter>
     </ClCompile>
+    <ClCompile Include="EEMmu.cpp">
+      <Filter>System\Ps2\EmotionEngine\EE\Interpreter</Filter>
+    </ClCompile>
+    <ClCompile Include="EEMemory.cpp">
+      <Filter>System\Ps2\EmotionEngine\EE\Interpreter</Filter>
+    </ClCompile>
     <ClCompile Include="COP2.cpp">
       <Filter>System\Ps2\EmotionEngine\EE\Interpreter</Filter>
     </ClCompile>
@@ -1551,6 +1557,12 @@
       <Filter>System\Ps2\EmotionEngine\DMAC\Gif</Filter>
     </ClInclude>
     <ClInclude Include="R5900.h">
+      <Filter>System\Ps2\EmotionEngine\EE</Filter>
+    </ClInclude>
+    <ClInclude Include="EEMmu.h">
+      <Filter>System\Ps2\EmotionEngine\EE</Filter>
+    </ClInclude>
+    <ClInclude Include="EEMemory.h">
       <Filter>System\Ps2\EmotionEngine\EE</Filter>
     </ClInclude>
     <ClInclude Include="R5900OpcodeTables.h">

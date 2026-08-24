@@ -3,6 +3,7 @@
 
 #include "Common.h"
 #include "Cache.h"
+#include "EEMemory.h"
 #include "vtlb.h"
 
 using namespace R5900;
@@ -202,17 +203,12 @@ static bool findInCache(const CacheSet& set, uptr ppf, int* way)
 	return check(0) || check(1);
 }
 
-static int getFreeCache(u32 mem, int* way, bool validPFN)
+static int getFreeCacheForHostPointer(u32 mem, int* way, bool validPFN, uptr ppf)
 {
 	const int setIdx = cache.setIdxFor(mem);
 	CacheSet& set = cache.sets[setIdx];
-	VTLBVirtual vmv = vtlbdata.vmap[mem >> VTLB_PAGE_BITS];
 
 	*way = set.tags[0].lrf() ^ set.tags[1].lrf();
-	if (validPFN)
-		pxAssertMsg(!vmv.isHandler(mem), "Cache currently only supports non-handler addresses!");
-
-	uptr ppf = vmv.assumePtr(mem);
 
 	[[unlikely]]
 	if ((cpuRegs.CP0.n.Config & 0x10000) == 0)
@@ -261,6 +257,14 @@ static int getFreeCache(u32 mem, int* way, bool validPFN)
 	return setIdx;
 }
 
+static int getFreeCache(u32 mem, int* way, bool validPFN)
+{
+	VTLBVirtual vmv = vtlbdata.vmap[mem >> VTLB_PAGE_BITS];
+	if (validPFN)
+		pxAssertMsg(!vmv.isHandler(mem), "Cache currently only supports non-handler addresses!");
+	return getFreeCacheForHostPointer(mem, way, validPFN, vmv.assumePtr(mem));
+}
+
 template <bool Write, int Bytes>
 void* prepareCacheAccess(u32 mem, int* way, int* idx, bool validPFN = true)
 {
@@ -271,6 +275,19 @@ void* prepareCacheAccess(u32 mem, int* way, int* idx, bool validPFN = true)
 		line.tag.setDirty();
 	u32 aligned = mem & ~(Bytes - 1);
 	return &line.data.bytes[aligned & 0x3f];
+}
+
+template <bool Write, int Bytes>
+static void* preparePhysicalCacheAccess(u32 vaddr, u32 paddr, int* way, int* idx)
+{
+	void* const physical_ptr = vtlb_GetPhyPtr(paddr);
+	const bool valid_pfn = physical_ptr != nullptr;
+	*way = 0;
+	*idx = getFreeCacheForHostPointer(vaddr, way, valid_pfn, reinterpret_cast<uptr>(physical_ptr));
+	CacheLine line = cache.lineAt(*idx, *way);
+	if (Write)
+		line.tag.setDirty();
+	return &line.data.bytes[vaddr & (64 - 1) & ~(Bytes - 1)];
 }
 
 template <typename Int>
@@ -354,13 +371,64 @@ RETURNS_R128 readCache128(u32 mem, bool validPFN)
 	return value;
 }
 
+template <typename Int>
+static Int readCachePhysical(u32 vaddr, u32 paddr)
+{
+	int way, idx;
+	void* const addr = preparePhysicalCacheAccess<false, sizeof(Int)>(vaddr, paddr, &way, &idx);
+	return *reinterpret_cast<Int*>(addr);
+}
+
+template <typename Int>
+static void writeCachePhysical(u32 vaddr, u32 paddr, Int value)
+{
+	int way, idx;
+	void* const addr = preparePhysicalCacheAccess<true, sizeof(Int)>(vaddr, paddr, &way, &idx);
+	*reinterpret_cast<Int*>(addr) = value;
+}
+
+u8 readCache8Physical(u32 vaddr, u32 paddr) { return readCachePhysical<u8>(vaddr, paddr); }
+u16 readCache16Physical(u32 vaddr, u32 paddr) { return readCachePhysical<u16>(vaddr, paddr); }
+u32 readCache32Physical(u32 vaddr, u32 paddr) { return readCachePhysical<u32>(vaddr, paddr); }
+u64 readCache64Physical(u32 vaddr, u32 paddr) { return readCachePhysical<u64>(vaddr, paddr); }
+
+RETURNS_R128 readCache128Physical(u32 vaddr, u32 paddr)
+{
+	int way, idx;
+	return r128_load(preparePhysicalCacheAccess<false, sizeof(mem128_t)>(vaddr, paddr, &way, &idx));
+}
+
+void writeCache8Physical(u32 vaddr, u32 paddr, u8 value) { writeCachePhysical(vaddr, paddr, value); }
+void writeCache16Physical(u32 vaddr, u32 paddr, u16 value) { writeCachePhysical(vaddr, paddr, value); }
+void writeCache32Physical(u32 vaddr, u32 paddr, u32 value) { writeCachePhysical(vaddr, paddr, value); }
+void writeCache64Physical(u32 vaddr, u32 paddr, u64 value) { writeCachePhysical(vaddr, paddr, value); }
+
+void writeCache128Physical(u32 vaddr, u32 paddr, const mem128_t* value)
+{
+	int way, idx;
+	*reinterpret_cast<mem128_t*>(preparePhysicalCacheAccess<true, sizeof(mem128_t)>(vaddr, paddr, &way, &idx)) = *value;
+}
+
 template <typename Op>
-void doCacheHitOp(u32 addr, const char* name, Op op)
+void doCacheHitOp(u32 addr, const char* name, Op op, const EEMmu::TranslationResult* translation = nullptr)
 {
 	const int index = cache.setIdxFor(addr);
 	CacheSet& set = cache.sets[index];
-	VTLBVirtual vmv = vtlbdata.vmap[addr >> VTLB_PAGE_BITS];
-	uptr ppf = vmv.assumePtr(addr);
+	uptr ppf;
+	if (translation)
+	{
+		void* const physical_ptr = translation->target == EEMmu::Target::Physical ?
+		                               vtlb_GetPhyPtr(translation->paddr) :
+		                               nullptr;
+		if (!physical_ptr)
+			return;
+		ppf = reinterpret_cast<uptr>(physical_ptr);
+	}
+	else
+	{
+		VTLBVirtual vmv = vtlbdata.vmap[addr >> VTLB_PAGE_BITS];
+		ppf = vmv.assumePtr(addr);
+	}
 	int way;
 
 	if (!findInCache(set, ppf, &way))
@@ -382,30 +450,38 @@ namespace R5900
 		{
 
 			extern int Dcache;
-			void CACHE()
+			static void CACHEImpl(bool recompiler_access)
 			{
 				u32 addr = cpuRegs.GPR.r[_Rs_].UL[0] + _Imm_;
+				EEMmu::TranslationResult translation;
+				const EEMmu::TranslationResult* translated = nullptr;
+				if (EmuConfig.Cpu.EnableExperimentalEETLB && CacheOpUsesAddressTranslation(_Rt_))
+				{
+					translation = recompiler_access ?
+					                  EEMemory::TranslateForRecompiler(addr, EEMmu::AccessType::Cache) :
+					                  EEMemory::TranslateForCurrentInstruction(addr, EEMmu::AccessType::Cache);
+					if (translation.fault != EEMmu::Fault::None) [[unlikely]]
+						return;
+					translated = &translation;
+				}
+				if (EmuConfig.Cpu.EnableExperimentalEETLB && !CHECK_CACHE)
+					return;
 				// CACHE_LOG("cpuRegs.GPR.r[_Rs_].UL[0] = %x, IMM = %x RT = %x", cpuRegs.GPR.r[_Rs_].UL[0], _Imm_, _Rt_);
 
 				switch (_Rt_)
 				{
 					case 0x1a: //DHIN (Data Cache Hit Invalidate)
-						doCacheHitOp(addr, "DHIN", [](CacheLine line) {
-							line.clear();
-						});
+						doCacheHitOp(addr, "DHIN", [](CacheLine line) { line.clear(); }, translated);
 						break;
 
 					case 0x18: //DHWBIN (Data Cache Hit WriteBack with Invalidate)
 						doCacheHitOp(addr, "DHWBIN", [](CacheLine line) {
 							line.writeBackIfNeeded();
-							line.clear();
-						});
+							line.clear(); }, translated);
 						break;
 
 					case 0x1c: //DHWOIN (Data Cache Hit WriteBack Without Invalidate)
-						doCacheHitOp(addr, "DHWOIN", [](CacheLine line) {
-							line.writeBackIfNeeded();
-						});
+						doCacheHitOp(addr, "DHWOIN", [](CacheLine line) { line.writeBackIfNeeded(); }, translated);
 						break;
 
 					case 0x16: //DXIN (Data Cache Index Invalidate)
@@ -504,6 +580,17 @@ namespace R5900
 						DevCon.Warning("Cache mode %x not implemented", _Rt_);
 						break;
 				}
+			}
+
+			void CACHE()
+			{
+				CACHEImpl(false);
+			}
+
+			void CACHEForRecompiler()
+			{
+				EEMemory::ClearRecompilerAccessFault();
+				CACHEImpl(true);
 			}
 		} // end namespace OpcodeImpl
 

@@ -1,4 +1,8 @@
 add_pcsx2_test(core_test
+	ee_config_tests.cpp
+	ee_physical_memory_tests.cpp
+	ee_synthetic_mmu_tests.cpp
+	ee_tlb_tests.cpp
 	patch_tests.cpp
 	MockMemoryInterface.h
 	StubHost.cpp

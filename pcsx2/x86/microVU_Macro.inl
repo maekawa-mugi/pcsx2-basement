@@ -822,7 +822,8 @@ void recLQC2()
 	int xmmreg;
 	if (GPR_IS_CONST1(_Rs_))
 	{
-		const u32 addr = (g_cpuConstRegs[_Rs_].UL[0] + _Imm_) & ~0xFu;
+		const u32 effective_addr = g_cpuConstRegs[_Rs_].UL[0] + _Imm_;
+		const u32 addr = EmuConfig.Cpu.EnableExperimentalEETLB ? effective_addr : (effective_addr & ~0xFu);
 		xmmreg = vtlb_DynGenReadQuad_Const(128, addr, alloc_cb);
 	}
 	else
@@ -830,7 +831,8 @@ void recLQC2()
 		_eeMoveGPRtoR(arg1regd, _Rs_);
 		if (_Imm_ != 0)
 			xADD(arg1regd, _Imm_);
-		xAND(arg1regd, ~0xF);
+		if (!EmuConfig.Cpu.EnableExperimentalEETLB)
+			xAND(arg1regd, ~0xF);
 
 		xmmreg = vtlb_DynGenReadQuad(128, arg1regd.GetId(), alloc_cb);
 	}
@@ -858,7 +860,8 @@ void recSQC2()
 
 	if (GPR_IS_CONST1(_Rs_))
 	{
-		const u32 addr = (g_cpuConstRegs[_Rs_].UL[0] + _Imm_) & ~0xFu;
+		const u32 effective_addr = g_cpuConstRegs[_Rs_].UL[0] + _Imm_;
+		const u32 addr = EmuConfig.Cpu.EnableExperimentalEETLB ? effective_addr : (effective_addr & ~0xFu);
 		vtlb_DynGenWrite_Const(128, true, addr, ftreg);
 	}
 	else
@@ -866,7 +869,8 @@ void recSQC2()
 		_eeMoveGPRtoR(arg1regd, _Rs_);
 		if (_Imm_ != 0)
 			xADD(arg1regd, _Imm_);
-		xAND(arg1regd, ~0xF);
+		if (!EmuConfig.Cpu.EnableExperimentalEETLB)
+			xAND(arg1regd, ~0xF);
 
 		vtlb_DynGenWrite(128, true, arg1regd.GetId(), ftreg);
 	}

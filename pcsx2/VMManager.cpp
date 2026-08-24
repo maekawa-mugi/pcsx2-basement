@@ -10,6 +10,7 @@
 #include "DebugTools/DebugInterface.h"
 #include "DebugTools/SymbolImporter.h"
 #include "Elfheader.h"
+#include "EEMemory.h"
 #include "FW.h"
 #include "GS.h"
 #include "GS/Renderers/HW/GSTextureReplacements.h"
@@ -492,7 +493,7 @@ void VMManager::UpdateLoggingSettings(SettingsInterface& si)
 	if (system_console_enabled != Log::IsConsoleOutputEnabled())
 		Log::SetConsoleOutputLevel(system_console_enabled ? level : LOGLEVEL_NONE);
 
-		// Debug console only exists on Windows.
+	// Debug console only exists on Windows.
 #ifdef _WIN32
 	const bool debug_console_enabled = IsDebuggerPresent() && si.GetBoolValue("Logging", "EnableDebugConsole", false);
 	Log::SetDebugOutputLevel(debug_console_enabled ? level : LOGLEVEL_NONE);
@@ -2777,6 +2778,8 @@ void VMManager::SetPaused(bool paused)
 
 	Console.WriteLn(paused ? "(VMManager) Pausing..." : "(VMManager) Resuming...");
 	SetState(paused ? VMState::Paused : VMState::Running);
+	if (paused && EmuConfig.Cpu.EnableExperimentalEETLB && EmuConfig.Cpu.EnableFullTLBDiagnosticTrace)
+		EEMemory::DumpFullTLBDiagnosticTrace();
 }
 
 GSVSyncMode VMManager::GetEffectiveVSyncMode()
@@ -2958,7 +2961,7 @@ void VMManager::CheckForCPUConfigChanges(const Pcsx2Config& old_config)
 	Internal::ClearCPUExecutionCaches();
 	memBindConditionalHandlers();
 
-	if (EmuConfig.Cpu.Recompiler.EnableFastmem != old_config.Cpu.Recompiler.EnableFastmem)
+	if (EmuConfig.Cpu.IsFastmemEnabled() != old_config.Cpu.IsFastmemEnabled())
 		vtlb_ResetFastmem();
 
 	// did we toggle recompilers?
@@ -3837,7 +3840,7 @@ void VMManager::PollDiscordPresence()
 
 bool VMManager::WriteBytesToEESIORXFIFO(const std::span<const u8> data)
 {
-	if(ee_sio_rx_fifo.size() + data.size() > 1024)
+	if (ee_sio_rx_fifo.size() + data.size() > 1024)
 	{
 		Console.Warning("EE RX FIFO is full, not appending more bytes.");
 		return false;

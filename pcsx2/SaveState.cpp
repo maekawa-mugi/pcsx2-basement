@@ -68,12 +68,15 @@ static void PostLoadPrep()
 {
 	resetCache();
 //	WriteCP0Status(cpuRegs.CP0.n.Status.val);
-	for (int i = 0; i < 48; i++)
+	if (!EmuConfig.Cpu.EnableExperimentalEETLB)
 	{
-		if (std::memcmp(&s_tlb_backup[i], &tlb[i], sizeof(tlbs)) != 0)
+		for (int i = 0; i < 48; i++)
 		{
-			UnmapTLB(s_tlb_backup[i], i);
-			MapTLB(tlb[i], i);
+			if (std::memcmp(&s_tlb_backup[i], &tlb[i], sizeof(tlbs)) != 0)
+			{
+				UnmapTLB(s_tlb_backup[i], i);
+				MapTLB(tlb[i], i);
+			}
 		}
 	}
 

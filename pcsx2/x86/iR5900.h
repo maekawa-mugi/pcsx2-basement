@@ -15,9 +15,9 @@
 #define RFASTMEMBASE x86Emitter::rbp
 
 extern u32 maxrecmem;
-extern u32 pc;             // recompiler pc
-extern int g_branch;       // set for branch
-extern u32 target;         // branch target
+extern u32 pc; // recompiler pc
+extern int g_branch; // set for branch
+extern u32 target; // branch target
 extern u32 s_nBlockCycles; // cycles of current block recompiling
 extern bool s_nBlockInterlocked; // Current block has VU0 interlocking
 
@@ -69,6 +69,7 @@ void SaveBranchState();
 void LoadBranchState();
 
 void recompileNextInstruction(bool delayslot, bool swapped_delay_slot);
+u32 recFetchInstruction(u32 address);
 void SetBranchReg();
 void SetBranchImm(u32 imm);
 
@@ -76,6 +77,9 @@ void iFlushCall(int flushtype);
 void recBranchCall(void (*func)());
 void recCall(void (*func)());
 u32 scaleblockcycles_clear();
+void recPrepareFullTLBAccessContext();
+void recFinishFullTLBAccessContext();
+void recEmitFullTLBAccessFaultExit();
 
 namespace R5900
 {

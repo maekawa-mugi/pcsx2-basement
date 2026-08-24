@@ -4,6 +4,7 @@
 #include "iR5900Analysis.h"
 #include "Memory.h"
 #include "DebugTools/Debug.h"
+#include "iR5900.h"
 
 using namespace R5900;
 
@@ -24,7 +25,7 @@ void __fi AnalysisPass::ForEachInstruction(u32 start, u32 end, EEINST* inst_cach
 	EEINST* eeinst = inst_cache;
 	for (u32 apc = start; apc < end; apc += 4, eeinst++)
 	{
-		cpuRegs.code = memRead32(apc);
+		cpuRegs.code = EmuConfig.Cpu.EnableExperimentalEETLB ? recFetchInstruction(apc) : memRead32(apc);
 		if (!func(apc, eeinst))
 			break;
 	}
@@ -37,7 +38,7 @@ void __fi R5900::AnalysisPass::DumpAnnotatedBlock(u32 start, u32 end, EEINST* in
 	EEINST* eeinst = inst_cache;
 	for (u32 apc = start; apc < end; apc += 4, eeinst++)
 	{
-		const u32 code = memRead32(apc);
+		const u32 code = EmuConfig.Cpu.EnableExperimentalEETLB ? recFetchInstruction(apc) : memRead32(apc);
 		d.clear();
 		disR5900Fasm(d, code, apc, false);
 		func(apc, eeinst, d);

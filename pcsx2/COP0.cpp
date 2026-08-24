@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Common.h"
+#include "EEMmu.h"
 #include "COP0.h"
 
 // Updates the CPU's mode of operation (either, Kernel, Supervisor, or User modes).
@@ -389,303 +390,342 @@ void WriteTLB(int i)
 	MapTLB(tlb[i], i);
 }
 
-namespace R5900 {
-namespace Interpreter {
-namespace OpcodeImpl {
-namespace COP0 {
-
-	void TLBR()
+namespace R5900
+{
+	namespace Interpreter
 	{
-		COP0_LOG("COP0_TLBR %d:%x,%x,%x,%x",
-			cpuRegs.CP0.n.Index, cpuRegs.CP0.n.PageMask, cpuRegs.CP0.n.EntryHi,
-			cpuRegs.CP0.n.EntryLo0, cpuRegs.CP0.n.EntryLo1);
-
-		const u8 i = cpuRegs.CP0.n.Index & 0x3f;
-
-		if (i > 47)
+		namespace OpcodeImpl
 		{
-			Console.Warning("TLBR with index > 47! (%d)", i);
-			return;
-		}
-
-		cpuRegs.CP0.n.PageMask = tlb[i].PageMask.Mask << 13;
-		cpuRegs.CP0.n.EntryHi = tlb[i].EntryHi.UL & ~((tlb[i].PageMask.Mask << 13) | 0x1f00);
-		cpuRegs.CP0.n.EntryLo0 = tlb[i].EntryLo0.UL & ~(0xFC000000) & ~1;
-		cpuRegs.CP0.n.EntryLo1 = tlb[i].EntryLo1.UL & ~(0x7C000000) & ~1;
-		// "If both the Global bit of EntryLo0 and EntryLo1 are set to 1, the processor ignores the ASID during TLB lookup."
-		// This is reflected during TLBR, where G is only set if both EntryLo0 and EntryLo1 are global.
-		cpuRegs.CP0.n.EntryLo0 |= (tlb[i].EntryLo0.UL & 1) & (tlb[i].EntryLo1.UL & 1);
-		cpuRegs.CP0.n.EntryLo1 |= (tlb[i].EntryLo0.UL & 1) & (tlb[i].EntryLo1.UL & 1);
-	}
-
-	void TLBWI()
-	{
-		const u8 j = cpuRegs.CP0.n.Index & 0x3f;
-
-		if (j > 47)
-		{
-			Console.Warning("TLBWI with index > 47! (%d)", j);
-			return;
-		}
-
-		COP0_LOG("COP0_TLBWI %d:%x,%x,%x,%x",
-			cpuRegs.CP0.n.Index, cpuRegs.CP0.n.PageMask, cpuRegs.CP0.n.EntryHi,
-			cpuRegs.CP0.n.EntryLo0, cpuRegs.CP0.n.EntryLo1);
-
-		UnmapTLB(tlb[j], j);
-		WriteTLB(j);
-	}
-
-	void TLBWR()
-	{
-		const u8 j = cpuRegs.CP0.n.Random & 0x3f;
-
-		if (j > 47)
-		{
-			Console.Warning("TLBWR with random > 47! (%d)", j);
-			return;
-		}
-
-		DevCon.Warning("COP0_TLBWR %d:%x,%x,%x,%x\n",
-			cpuRegs.CP0.n.Random, cpuRegs.CP0.n.PageMask, cpuRegs.CP0.n.EntryHi,
-			cpuRegs.CP0.n.EntryLo0, cpuRegs.CP0.n.EntryLo1);
-
-		UnmapTLB(tlb[j], j);
-		WriteTLB(j);
-	}
-
-	void TLBP()
-	{
-		int i;
-
-		union
-		{
-			struct
+			namespace COP0
 			{
-				u32 VPN2 : 19;
-				u32 VPN2X : 2;
-				u32 G : 3;
-				u32 ASID : 8;
-			} s;
-			u32 u;
-		} EntryHi32;
 
-		EntryHi32.u = cpuRegs.CP0.n.EntryHi;
-
-		cpuRegs.CP0.n.Index = 0xFFFFFFFF;
-		for (i = 0; i < 48; i++)
-		{
-			if (tlb[i].VPN2() == ((~tlb[i].Mask()) & (EntryHi32.s.VPN2)) && ((tlb[i].isGlobal()) || ((tlb[i].EntryHi.ASID & 0xff) == EntryHi32.s.ASID)))
-			{
-				cpuRegs.CP0.n.Index = i;
-				break;
-			}
-		}
-		if (cpuRegs.CP0.n.Index == 0xFFFFFFFF)
-			cpuRegs.CP0.n.Index = 0x80000000;
-	}
-
-	void MFC0()
-	{
-		// Note on _Rd_ Condition 9: CP0.Count should be updated even if _Rt_ is 0.
-		if ((_Rd_ != 9) && !_Rt_)
-			return;
-
-		//if(bExecBIOS == FALSE && _Rd_ == 25) Console.WriteLn("MFC0 _Rd_ %x = %x", _Rd_, cpuRegs.CP0.r[_Rd_]);
-		switch (_Rd_)
-		{
-			case 12:
-				cpuRegs.GPR.r[_Rt_].SD[0] = (s32)(cpuRegs.CP0.r[_Rd_] & 0xf0c79c1f);
-				break;
-
-			case 25:
-				if (0 == (_Imm_ & 1)) // MFPS, register value ignored
+				void TLBR()
 				{
-					cpuRegs.GPR.r[_Rt_].SD[0] = (s32)cpuRegs.PERF.n.pccr.val;
+					COP0_LOG("COP0_TLBR %d:%x,%x,%x,%x",
+						cpuRegs.CP0.n.Index, cpuRegs.CP0.n.PageMask, cpuRegs.CP0.n.EntryHi,
+						cpuRegs.CP0.n.EntryLo0, cpuRegs.CP0.n.EntryLo1);
+
+					const u8 i = cpuRegs.CP0.n.Index & 0x3f;
+
+					if (i > 47)
+					{
+						Console.Warning("TLBR with index > 47! (%d)", i);
+						return;
+					}
+
+					if (EmuConfig.Cpu.EnableExperimentalEETLB)
+					{
+						EEMmu::ReadTLBEntry(tlb[i], &cpuRegs.CP0.n.PageMask, &cpuRegs.CP0.n.EntryHi,
+							&cpuRegs.CP0.n.EntryLo0, &cpuRegs.CP0.n.EntryLo1);
+					}
+					else
+					{
+						cpuRegs.CP0.n.PageMask = tlb[i].PageMask.Mask << 13;
+						cpuRegs.CP0.n.EntryHi = tlb[i].EntryHi.UL & ~((tlb[i].PageMask.Mask << 13) | 0x1f00);
+						cpuRegs.CP0.n.EntryLo0 = tlb[i].EntryLo0.UL & ~(0xFC000000) & ~1;
+						cpuRegs.CP0.n.EntryLo1 = tlb[i].EntryLo1.UL & ~(0x7C000000) & ~1;
+						// "If both the Global bit of EntryLo0 and EntryLo1 are set to 1, the processor ignores the ASID during TLB lookup."
+						// This is reflected during TLBR, where G is only set if both EntryLo0 and EntryLo1 are global.
+						cpuRegs.CP0.n.EntryLo0 |= (tlb[i].EntryLo0.UL & 1) & (tlb[i].EntryLo1.UL & 1);
+						cpuRegs.CP0.n.EntryLo1 |= (tlb[i].EntryLo0.UL & 1) & (tlb[i].EntryLo1.UL & 1);
+					}
 				}
-				else if (0 == (_Imm_ & 2)) // MFPC 0, only LSB of register matters
+
+				void TLBWI()
 				{
-					COP0_UpdatePCCR();
-					cpuRegs.GPR.r[_Rt_].SD[0] = (s32)cpuRegs.PERF.n.pcr0;
+					const u8 j = cpuRegs.CP0.n.Index & 0x3f;
+
+					if (j > 47)
+					{
+						Console.Warning("TLBWI with index > 47! (%d)", j);
+						return;
+					}
+
+					COP0_LOG("COP0_TLBWI %d:%x,%x,%x,%x",
+						cpuRegs.CP0.n.Index, cpuRegs.CP0.n.PageMask, cpuRegs.CP0.n.EntryHi,
+						cpuRegs.CP0.n.EntryLo0, cpuRegs.CP0.n.EntryLo1);
+
+					if (EmuConfig.Cpu.EnableExperimentalEETLB)
+					{
+						tlb[j] = EEMmu::BuildTLBEntry(cpuRegs.CP0.n.PageMask, cpuRegs.CP0.n.EntryHi,
+							cpuRegs.CP0.n.EntryLo0, cpuRegs.CP0.n.EntryLo1);
+						EEMmu::InvalidateTranslations();
+					}
+					else
+					{
+						UnmapTLB(tlb[j], j);
+						WriteTLB(j);
+					}
 				}
-				else // MFPC 1
+
+				void TLBWR()
 				{
-					COP0_UpdatePCCR();
-					cpuRegs.GPR.r[_Rt_].SD[0] = (s32)cpuRegs.PERF.n.pcr1;
+					const u8 j = cpuRegs.CP0.n.Random & 0x3f;
+
+					if (j > 47)
+					{
+						Console.Warning("TLBWR with random > 47! (%d)", j);
+						return;
+					}
+
+					COP0_LOG("COP0_TLBWR %d:%x,%x,%x,%x",
+						cpuRegs.CP0.n.Random, cpuRegs.CP0.n.PageMask, cpuRegs.CP0.n.EntryHi,
+						cpuRegs.CP0.n.EntryLo0, cpuRegs.CP0.n.EntryLo1);
+
+					if (EmuConfig.Cpu.EnableExperimentalEETLB)
+					{
+						tlb[j] = EEMmu::BuildTLBEntry(cpuRegs.CP0.n.PageMask, cpuRegs.CP0.n.EntryHi,
+							cpuRegs.CP0.n.EntryLo0, cpuRegs.CP0.n.EntryLo1);
+						EEMmu::InvalidateTranslations();
+					}
+					else
+					{
+						UnmapTLB(tlb[j], j);
+						WriteTLB(j);
+					}
 				}
-				/*Console.WriteLn("MFC0 PCCR = %x PCR0 = %x PCR1 = %x IMM= %x",  params
+
+				void TLBP()
+				{
+					const EEMmu::ProbeResult result =
+						EEMmu::ProbeTLB(tlb, EEMmu::TLB_ENTRY_COUNT, cpuRegs.CP0.n.EntryHi);
+					cpuRegs.CP0.n.Index = result.index >= 0 ? static_cast<u32>(result.index) : 0x80000000U;
+#ifdef PCSX2_DEVBUILD
+					if (EmuConfig.Cpu.EnableExperimentalEETLB)
+					{
+						static bool reported_multiple_match = false;
+						if (!reported_multiple_match && EEMmu::HasWarning(result.warnings, EEMmu::Warning::MultipleMatch))
+						{
+							reported_multiple_match = true;
+							Console.Warning("Experimental EE TLBP matched multiple entries; lowest index selected (needs proper testing)");
+						}
+					}
+#endif
+				}
+
+				void MFC0()
+				{
+					// Note on _Rd_ Condition 9: CP0.Count should be updated even if _Rt_ is 0.
+					if ((_Rd_ != 9) && !_Rt_)
+						return;
+
+					//if(bExecBIOS == FALSE && _Rd_ == 25) Console.WriteLn("MFC0 _Rd_ %x = %x", _Rd_, cpuRegs.CP0.r[_Rd_]);
+					switch (_Rd_)
+					{
+						case 12:
+							cpuRegs.GPR.r[_Rt_].SD[0] = (s32)(cpuRegs.CP0.r[_Rd_] & 0xf0c79c1f);
+							break;
+
+						case 25:
+							if (0 == (_Imm_ & 1)) // MFPS, register value ignored
+							{
+								cpuRegs.GPR.r[_Rt_].SD[0] = (s32)cpuRegs.PERF.n.pccr.val;
+							}
+							else if (0 == (_Imm_ & 2)) // MFPC 0, only LSB of register matters
+							{
+								COP0_UpdatePCCR();
+								cpuRegs.GPR.r[_Rt_].SD[0] = (s32)cpuRegs.PERF.n.pcr0;
+							}
+							else // MFPC 1
+							{
+								COP0_UpdatePCCR();
+								cpuRegs.GPR.r[_Rt_].SD[0] = (s32)cpuRegs.PERF.n.pcr1;
+							}
+							/*Console.WriteLn("MFC0 PCCR = %x PCR0 = %x PCR1 = %x IMM= %x",  params
 cpuRegs.PERF.n.pccr, cpuRegs.PERF.n.pcr0, cpuRegs.PERF.n.pcr1, _Imm_ & 0x3F);*/
-				break;
+							break;
 
-			case 24:
-				COP0_LOG("MFC0 Breakpoint debug Registers code = %x", cpuRegs.code & 0x3FF);
-				break;
+						case 24:
+							COP0_LOG("MFC0 Breakpoint debug Registers code = %x", cpuRegs.code & 0x3FF);
+							break;
 
-			case 9:
-			{
-				s64 incr = cpuRegs.cycle - cpuRegs.lastCOP0Cycle;
-				if (incr == 0)
-					incr++;
-				cpuRegs.CP0.n.Count += incr;
-				cpuRegs.lastCOP0Cycle = cpuRegs.cycle;
-				if (!_Rt_)
-					break;
-			}
-				[[fallthrough]];
+						case 9:
+						{
+							s64 incr = cpuRegs.cycle - cpuRegs.lastCOP0Cycle;
+							if (incr == 0)
+								incr++;
+							cpuRegs.CP0.n.Count += incr;
+							cpuRegs.lastCOP0Cycle = cpuRegs.cycle;
+							if (!_Rt_)
+								break;
+						}
+							[[fallthrough]];
 
-			default:
-				cpuRegs.GPR.r[_Rt_].SD[0] = (s32)cpuRegs.CP0.r[_Rd_];
-		}
-	}
+						default:
+							cpuRegs.GPR.r[_Rt_].SD[0] = (s32)cpuRegs.CP0.r[_Rd_];
+					}
+				}
 
-	void MTC0()
-	{
-		//if(bExecBIOS == FALSE && _Rd_ == 25) Console.WriteLn("MTC0 _Rd_ %x = %x", _Rd_, cpuRegs.CP0.r[_Rd_]);
-		switch (_Rd_)
-		{
-			case 9:
-				cpuRegs.lastCOP0Cycle = cpuRegs.cycle;
-				cpuRegs.CP0.r[9] = cpuRegs.GPR.r[_Rt_].UL[0];
-				break;
+				void MTC0()
+				{
+					//if(bExecBIOS == FALSE && _Rd_ == 25) Console.WriteLn("MTC0 _Rd_ %x = %x", _Rd_, cpuRegs.CP0.r[_Rd_]);
+					switch (_Rd_)
+					{
+						case 1:
+							if (!EmuConfig.Cpu.EnableExperimentalEETLB)
+								cpuRegs.CP0.r[1] = cpuRegs.GPR.r[_Rt_].UL[0];
+							break;
 
-			case 12:
-				WriteCP0Status(cpuRegs.GPR.r[_Rt_].UL[0]);
-				break;
+						case 6:
+							cpuRegs.CP0.r[6] = cpuRegs.GPR.r[_Rt_].UL[0];
+							if (EmuConfig.Cpu.EnableExperimentalEETLB)
+							{
+								cpuRegs.CP0.n.Random = 47;
+#ifdef PCSX2_DEVBUILD
+								static bool reported_invalid_wired = false;
+								if (!reported_invalid_wired && cpuRegs.CP0.n.Wired > 47)
+								{
+									reported_invalid_wired = true;
+									Console.Warning("Experimental EE Wired > 47 uses deterministic fallback (needs proper testing)");
+								}
+#endif
+							}
+							break;
 
-			case 16:
-				WriteCP0Config(cpuRegs.GPR.r[_Rt_].UL[0]);
-				break;
+						case 9:
+							cpuRegs.lastCOP0Cycle = cpuRegs.cycle;
+							cpuRegs.CP0.r[9] = cpuRegs.GPR.r[_Rt_].UL[0];
+							break;
 
-			case 24:
-				COP0_LOG("MTC0 Breakpoint debug Registers code = %x", cpuRegs.code & 0x3FF);
-				break;
+						case 12:
+							WriteCP0Status(cpuRegs.GPR.r[_Rt_].UL[0]);
+							break;
 
-			case 25:
-				/*if(bExecBIOS == FALSE && _Rd_ == 25) Console.WriteLn("MTC0 PCCR = %x PCR0 = %x PCR1 = %x IMM= %x", params
+						case 16:
+							WriteCP0Config(cpuRegs.GPR.r[_Rt_].UL[0]);
+							break;
+
+						case 24:
+							COP0_LOG("MTC0 Breakpoint debug Registers code = %x", cpuRegs.code & 0x3FF);
+							break;
+
+						case 25:
+							/*if(bExecBIOS == FALSE && _Rd_ == 25) Console.WriteLn("MTC0 PCCR = %x PCR0 = %x PCR1 = %x IMM= %x", params
 	cpuRegs.PERF.n.pccr, cpuRegs.PERF.n.pcr0, cpuRegs.PERF.n.pcr1, _Imm_ & 0x3F);*/
-				if (0 == (_Imm_ & 1)) // MTPS
-				{
-					if (0 != (_Imm_ & 0x3E)) // only effective when the register is 0
-						break;
-					// Updates PCRs and sets the PCCR.
-					COP0_UpdatePCCR();
-					cpuRegs.PERF.n.pccr.val = cpuRegs.GPR.r[_Rt_].UL[0];
-					COP0_DiagnosticPCCR();
+							if (0 == (_Imm_ & 1)) // MTPS
+							{
+								if (0 != (_Imm_ & 0x3E)) // only effective when the register is 0
+									break;
+								// Updates PCRs and sets the PCCR.
+								COP0_UpdatePCCR();
+								cpuRegs.PERF.n.pccr.val = cpuRegs.GPR.r[_Rt_].UL[0];
+								COP0_DiagnosticPCCR();
+							}
+							else if (0 == (_Imm_ & 2)) // MTPC 0, only LSB of register matters
+							{
+								cpuRegs.PERF.n.pcr0 = cpuRegs.GPR.r[_Rt_].UL[0];
+								cpuRegs.lastPERFCycle[0] = cpuRegs.cycle;
+							}
+							else // MTPC 1
+							{
+								cpuRegs.PERF.n.pcr1 = cpuRegs.GPR.r[_Rt_].UL[0];
+								cpuRegs.lastPERFCycle[1] = cpuRegs.cycle;
+							}
+							break;
+
+						default:
+							cpuRegs.CP0.r[_Rd_] = cpuRegs.GPR.r[_Rt_].UL[0];
+							break;
+					}
 				}
-				else if (0 == (_Imm_ & 2)) // MTPC 0, only LSB of register matters
+
+				int CPCOND0()
 				{
-					cpuRegs.PERF.n.pcr0 = cpuRegs.GPR.r[_Rt_].UL[0];
-					cpuRegs.lastPERFCycle[0] = cpuRegs.cycle;
+					return (((dmacRegs.stat.CIS | ~dmacRegs.pcr.CPC) & 0x3FF) == 0x3ff);
 				}
-				else // MTPC 1
+
+				//#define CPCOND0	1
+
+				void BC0F()
 				{
-					cpuRegs.PERF.n.pcr1 = cpuRegs.GPR.r[_Rt_].UL[0];
-					cpuRegs.lastPERFCycle[1] = cpuRegs.cycle;
+					if (CPCOND0() == 0)
+						intDoBranch(_BranchTarget_);
 				}
-				break;
 
-			default:
-				cpuRegs.CP0.r[_Rd_] = cpuRegs.GPR.r[_Rt_].UL[0];
-				break;
-		}
-	}
+				void BC0T()
+				{
+					if (CPCOND0() == 1)
+						intDoBranch(_BranchTarget_);
+				}
 
-	int CPCOND0()
-	{
-		return (((dmacRegs.stat.CIS | ~dmacRegs.pcr.CPC) & 0x3FF) == 0x3ff);
-	}
+				void BC0FL()
+				{
+					if (CPCOND0() == 0)
+						intDoBranch(_BranchTarget_);
+					else
+						cpuRegs.pc += 4;
+				}
 
-	//#define CPCOND0	1
+				void BC0TL()
+				{
+					if (CPCOND0() == 1)
+						intDoBranch(_BranchTarget_);
+					else
+						cpuRegs.pc += 4;
+				}
 
-	void BC0F()
-	{
-		if (CPCOND0() == 0)
-			intDoBranch(_BranchTarget_);
-	}
-
-	void BC0T()
-	{
-		if (CPCOND0() == 1)
-			intDoBranch(_BranchTarget_);
-	}
-
-	void BC0FL()
-	{
-		if (CPCOND0() == 0)
-			intDoBranch(_BranchTarget_);
-		else
-			cpuRegs.pc += 4;
-	}
-
-	void BC0TL()
-	{
-		if (CPCOND0() == 1)
-			intDoBranch(_BranchTarget_);
-		else
-			cpuRegs.pc += 4;
-	}
-
-	void ERET()
-	{
+				void ERET()
+				{
 #ifdef ENABLE_VTUNE
-		// Allow to stop vtune in a predictable way to compare runs
-		// Of course, the limit will depend on the game.
-		const u32 million = 1000 * 1000;
-		static u32 vtune = 0;
-		vtune++;
+					// Allow to stop vtune in a predictable way to compare runs
+					// Of course, the limit will depend on the game.
+					const u32 million = 1000 * 1000;
+					static u32 vtune = 0;
+					vtune++;
 
-		// quick_exit vs exit: quick_exit won't call static storage destructor (OS will manage). It helps
-		// avoiding the race condition between threads destruction.
-		if (vtune > 30 * million)
-		{
-			Console.WriteLn("VTUNE: quick_exit");
-			std::quick_exit(EXIT_SUCCESS);
-		}
-		else if (!(vtune % million))
-		{
-			Console.WriteLn("VTUNE: ERET was called %uM times", vtune / million);
-		}
+					// quick_exit vs exit: quick_exit won't call static storage destructor (OS will manage). It helps
+					// avoiding the race condition between threads destruction.
+					if (vtune > 30 * million)
+					{
+						Console.WriteLn("VTUNE: quick_exit");
+						std::quick_exit(EXIT_SUCCESS);
+					}
+					else if (!(vtune % million))
+					{
+						Console.WriteLn("VTUNE: ERET was called %uM times", vtune / million);
+					}
 
 #endif
+					const bool error_level = cpuRegs.CP0.n.Status.b.ERL;
 
-		if (cpuRegs.CP0.n.Status.b.ERL)
-		{
-			cpuRegs.pc = cpuRegs.CP0.n.ErrorEPC;
-			cpuRegs.CP0.n.Status.b.ERL = 0;
-		}
-		else
-		{
-			cpuRegs.pc = cpuRegs.CP0.n.EPC;
-			cpuRegs.CP0.n.Status.b.EXL = 0;
-		}
-		cpuUpdateOperationMode();
-		cpuSetNextEventDelta(4);
-		intSetBranch();
-	}
+					if (error_level)
+					{
+						cpuRegs.pc = cpuRegs.CP0.n.ErrorEPC;
+						cpuRegs.CP0.n.Status.b.ERL = 0;
+					}
+					else
+					{
+						cpuRegs.pc = cpuRegs.CP0.n.EPC;
+						cpuRegs.CP0.n.Status.b.EXL = 0;
+					}
+					cpuUpdateOperationMode();
+					cpuSetNextEventDelta(4);
+					intSetBranch();
+				}
 
-	void DI()
-	{
-		if (cpuRegs.CP0.n.Status.b._EDI || cpuRegs.CP0.n.Status.b.EXL ||
-			cpuRegs.CP0.n.Status.b.ERL || (cpuRegs.CP0.n.Status.b.KSU == 0))
-		{
-			cpuRegs.CP0.n.Status.b.EIE = 0;
-			// IRQs are disabled so no need to do a cpu exception/event test...
-			//cpuSetNextEventDelta();
-		}
-	}
+				void DI()
+				{
+					if (cpuRegs.CP0.n.Status.b._EDI || cpuRegs.CP0.n.Status.b.EXL ||
+						cpuRegs.CP0.n.Status.b.ERL || (cpuRegs.CP0.n.Status.b.KSU == 0))
+					{
+						cpuRegs.CP0.n.Status.b.EIE = 0;
+						// IRQs are disabled so no need to do a cpu exception/event test...
+						//cpuSetNextEventDelta();
+					}
+				}
 
-	void EI()
-	{
-		if (cpuRegs.CP0.n.Status.b._EDI || cpuRegs.CP0.n.Status.b.EXL ||
-			cpuRegs.CP0.n.Status.b.ERL || (cpuRegs.CP0.n.Status.b.KSU == 0))
-		{
-			cpuRegs.CP0.n.Status.b.EIE = 1;
-			// schedule an event test, which will check for and raise pending IRQs.
-			cpuSetNextEventDelta(4);
-		}
-	}
+				void EI()
+				{
+					if (cpuRegs.CP0.n.Status.b._EDI || cpuRegs.CP0.n.Status.b.EXL ||
+						cpuRegs.CP0.n.Status.b.ERL || (cpuRegs.CP0.n.Status.b.KSU == 0))
+					{
+						cpuRegs.CP0.n.Status.b.EIE = 1;
+						// schedule an event test, which will check for and raise pending IRQs.
+						cpuSetNextEventDelta(4);
+					}
+				}
 
-} // namespace COP0
-} // namespace OpcodeImpl
-} // namespace Interpreter
+			} // namespace COP0
+		} // namespace OpcodeImpl
+	} // namespace Interpreter
 } // namespace R5900

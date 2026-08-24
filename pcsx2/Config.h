@@ -471,9 +471,9 @@ enum class GSNativeScaling : u8
 
 enum class GSDepthFeedbackMode : u8
 {
-	None      = 0,
-	Auto      = 1,
-	Depth     = 2,
+	None = 0,
+	Auto = 1,
+	Depth = 2,
 	DepthAsRT = 3,
 };
 
@@ -677,7 +677,9 @@ struct Pcsx2Config
 	{
 		BITFIELD32()
 		bool
-			ExtraMemory : 1;
+			ExtraMemory : 1,
+			EnableExperimentalEETLB : 1,
+			EnableFullTLBDiagnosticTrace : 1;
 		BITFIELD_END
 
 		RecompilerOptions Recompiler;
@@ -690,6 +692,8 @@ struct Pcsx2Config
 		CpuOptions();
 		void LoadSave(SettingsWrapper& wrap);
 		void ApplySanityCheck();
+		bool IsEERecompilerEnabled() const { return Recompiler.EnableEE; }
+		bool IsFastmemEnabled() const { return IsEERecompilerEnabled() && Recompiler.EnableFastmem && !EnableExperimentalEETLB; }
 
 		bool CpusChanged(const CpuOptions& right) const;
 
@@ -1497,10 +1501,10 @@ namespace EmuFolders
 #define REC_VU1 false
 #endif
 #define INSTANT_VU1 (EmuConfig.Speedhacks.vu1Instant)
-#define CHECK_EEREC (EmuConfig.Cpu.Recompiler.EnableEE)
+#define CHECK_EEREC (EmuConfig.Cpu.IsEERecompilerEnabled())
 #define CHECK_CACHE (EmuConfig.Cpu.Recompiler.EnableEECache)
 #define CHECK_IOPREC (EmuConfig.Cpu.Recompiler.EnableIOP)
-#define CHECK_FASTMEM (EmuConfig.Cpu.Recompiler.EnableEE && EmuConfig.Cpu.Recompiler.EnableFastmem)
+#define CHECK_FASTMEM (EmuConfig.Cpu.IsFastmemEnabled())
 #define CHECK_EXTRAMEM (memGetExtraMemMode())
 
 //------------ SPECIAL GAME FIXES!!! ---------------
