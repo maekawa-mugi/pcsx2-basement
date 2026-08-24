@@ -29,14 +29,26 @@ void ATA::HDD_FlushCache() //Can't when DRQ set
 		return;
 	DevCon.WriteLn("DEV9: HDD_FlushCache");
 
-	if (!writeQueue.IsQueueEmpty())
+	bool io_write_active;
+	{
+		std::lock_guard ioSignallock(ioMutex);
+		io_write_active = ioWrite;
+	}
+	if (io_write_active || !writeQueue.IsQueueEmpty())
 	{
 		regStatus |= ATA_STAT_SEEK;
 		awaitFlush = true;
 		Async(-1);
 	}
 	else
+	{
+		if (!IO_Flush())
+		{
+			regStatus |= ATA_STAT_ERR;
+			regError |= ATA_ERR_ABORT;
+		}
 		PostCmdNoData();
+	}
 }
 
 void ATA::HDD_InitDevParameters()

@@ -7,7 +7,9 @@
 #include "ATA.h"
 #include "DEV9/DEV9.h"
 
-#if __POSIX__
+#ifdef _WIN32
+#include <io.h>
+#elif defined(__POSIX__)
 #define INVALID_HANDLE_VALUE -1
 #include <unistd.h>
 #include <fcntl.h>
@@ -45,6 +47,7 @@ void ATA::IO_Thread()
 			{
 				if (ioClose.load())
 				{
+					IO_Flush();
 					ioClose.store(false);
 					ioWaitHandle.lock();
 					ioThreadIdle_bool = true;
@@ -118,7 +121,10 @@ bool ATA::IO_Write()
 		return true;
 	}
 
-	if (FileSystem::FSeek64(hddImage, imagePos, SEEK_SET) != 0)
+	// Avoid flushing the C stream's write buffer when queued writes are contiguous.
+	// ATA write caching permits them to remain buffered until FLUSH CACHE or shutdown.
+	if (FileSystem::FTell64(hddImage) != static_cast<s64>(imagePos) &&
+		FileSystem::FSeek64(hddImage, imagePos, SEEK_SET) != 0)
 	{
 		Console.Error("DEV9: ATA: File seek error");
 		pxAssert(false);
@@ -182,8 +188,7 @@ bool ATA::IO_Write()
 				if (hddSparseBlockValid)
 					memcpy(&hddSparseBlock[(imagePos + written) - HddSparseStart], &entry.data[written], writeSize);
 
-				if (std::fwrite(&entry.data[written], writeSize, 1, hddImage) != 1 ||
-					std::fflush(hddImage) != 0)
+				if (std::fwrite(&entry.data[written], writeSize, 1, hddImage) != 1)
 				{
 					Console.Error("DEV9: ATA: File write error");
 					pxAssert(false);
@@ -196,7 +201,7 @@ bool ATA::IO_Write()
 	}
 	else
 	{
-		if (std::fwrite(entry.data, entry.length, 1, hddImage) != 1 || std::fflush(hddImage) != 0)
+		if (std::fwrite(entry.data, entry.length, 1, hddImage) != 1)
 		{
 			Console.Error("DEV9: ATA: File write error");
 			pxAssert(false);
@@ -204,6 +209,29 @@ bool ATA::IO_Write()
 		}
 	}
 	delete[] entry.data;
+	return true;
+}
+
+bool ATA::IO_Flush()
+{
+	if (!hddImage)
+		return true;
+	if (std::fflush(hddImage) != 0)
+	{
+		Console.Error("DEV9: ATA: File flush error");
+		return false;
+	}
+
+#ifdef _WIN32
+	const intptr_t native_handle = _get_osfhandle(_fileno(hddImage));
+	if (native_handle == -1 || !FlushFileBuffers(reinterpret_cast<HANDLE>(native_handle)))
+#elif defined(__POSIX__)
+	if (fsync(fileno(hddImage)) != 0)
+#endif
+	{
+		Console.Error("DEV9: ATA: Host disk cache flush error");
+		return false;
+	}
 	return true;
 }
 
@@ -221,35 +249,13 @@ void ATA::IO_SparseCacheLoad()
 		memset(&hddSparseBlock[readSize], 0, hddSparseBlockSize - readSize);
 	}
 
-	// Flush so that we know what is allocated.
-	std::fflush(hddImage);
-
 	// Store file pointer.
 	const s64 orgPos = FileSystem::FTell64(hddImage);
 
 #ifdef _WIN32
-	// FlushFileBuffers is required, hddSparseBlock differs from actual file without it.
-	FlushFileBuffers(hddNativeHandle);
-	// Range to be examined (One Sparse block size).
-	FILE_ALLOCATED_RANGE_BUFFER queryRange;
-	queryRange.FileOffset.QuadPart = HddSparseStart;
-	queryRange.Length.QuadPart = hddSparseBlockSize;
-
-	// Allocated areas info.
-	FILE_ALLOCATED_RANGE_BUFFER allocRange;
-	DWORD dwRetBytes;
-	const BOOL ret = DeviceIoControl(hddNativeHandle, FSCTL_QUERY_ALLOCATED_RANGES, &queryRange, sizeof(queryRange), &allocRange, sizeof(allocRange), &dwRetBytes, nullptr);
-
-	if (ret == TRUE && dwRetBytes == 0)
-	{
-		// We are sparse.
-		memset(hddSparseBlock.get(), 0, hddSparseBlockSize);
-		hddSparseBlockValid = true;
-#if defined(PCSX2_DEBUG) || defined(PCSX2_DEVBUILD)
-		ATA::IO_SparseCacheAssertFileZeros(readSize);
-#endif
-		return;
-	}
+	// Reading through the same update stream below observes buffered writes after
+	// FSeek64 without forcing them to stable storage. Querying allocated ranges needed
+	// FlushFileBuffers here and made filesystem installation pathologically slow.
 #elif defined(__POSIX__)
 #ifdef SEEK_HOLE
 	// Are we in a hole?
@@ -358,8 +364,7 @@ bool ATA::IO_SparseZero(u64 byteOffset, u64 byteSize)
 #endif
 
 		//No, do normal write
-		if (std::fwrite((char*)&hddSparseBlock[byteOffset - HddSparseStart], byteSize, 1, hddImage) != 1 ||
-			std::fflush(hddImage) != 0)
+		if (std::fwrite((char*)&hddSparseBlock[byteOffset - HddSparseStart], byteSize, 1, hddImage) != 1)
 		{
 			Console.Error("DEV9: ATA: File write error");
 			pxAssert(false);

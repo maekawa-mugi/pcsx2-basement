@@ -230,6 +230,7 @@ private:
 	void IO_Thread();
 	void IO_Read();
 	bool IO_Write();
+	bool IO_Flush();
 	bool IO_SparseZero(u64 byteOffset, u64 byteSize);
 	void IO_SparseCacheUpdateLocation(u64 Offset);
 	void IO_SparseCacheLoad();

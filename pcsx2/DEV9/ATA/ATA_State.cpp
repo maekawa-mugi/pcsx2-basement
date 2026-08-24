@@ -697,6 +697,11 @@ void ATA::Async(uint cycles)
 		else if (awaitFlush) //Fire IRQ on flush completion?
 		{
 			//Log_Info("Flush done, raise IRQ");
+			if (!IO_Flush())
+			{
+				regStatus |= ATA_STAT_ERR;
+				regError |= ATA_ERR_ABORT;
+			}
 			awaitFlush = false;
 			PostCmdNoData();
 		}
