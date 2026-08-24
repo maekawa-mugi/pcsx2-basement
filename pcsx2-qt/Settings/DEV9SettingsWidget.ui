@@ -410,6 +410,16 @@
        </widget>
       </item>
      </layout>
+   </widget>
+  </item>
+   <item>
+    <widget class="QCheckBox" name="dev9DeviceAccessLog">
+     <property name="toolTip">
+      <string>Logs every DEV9 MMIO read and write. This is extremely verbose and can severely reduce emulation speed.</string>
+     </property>
+     <property name="text">
+      <string>Log All DEV9 Device Accesses</string>
+     </property>
     </widget>
    </item>
    <item>
@@ -455,6 +465,7 @@
   <tabstop>hddSizeSlider</tabstop>
   <tabstop>hddSizeSpinBox</tabstop>
   <tabstop>hddCreate</tabstop>
+  <tabstop>dev9DeviceAccessLog</tabstop>
  </tabstops>
  <resources/>
  <connections/>

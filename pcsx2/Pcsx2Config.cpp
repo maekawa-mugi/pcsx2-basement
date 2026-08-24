@@ -1404,6 +1404,11 @@ void Pcsx2Config::DEV9Options::LoadSave(SettingsWrapper& wrap)
 	}
 
 	{
+		SettingsWrapSection("DEV9/Logging");
+		SettingsWrapEntry(LogDeviceAccess);
+	}
+
+	{
 		SettingsWrapSection("DEV9/Hdd");
 		SettingsWrapEntry(HddEnable);
 		SettingsWrapEntry(HddFile);
@@ -1435,6 +1440,7 @@ bool Pcsx2Config::DEV9Options::operator==(const DEV9Options& right) const
 		   OpEqu(ModeDNS2) &&
 
 		   OpEqu(EthHosts) &&
+		   OpEqu(LogDeviceAccess) &&
 
 		   OpEqu(HddEnable) &&
 		   OpEqu(HddFile);

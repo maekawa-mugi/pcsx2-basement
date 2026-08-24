@@ -190,6 +190,9 @@ DEV9SettingsWidget::DEV9SettingsWidget(SettingsWindow* settings_dialog, QWidget*
 	SettingWidgetBinder::SettingAccessor<QSpinBox>::connectValueChanged(m_ui.hddSizeSpinBox, [&]() { onHddSizeAccessorSpin(); });
 
 	connect(m_ui.hddCreate, &QPushButton::clicked, this, &DEV9SettingsWidget::onHddCreateClicked);
+
+	SettingWidgetBinder::BindWidgetToBoolSetting(
+		sif, m_ui.dev9DeviceAccessLog, "DEV9/Logging", "LogDeviceAccess", false);
 }
 
 void DEV9SettingsWidget::onEthEnabledChanged(Qt::CheckState state)

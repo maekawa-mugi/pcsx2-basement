@@ -1070,6 +1070,8 @@ struct Pcsx2Config
 
 		std::vector<HostEntry> EthHosts;
 
+		bool LogDeviceAccess{false};
+
 		bool HddEnable{false};
 		std::string HddFile;
 

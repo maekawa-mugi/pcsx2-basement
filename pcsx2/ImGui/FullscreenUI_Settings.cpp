@@ -4268,6 +4268,11 @@ void FullscreenUI::DrawNetworkHDDSettingsPage()
 			});
 	}
 
+	MenuHeading(FSUI_CSTR("Diagnostics"));
+	DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_FILE_LINES, "Log All DEV9 Device Accesses"),
+		FSUI_CSTR("Logs every DEV9 MMIO read and write. This is extremely verbose and can severely reduce emulation speed."),
+		"DEV9/Logging", "LogDeviceAccess", false);
+
 	EndMenuButtons();
 }
 
