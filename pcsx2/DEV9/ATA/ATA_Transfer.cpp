@@ -60,19 +60,26 @@ void ATA::IO_Read()
 {
 	const s64 lba = HDD_GetLBA();
 
-	if (lba == -1)
+	if (lba < 0 || nsector <= 0)
 	{
-		Console.Error("DEV9: ATA: Invalid LBA");
-		pxAssert(false);
-		abort();
+		Console.Error("DEV9: ATA: Invalid RAM disk read request (LBA %" PRId64 ", sectors %d)", lba, nsector);
+		std::lock_guard ioSignallock(ioMutex);
+		ioRead = false;
+		return;
 	}
 
-	const u64 pos = lba * 512;
+	const u64 pos = static_cast<u64>(lba) * 512;
 	if (IsSelectedLinuxSwap())
 	{
-		const size_t length = static_cast<size_t>(nsector) * 512;
-		pxAssert(pos + length <= LINUX_SWAP_SIZE);
-		std::memcpy(readBuffer, &linuxSwapData[static_cast<size_t>(pos)], length);
+		const u64 length = static_cast<u64>(nsector) * 512;
+		if (pos > LINUX_SWAP_SIZE || length > LINUX_SWAP_SIZE - pos || length > static_cast<u64>(readBufferLen))
+		{
+			Console.Error("DEV9: ATA: RAM disk read exceeds device bounds (offset %" PRIu64 ", length %" PRIu64 ")", pos, length);
+			std::lock_guard ioSignallock(ioMutex);
+			ioRead = false;
+			return;
+		}
+		std::memcpy(readBuffer, &linuxSwapData[static_cast<size_t>(pos)], static_cast<size_t>(length));
 	}
 	else if (FileSystem::FSeek64(hddImage, pos, SEEK_SET) != 0 ||
 			 std::fread(readBuffer, 512, nsector, hddImage) != static_cast<size_t>(nsector))
@@ -100,7 +107,12 @@ bool ATA::IO_Write()
 	const u64 imagePos = entry.sector * 512;
 	if (entry.linuxSwap)
 	{
-		pxAssert(imagePos + entry.length <= LINUX_SWAP_SIZE);
+		if (imagePos > LINUX_SWAP_SIZE || entry.length > LINUX_SWAP_SIZE - imagePos)
+		{
+			Console.Error("DEV9: ATA: RAM disk write exceeds device bounds (offset %" PRIu64 ", length %u)", imagePos, entry.length);
+			delete[] entry.data;
+			return true;
+		}
 		std::memcpy(&linuxSwapData[static_cast<size_t>(imagePos)], entry.data, entry.length);
 		delete[] entry.data;
 		return true;
@@ -425,7 +437,7 @@ void ATA::HDD_ReadAsync(void (ATA::*drqCMD)())
 	nsectorLeft = nsector;
 	if (readBufferLen < nsector * 512)
 	{
-		delete readBuffer;
+		delete[] readBuffer;
 		readBuffer = new u8[nsector * 512];
 		readBufferLen = nsector * 512;
 	}
