@@ -222,9 +222,7 @@ void GSRendererHW::Lines2Sprites()
 
 	// each sprite converted to quad needs twice the space
 
-	const int tail = m_vertex->tail * 2;
-	const int max_count = m_vertex->maxcount;
-	while (tail > max_count)
+	while (m_vertex->tail * 2 > m_max_vertex_count)
 	{
 		GrowVertexBuffer();
 	}
@@ -3941,7 +3939,8 @@ void GSRendererHW::Draw()
 
 			if (next_ctx.FRAME.Block() == FRAME_TEX0.TBP0 && next_ctx.FRAME.PSM != FRAME_TEX0.PSM)
 				FRAME_TEX0.PSM = next_ctx.FRAME.PSM;
-			else if (next_ctx.TEX0.TBP0 == FRAME_TEX0.TBP0 && next_ctx.TEX0.PSM != FRAME_TEX0.PSM)
+			// Be careful of the next draw being a channel shuffle!
+			else if (next_ctx.TEX0.TBP0 == FRAME_TEX0.TBP0 && next_ctx.TEX0.PSM != FRAME_TEX0.PSM && GSLocalMemory::m_psm[next_ctx.TEX0.PSM].trbpp >= 16)
 				FRAME_TEX0.PSM = next_ctx.TEX0.PSM;
 			else
 				FRAME_TEX0.PSM = PSMCT32; // Guess full color if no upcoming hint, it'll fix itself later.
@@ -5384,7 +5383,7 @@ void GSRendererHW::HandleFlatShadedVertices()
 		return;
 
 	// De-index the vertices using the copy buffer
-	while (vtx_buff.maxcount < idx_buff.tail)
+	while (m_max_vertex_count < idx_buff.tail)
 		GrowVertexBuffer();
 
 	for (int i = static_cast<int>(idx_buff.tail) - 1; i >= 0; i--)
