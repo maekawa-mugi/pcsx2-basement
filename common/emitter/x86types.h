@@ -8,6 +8,7 @@
 #include "common/Pcsx2Defs.h"
 
 static const uint iREGCNT_XMM = 16;
+static const uint iREGCNT_XMM_EVEX = 32;
 static const uint iREGCNT_GPR = 16;
 
 enum XMMSSEType
@@ -257,7 +258,7 @@ namespace x86Emitter
 		{
 			// Note: to avoid tons of ifdef, the 32 bits build will instantiate
 			// all 16x64 bits registers.
-			pxAssert((Id >= xRegId_Empty) && (Id < 16));
+			pxAssert((Id >= xRegId_Empty) && (Id < ((operandSize >= 16) ? static_cast<int>(iREGCNT_XMM_EVEX) : 16)));
 		}
 
 	public:
@@ -272,6 +273,7 @@ namespace x86Emitter
 		bool IsEmpty() const { return Id < 0; }
 		bool IsInvalid() const { return Id == xRegId_Invalid; }
 		bool IsExtended() const { return (Id >= 0 && (Id & 0x0F) > 7); } // Register 8-15 need an extra bit to be selected
+		bool IsEVEXHigh() const { return (Id >= 16); }
 		bool IsExtended8Bit() const { return (Is8BitOp() && Id >= 0x10); }
 		bool IsMem() const { return false; }
 		bool IsReg() const { return true; }
@@ -611,7 +613,11 @@ namespace x86Emitter
     xmm0, xmm1, xmm2, xmm3,
     xmm4, xmm5, xmm6, xmm7,
     xmm8, xmm9, xmm10, xmm11,
-    xmm12, xmm13, xmm14, xmm15;
+    xmm12, xmm13, xmm14, xmm15,
+    xmm16, xmm17, xmm18, xmm19,
+    xmm20, xmm21, xmm22, xmm23,
+    xmm24, xmm25, xmm26, xmm27,
+    xmm28, xmm29, xmm30, xmm31;
 
 	// TODO: This needs to be _M_SSE >= 0x500'ed, but we can't do it atm because common doesn't have variants.
 	extern const xRegisterSSE
