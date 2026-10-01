@@ -53,6 +53,7 @@ thread_local u8* xTextPtr;
 thread_local XMMSSEType g_xmmtypes[iREGCNT_XMM] = {XMMT_INT};
 
 bool x86Emitter::use_avx;
+x86Emitter::AVX512Features x86Emitter::avx512;
 
 namespace x86Emitter
 {
