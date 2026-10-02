@@ -318,7 +318,7 @@ static bool mVUupperSoftHelperReadsQ(VuUpperFmacSoftOp op)
 	}
 }
 
-static void mVUemitUpperSoftHelperCall(microVU& mVU, VuUpperFmacSoftOp op)
+static void mVUemitUpperSoftHelperCall(microVU& mVU, VuUpperFmacSoftOp op, bool import_flags = true)
 {
 	static constexpr u32 VU_FMAC_STICKY_SOURCE_VALID = 1u << 20;
 	static constexpr u32 VU_FMAC_NATIVE_PRODUCT_UNDERFLOW = 1u << 21;
@@ -575,6 +575,8 @@ static void mVUemitUpperSoftHelperCall(microVU& mVU, VuUpperFmacSoftOp op)
 		xFastCall((void*)vuUpperFmacSoftNativeBridge, arg1reg, arg2reg);
 	}
 	mVUrestoreRegs(mVU, true, false);
+	if (!import_flags)
+		return;
 	if (op == VuUpperFmacSoftOp::MADD || op == VuUpperFmacSoftOp::MSUB)
 		xOR(ptr32[&mVU.regs().statusflag], VU_FMAC_NATIVE_PRODUCT_UNDERFLOW);
 	if (op == VuUpperFmacSoftOp::ADDi || op == VuUpperFmacSoftOp::SUBi || op == VuUpperFmacSoftOp::MULi)
@@ -645,6 +647,42 @@ static void mVUemitUpperSoftHelperCall(microVU& mVU, VuUpperFmacSoftOp op)
 	}
 }
 
+static bool mVUupperSoftHelperWritesACC(VuUpperFmacSoftOp op)
+{
+	const u32 value = static_cast<u32>(op);
+	const auto between = [](u32 x, VuUpperFmacSoftOp first, VuUpperFmacSoftOp last) {
+		return x >= static_cast<u32>(first) && x <= static_cast<u32>(last);
+	};
+
+	return between(value, VuUpperFmacSoftOp::ADDA, VuUpperFmacSoftOp::MULAw) ||
+		between(value, VuUpperFmacSoftOp::MADDA, VuUpperFmacSoftOp::MADDAw) ||
+		between(value, VuUpperFmacSoftOp::MSUBA, VuUpperFmacSoftOp::MSUBAw);
+}
+
+static bool mVUupperSoftHelperNeedsMaskedAccFlagFixup(microVU& mVU, VuUpperFmacSoftOp op)
+{
+	return _X_Y_Z_W != 0xf && mVUupperSoftHelperWritesACC(op);
+}
+
+static void mVUemitUpperSoftHelperMaskedAccFlagFixup(microVU& mVU)
+{
+	const xmm& acc = mVU.regAlloc->allocReg(32, 0, 0xf);
+
+	if (_XYZW_SS2)
+	{
+		const xmm& acc_for_flags = mVU.regAlloc->allocReg();
+		xPSHUF.D(acc_for_flags, acc, shuffleSS(_X_Y_Z_W));
+		mVUupdateFlags(mVU, acc_for_flags);
+		mVU.regAlloc->clearNeeded(acc_for_flags);
+	}
+	else
+	{
+		mVUupdateFlags(mVU, acc);
+	}
+
+	mVU.regAlloc->clearNeeded(acc);
+}
+
 // Normal FMAC Opcodes
 static void mVU_FMACa(microVU& mVU, int recPass, int opCase, int opType, bool isACC, microOpcode opEnum, int clampType)
 {
@@ -653,7 +691,11 @@ static void mVU_FMACa(microVU& mVU, int recPass, int opCase, int opType, bool is
 	{
 		if (mVUCanUseUpperSoftHelper(mVU, opCase, opType, isACC))
 		{
-			mVUemitUpperSoftHelperCall(mVU, mVUselectUpperSoftHelperOp(mVU, opCase, opType, isACC));
+			const VuUpperFmacSoftOp soft_op = mVUselectUpperSoftHelperOp(mVU, opCase, opType, isACC);
+			const bool masked_acc_flag_fixup = mVUupperSoftHelperNeedsMaskedAccFlagFixup(mVU, soft_op);
+			mVUemitUpperSoftHelperCall(mVU, soft_op, !masked_acc_flag_fixup);
+			if (masked_acc_flag_fixup)
+				mVUemitUpperSoftHelperMaskedAccFlagFixup(mVU);
 			mVU.profiler.EmitOp(opEnum);
 			return;
 		}
@@ -716,9 +758,13 @@ static void mVU_FMACb(microVU& mVU, int recPass, int opCase, int opType, microOp
 	{
 		if (mVUCanUseUpperSoftHelperMulAdd(mVU, opCase))
 		{
-			mVUemitUpperSoftHelperCall(mVU, opType == 0 ?
+			const VuUpperFmacSoftOp soft_op = opType == 0 ?
 				mVUselectUpperSoftHelperMulAddOp(mVU, opCase, VuUpperFmacSoftOp::MADDA, VuUpperFmacSoftOp::MADDAi, VuUpperFmacSoftOp::MADDAq, VuUpperFmacSoftOp::MADDAx) :
-				mVUselectUpperSoftHelperMulAddOp(mVU, opCase, VuUpperFmacSoftOp::MSUBA, VuUpperFmacSoftOp::MSUBAi, VuUpperFmacSoftOp::MSUBAq, VuUpperFmacSoftOp::MSUBAx));
+				mVUselectUpperSoftHelperMulAddOp(mVU, opCase, VuUpperFmacSoftOp::MSUBA, VuUpperFmacSoftOp::MSUBAi, VuUpperFmacSoftOp::MSUBAq, VuUpperFmacSoftOp::MSUBAx);
+			const bool masked_acc_flag_fixup = mVUupperSoftHelperNeedsMaskedAccFlagFixup(mVU, soft_op);
+			mVUemitUpperSoftHelperCall(mVU, soft_op, !masked_acc_flag_fixup);
+			if (masked_acc_flag_fixup)
+				mVUemitUpperSoftHelperMaskedAccFlagFixup(mVU);
 			mVU.profiler.EmitOp(opEnum);
 			return;
 		}
