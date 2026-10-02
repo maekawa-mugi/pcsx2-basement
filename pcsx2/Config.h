@@ -9,9 +9,12 @@
 #include "common/FPControl.h"
 
 #include <array>
+#include <cstdlib>
+#include <cstring>
 #include <string>
 #include <optional>
 #include <vector>
+#include <utility>
 
 // Macro used for removing some of the redtape involved in defining bitfield/union helpers.
 //
@@ -639,16 +642,25 @@ struct Pcsx2Config
 			vu0SignOverflow : 1,
 			vu0Underflow : 1;
 
+		unsigned int
+			vu0SoftFloat : 3;
+
 		bool
 			vu1Overflow : 1,
 			vu1ExtraOverflow : 1,
 			vu1SignOverflow : 1,
 			vu1Underflow : 1;
 
+		unsigned int
+			vu1SoftFloat : 3;
+
 		bool
 			fpuOverflow : 1,
 			fpuExtraOverflow : 1,
 			fpuFullMode : 1;
+
+		unsigned int
+			fpuSoftFloat : 3;
 
 		bool
 			EnableEECache : 1;
@@ -1506,10 +1518,12 @@ namespace EmuFolders
 
 #ifdef _M_X86 // TODO: Remove me once EE/VU/IOP recs are added.
 #define REC_VU1 (EmuConfig.Cpu.Recompiler.EnableVU1)
-#define THREAD_VU1 (REC_VU1 && EmuConfig.Speedhacks.vuThread)
+#define THREAD_VU1 (REC_VU1 && EmuConfig.Speedhacks.vuThread && !(CHECK_VU_SOFT_ADDSUB(1) || CHECK_VU_SOFT_MUL(1)))
+#define IsVU1SoftNativeStageAllowed(stage) true
 #else
 #define THREAD_VU1 false
 #define REC_VU1 false
+#define IsVU1SoftNativeStageAllowed(stage) false
 #endif
 #define INSTANT_VU1 (EmuConfig.Speedhacks.vu1Instant)
 #define CHECK_EEREC (EmuConfig.Cpu.IsEERecompilerEnabled())
@@ -1539,10 +1553,24 @@ namespace EmuFolders
 #define CHECK_VU_SIGN_OVERFLOW(vunum) (((vunum) == 0) ? EmuConfig.Cpu.Recompiler.vu0SignOverflow : EmuConfig.Cpu.Recompiler.vu1SignOverflow)
 #define CHECK_VU_UNDERFLOW(vunum) (((vunum) == 0) ? EmuConfig.Cpu.Recompiler.vu0Underflow : EmuConfig.Cpu.Recompiler.vu1Underflow)
 
+#define SOFT_FLOAT_ADDSUB 0x1
+#define SOFT_FLOAT_MUL 0x2
+#define SOFT_FLOAT_DIVSQRT 0x4
+
+#define CHECK_VU_SOFT_ADDSUB(vunum) ((((vunum) == 0) ? EmuConfig.Cpu.Recompiler.vu0SoftFloat : EmuConfig.Cpu.Recompiler.vu1SoftFloat) & SOFT_FLOAT_ADDSUB)
+#define CHECK_VU_SOFT_MUL(vunum) ((((vunum) == 0) ? EmuConfig.Cpu.Recompiler.vu0SoftFloat : EmuConfig.Cpu.Recompiler.vu1SoftFloat) & SOFT_FLOAT_MUL)
+#define CHECK_VU_SOFT_DIVSQRT(vunum) ((((vunum) == 0) ? EmuConfig.Cpu.Recompiler.vu0SoftFloat : EmuConfig.Cpu.Recompiler.vu1SoftFloat) & SOFT_FLOAT_DIVSQRT)
+#define CHECK_VU_SOFT(vunum) (((vunum) == 0) ? EmuConfig.Cpu.Recompiler.vu0SoftFloat : EmuConfig.Cpu.Recompiler.vu1SoftFloat)
+
 #define CHECK_FPU_OVERFLOW (EmuConfig.Cpu.Recompiler.fpuOverflow)
 #define CHECK_FPU_EXTRA_OVERFLOW (EmuConfig.Cpu.Recompiler.fpuExtraOverflow) // If enabled, Operands are checked for infinities before being used in the FPU recs
 #define CHECK_FPU_EXTRA_FLAGS 1 // Always enabled now // Sets D/I flags on FPU instructions
 #define CHECK_FPU_FULL (EmuConfig.Cpu.Recompiler.fpuFullMode)
+
+#define CHECK_FPU_SOFT_ADDSUB (EmuConfig.Cpu.Recompiler.fpuSoftFloat & SOFT_FLOAT_ADDSUB)
+#define CHECK_FPU_SOFT_MUL (EmuConfig.Cpu.Recompiler.fpuSoftFloat & SOFT_FLOAT_MUL)
+#define CHECK_FPU_SOFT_DIVSQRT (EmuConfig.Cpu.Recompiler.fpuSoftFloat & SOFT_FLOAT_DIVSQRT)
+#define CHECK_FPU_SOFT (EmuConfig.Cpu.Recompiler.fpuSoftFloat)
 
 //------------ EE Recompiler defines - Comment to disable a recompiler ---------------
 
