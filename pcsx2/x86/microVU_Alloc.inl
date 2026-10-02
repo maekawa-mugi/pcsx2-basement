@@ -47,12 +47,16 @@ __fi void mVUallocSFLAGb(const x32& reg, int fInstance)
 // Normalize Status Flag
 __ri void mVUallocSFLAGc(const x32& reg, const x32& regT, int fInstance)
 {
-	xXOR(reg, reg);
 	mVUallocSFLAGa(regT, fInstance);
-	setBitSFLAG(reg, regT, 0x0f00, 0x0001); // Z  Bit
-	setBitSFLAG(reg, regT, 0xf000, 0x0002); // S  Bit
-	setBitSFLAG(reg, regT, 0x000f, 0x0040); // ZS Bit
-	setBitSFLAG(reg, regT, 0x00f0, 0x0080); // SS Bit
+	xMOV(reg, regT);
+	xAND(reg, 0x7777);
+	xADD(reg, 0x7777);
+	xOR(reg, regT);
+	xAND(reg, 0x8888);
+	xMUL(reg, reg, 0x249);
+	xSHR(reg, 12);
+	xAND(reg, 0xf);
+	xROR(xRegister8(reg), 2);
 	xAND(regT, 0xffff0000); // DS/DI/OS/US/D/I/O/U Bits
 	xSHR(regT, 14);
 	xOR(reg, regT);
@@ -61,8 +65,8 @@ __ri void mVUallocSFLAGc(const x32& reg, const x32& regT, int fInstance)
 // Denormalizes Status Flag; destroys tmp1/tmp2
 __ri void mVUallocSFLAGd(u32* memAddr, const x32& reg = eax, const x32& tmp1 = ecx, const x32& tmp2 = edx)
 {
-	xMOV(tmp2, ptr32[memAddr]);
-	xMOV(reg, tmp2);
+	xMOV(reg, ptr32[memAddr]);
+	xMOV(tmp2, reg);
 	xSHR(reg, 3);
 	xAND(reg, 0x18);
 
@@ -84,8 +88,16 @@ __fi void mVUallocMFLAGa(mV, const x32& reg, int fInstance)
 __fi void mVUallocMFLAGb(mV, const x32& reg, int fInstance)
 {
 	//xAND(reg, 0xffff);
-	if (fInstance < 4) xMOV(ptr32[&mVU.macFlag[fInstance]], reg);         // microVU
-	else               xMOV(ptr32[&mVU.regs().VI[REG_MAC_FLAG].UL], reg); // macroVU
+	if (fInstance < 4)
+	{
+		xMOV(ptr32[&mVU.macFlag[fInstance]], reg); // microVU
+	}
+	else
+	{
+		xMOV(ptr32[&mVU.regs().VI[REG_MAC_FLAG].UL], reg); // macroVU
+		if (mVU.cop2)
+			xMOV(ptr32[&mVU.regs().macflag], reg);
+	}
 }
 
 __fi void mVUallocCFLAGa(mV, const x32& reg, int fInstance)

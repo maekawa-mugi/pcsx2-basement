@@ -48,6 +48,7 @@ void setupMacroOp(int mode, const char* opName)
 	{
 		microVU0.prog.IRinfo.info[0].sFlag.doFlag      = true;
 		microVU0.prog.IRinfo.info[0].sFlag.doNonSticky = true;
+		microVU0.prog.IRinfo.info[0].sFlag.doValue     = true;
 		microVU0.prog.IRinfo.info[0].sFlag.write       = 0;
 		microVU0.prog.IRinfo.info[0].sFlag.lastWrite   = 0;
 	}
@@ -90,6 +91,8 @@ void endMacroOp(int mode)
 			// Normalize
 			mVUallocSFLAGc(eax, gprF0, 0);
 			xMOV(ptr32[&vu0Regs.VI[REG_STATUS_FLAG].UL], eax);
+			if (CHECK_VU_SOFT(0))
+				xMOV(ptr32[&vu0Regs.statusflag], eax);
 		}
 		else if (g_pCurInstInfo->info & (EEINST_COP2_STATUS_FLAG | EEINST_COP2_DENORMALIZE_STATUS_FLAG))
 		{
@@ -119,16 +122,9 @@ bool mVUIsReservedCOP2(int hostreg)
 	return (hostreg == gprT1.GetId() || hostreg == gprT2.GetId() || hostreg == gprF0.GetId());
 }
 
-#define REC_COP2_mVU0_INTERP_SOFT(f, interp, opName, mode, softcheck) \
+#define REC_COP2_mVU0(f, opName, mode) \
 	void recV##f() \
 	{ \
-		if (softcheck) \
-		{ \
-			iFlushCall(FLUSH_FOR_POSSIBLE_MICRO_EXEC); \
-			xADD(ptr64[&cpuRegs.cycle], scaleblockcycles_clear()); \
-			recCall(interp); \
-			return; \
-		} \
 		int _mode = (mode); \
 		setupMacroOp(_mode, opName); \
 		if (_mode & 4) \
@@ -146,13 +142,50 @@ bool mVUIsReservedCOP2(int hostreg)
 		endMacroOp(_mode); \
 	}
 
-#define REC_COP2_mVU0_INTERP(f, interp, opName, mode) REC_COP2_mVU0_INTERP_SOFT(f, interp, opName, mode, false)
+static void mVUprepareCop2SoftGPRs()
+{
+	// Release caller-saved EE mappings and microVU's fixed flag registers.
+	iFlushCall(FLUSH_FOR_POSSIBLE_MICRO_EXEC);
+	_freeX86reg(gprF0);
+	_freeX86reg(gprF1);
+	_freeX86reg(gprF2);
+	_freeX86reg(gprF3);
+}
 
-#define REC_COP2_mVU0(f, opName, mode) REC_COP2_mVU0_INTERP(f, V##f, opName, mode)
-#define REC_COP2_mVU0_ADDSUB(f, opName, mode) REC_COP2_mVU0_INTERP_SOFT(f, V##f, opName, mode, CHECK_VU_SOFT_ADDSUB(0))
-#define REC_COP2_mVU0_MUL(f, opName, mode) REC_COP2_mVU0_INTERP_SOFT(f, V##f, opName, mode, CHECK_VU_SOFT_MUL(0))
-#define REC_COP2_mVU0_FMAC(f, opName, mode) REC_COP2_mVU0_INTERP_SOFT(f, V##f, opName, mode, CHECK_VU_SOFT_ADDSUB(0) || CHECK_VU_SOFT_MUL(0))
-#define REC_COP2_mVU0_DIVSQRT(f, opName, mode) REC_COP2_mVU0_INTERP_SOFT(f, V##f, opName, mode, CHECK_VU_SOFT_DIVSQRT(0))
+#define REC_COP2_mVU0_GENERATED_SOFT(f, opName, mode, flushcheck) \
+	void recV##f() \
+	{ \
+		if (flushcheck) \
+			mVUprepareCop2SoftGPRs(); \
+		int _mode = (mode); \
+		setupMacroOp(_mode, opName); \
+		if (_mode & 4) \
+		{ \
+			mVU_##f(microVU0, 0); \
+			if (!microVU0.prog.IRinfo.info[0].lOp.isNOP) \
+				mVU_##f(microVU0, 1); \
+		} \
+		else \
+		{ \
+			mVU_##f(microVU0, 1); \
+		} \
+		endMacroOp(_mode); \
+	}
+
+#define REC_COP2_mVU0_ADDSUB(f, opName, mode) \
+	REC_COP2_mVU0_GENERATED_SOFT(f, opName, mode, CHECK_VU_SOFT(0))
+#define REC_COP2_mVU0_MUL(f, opName, mode) \
+	REC_COP2_mVU0_GENERATED_SOFT(f, opName, mode, CHECK_VU_SOFT(0))
+#define REC_COP2_mVU0_FMAC(f, opName, mode) \
+	REC_COP2_mVU0_GENERATED_SOFT(f, opName, mode, CHECK_VU_SOFT(0))
+#define REC_COP2_mVU0_FMAC_FD(f, opName, mode) \
+	REC_COP2_mVU0_GENERATED_SOFT(f, opName, mode, CHECK_VU_SOFT(0))
+#define REC_COP2_mVU0_OPM_MUL(f, opName, mode) \
+	REC_COP2_mVU0_GENERATED_SOFT(f, opName, mode, CHECK_VU_SOFT(0))
+#define REC_COP2_mVU0_OPM_FMAC(f, opName, mode) \
+	REC_COP2_mVU0_GENERATED_SOFT(f, opName, mode, CHECK_VU_SOFT(0))
+#define REC_COP2_mVU0_DIVSQRT(f, opName, mode) \
+	REC_COP2_mVU0_GENERATED_SOFT(f, opName, mode, CHECK_VU_SOFT(0))
 
 #define INTERPRETATE_COP2_FUNC(f) \
 	void recV##f() \
@@ -242,13 +275,13 @@ REC_COP2_mVU0(MINIx,  "MINIx",  0x0);
 REC_COP2_mVU0(MINIy,  "MINIy",  0x0);
 REC_COP2_mVU0(MINIz,  "MINIz",  0x0);
 REC_COP2_mVU0(MINIw,  "MINIw",  0x0);
-REC_COP2_mVU0_FMAC(MADD,   "MADD",   0x110);
-REC_COP2_mVU0_FMAC(MADDi,  "MADDi",  0x110);
-REC_COP2_mVU0_FMAC(MADDq,  "MADDq",  0x111);
-REC_COP2_mVU0_FMAC(MADDx,  "MADDx",  0x110);
-REC_COP2_mVU0_FMAC(MADDy,  "MADDy",  0x110);
-REC_COP2_mVU0_FMAC(MADDz,  "MADDz",  0x110);
-REC_COP2_mVU0_FMAC(MADDw,  "MADDw",  0x110);
+REC_COP2_mVU0_FMAC_FD(MADD,   "MADD",   0x110);
+REC_COP2_mVU0_FMAC_FD(MADDi,  "MADDi",  0x110);
+REC_COP2_mVU0_FMAC_FD(MADDq,  "MADDq",  0x111);
+REC_COP2_mVU0_FMAC_FD(MADDx,  "MADDx",  0x110);
+REC_COP2_mVU0_FMAC_FD(MADDy,  "MADDy",  0x110);
+REC_COP2_mVU0_FMAC_FD(MADDz,  "MADDz",  0x110);
+REC_COP2_mVU0_FMAC_FD(MADDw,  "MADDw",  0x110);
 REC_COP2_mVU0_FMAC(MADDA,  "MADDA",  0x110);
 REC_COP2_mVU0_FMAC(MADDAi, "MADDAi", 0x110);
 REC_COP2_mVU0_FMAC(MADDAq, "MADDAq", 0x111);
@@ -256,13 +289,13 @@ REC_COP2_mVU0_FMAC(MADDAx, "MADDAx", 0x110);
 REC_COP2_mVU0_FMAC(MADDAy, "MADDAy", 0x110);
 REC_COP2_mVU0_FMAC(MADDAz, "MADDAz", 0x110);
 REC_COP2_mVU0_FMAC(MADDAw, "MADDAw", 0x110);
-REC_COP2_mVU0_FMAC(MSUB,   "MSUB",   0x110);
-REC_COP2_mVU0_FMAC(MSUBi,  "MSUBi",  0x110);
-REC_COP2_mVU0_FMAC(MSUBq,  "MSUBq",  0x111);
-REC_COP2_mVU0_FMAC(MSUBx,  "MSUBx",  0x110);
-REC_COP2_mVU0_FMAC(MSUBy,  "MSUBy",  0x110);
-REC_COP2_mVU0_FMAC(MSUBz,  "MSUBz",  0x110);
-REC_COP2_mVU0_FMAC(MSUBw,  "MSUBw",  0x110);
+REC_COP2_mVU0_FMAC_FD(MSUB,   "MSUB",   0x110);
+REC_COP2_mVU0_FMAC_FD(MSUBi,  "MSUBi",  0x110);
+REC_COP2_mVU0_FMAC_FD(MSUBq,  "MSUBq",  0x111);
+REC_COP2_mVU0_FMAC_FD(MSUBx,  "MSUBx",  0x110);
+REC_COP2_mVU0_FMAC_FD(MSUBy,  "MSUBy",  0x110);
+REC_COP2_mVU0_FMAC_FD(MSUBz,  "MSUBz",  0x110);
+REC_COP2_mVU0_FMAC_FD(MSUBw,  "MSUBw",  0x110);
 REC_COP2_mVU0_FMAC(MSUBA,  "MSUBA",  0x110);
 REC_COP2_mVU0_FMAC(MSUBAi, "MSUBAi", 0x110);
 REC_COP2_mVU0_FMAC(MSUBAq, "MSUBAq", 0x111);
@@ -270,9 +303,9 @@ REC_COP2_mVU0_FMAC(MSUBAx, "MSUBAx", 0x110);
 REC_COP2_mVU0_FMAC(MSUBAy, "MSUBAy", 0x110);
 REC_COP2_mVU0_FMAC(MSUBAz, "MSUBAz", 0x110);
 REC_COP2_mVU0_FMAC(MSUBAw, "MSUBAw", 0x110);
-REC_COP2_mVU0_MUL(OPMULA, "OPMULA", 0x110);
-REC_COP2_mVU0_FMAC(OPMSUB, "OPMSUB", 0x110);
-REC_COP2_mVU0_INTERP(CLIP, VCLIPw, "CLIP", 0x108);
+REC_COP2_mVU0_OPM_MUL(OPMULA, "OPMULA", 0x110);
+REC_COP2_mVU0_OPM_FMAC(OPMSUB, "OPMSUB", 0x110);
+REC_COP2_mVU0(CLIP, "CLIP", 0x108);
 
 //------------------------------------------------------------------
 // Macro VU - Redirect Lower Instructions

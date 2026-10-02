@@ -361,6 +361,7 @@ namespace R5900
 		// Floating Point Unit Coprocessor (COP1 / FPU)
 		namespace COP1
 		{
+			void GenerateSoftFloatKernels();
 			void recMFC1();
 			void recCFC1();
 			void recMTC1();
