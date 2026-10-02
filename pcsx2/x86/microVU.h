@@ -299,6 +299,8 @@ extern void mVUdeleteProg(microVU& mVU, microProgram*& prog);
 _mVUt extern void* mVUsearchProg(u32 startPC, uptr pState);
 extern void* mVUexecuteVU0(u32 startPC, u32 cycles);
 extern void* mVUexecuteVU1(u32 startPC, u32 cycles);
+extern bool mVU1Stage1NativeAllowed;
+extern void mVU1UpdateStage1NativeAllowed(microVU& mVU, s32 start, s32 end);
 
 // recCall Function Pointer
 typedef void (*mVUrecCall)(u32, u32);
