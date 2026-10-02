@@ -1341,6 +1341,34 @@ function(setup_main_executable target)
 		endforeach()
 	endif()
 
+	# Keep license texts and attribution with binaries even without the submodule sources.
+	set(DISTRIBUTION_LICENSE_FILES
+		"${CMAKE_SOURCE_DIR}/COPYING.GPLv3"
+		"${CMAKE_SOURCE_DIR}/COPYING.LGPLv3"
+		"${CMAKE_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
+	)
+	if(APPLE)
+		target_sources(${target} PRIVATE ${DISTRIBUTION_LICENSE_FILES})
+		set_source_files_properties(${DISTRIBUTION_LICENSE_FILES} PROPERTIES MACOSX_PACKAGE_LOCATION Resources/docs)
+	else()
+		if(WIN32)
+			set(LICENSE_OUTPUT_DIR "$<TARGET_FILE_DIR:${target}>/docs")
+			set(LICENSE_INSTALL_DIR "${CMAKE_SOURCE_DIR}/bin/docs")
+		else()
+			set(LICENSE_OUTPUT_DIR "$<TARGET_FILE_DIR:${target}>/resources/docs")
+			if(PACKAGE_MODE)
+				set(LICENSE_INSTALL_DIR "${CMAKE_INSTALL_FULL_DATADIR}/PCSX2/resources/docs")
+			else()
+				set(LICENSE_INSTALL_DIR "${CMAKE_SOURCE_DIR}/bin/resources/docs")
+			endif()
+		endif()
+		add_custom_command(TARGET ${target} POST_BUILD
+			COMMAND "${CMAKE_COMMAND}" -E make_directory "${LICENSE_OUTPUT_DIR}"
+			COMMAND "${CMAKE_COMMAND}" -E copy_if_different ${DISTRIBUTION_LICENSE_FILES} "${LICENSE_OUTPUT_DIR}"
+			VERBATIM)
+		install(FILES ${DISTRIBUTION_LICENSE_FILES} DESTINATION "${LICENSE_INSTALL_DIR}" COMPONENT Licenses)
+	endif()
+
 	get_property(PCSX2_SOURCE_DIR GLOBAL PROPERTY PCSX2_SOURCE_DIR)
 	get_property(PCSX2_METAL_SHADERS GLOBAL PROPERTY PCSX2_METAL_SHADERS)
 
