@@ -25,3 +25,12 @@ Please note that a BIOS dump from a legitimately-owned PS2 console is required t
 PCSX2 supports translation into other languages using [Crowdin](https://crowdin.com/project/pcsx2-emulator).
 
 See the [Contribution Guide](https://pcsx2.net/docs/contributing/) for more info on how to contribute.
+
+## Licenses and third-party notices
+
+PCSX2's GPLv3 license text is in [COPYING.GPLv3](COPYING.GPLv3).
+The paraLLEl-GS library and identified integration files use LGPLv3 or later;
+see [COPYING.LGPLv3](COPYING.LGPLv3) and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for attribution, source
+locations, and rebuilding information. Original source license notices are
+retained.
