@@ -66,6 +66,7 @@ struct LoadstoreBackpatchInfo
 	u32 guest_pc;
 	u32 gpr_bitmask;
 	u32 fpr_bitmask;
+	uptr slow_path;
 	u8 code_size;
 	u8 address_register;
 	u8 data_register;
@@ -1230,7 +1231,7 @@ void vtlb_ClearLoadStoreInfo()
 	s_fastmem_faulting_pcs.clear();
 }
 
-void vtlb_AddLoadStoreInfo(uptr code_address, u32 code_size, u32 guest_pc, u32 gpr_bitmask, u32 fpr_bitmask, u8 address_register, u8 data_register, u8 size_in_bits, bool is_signed, bool is_load, bool is_fpr)
+void vtlb_AddLoadStoreInfo(uptr code_address, u32 code_size, u32 guest_pc, u32 gpr_bitmask, u32 fpr_bitmask, u8 address_register, u8 data_register, u8 size_in_bits, bool is_signed, bool is_load, bool is_fpr, uptr slow_path)
 {
 	pxAssert(code_size < std::numeric_limits<u8>::max());
 
@@ -1238,7 +1239,9 @@ void vtlb_AddLoadStoreInfo(uptr code_address, u32 code_size, u32 guest_pc, u32 g
 	if (iter != s_fastmem_backpatch_info.end())
 		s_fastmem_backpatch_info.erase(iter);
 
-	LoadstoreBackpatchInfo info{guest_pc, gpr_bitmask, fpr_bitmask, static_cast<u8>(code_size), address_register, data_register, size_in_bits, is_signed, is_load, is_fpr};
+	LoadstoreBackpatchInfo info{guest_pc, gpr_bitmask, fpr_bitmask, slow_path,
+		static_cast<u8>(code_size), address_register, data_register, size_in_bits,
+		is_signed, is_load, is_fpr};
 	s_fastmem_backpatch_info.emplace(code_address, info);
 }
 
@@ -1255,9 +1258,16 @@ bool vtlb_BackpatchLoadStore(uptr code_address, uptr fault_address)
 
 	const LoadstoreBackpatchInfo& info = iter->second;
 	const u32 guest_addr = static_cast<u32>(fault_address - fastmem_start);
-	vtlb_DynBackpatchLoadStore(code_address, info.code_size, info.guest_pc, guest_addr,
-		info.gpr_bitmask, info.fpr_bitmask, info.address_register, info.data_register,
-		info.size_in_bits, info.is_signed, info.is_load, info.is_fpr);
+	if (info.slow_path != 0)
+	{
+		vtlb_DynPatchLoadStore(code_address, info.code_size, info.slow_path);
+	}
+	else
+	{
+		vtlb_DynBackpatchLoadStore(code_address, info.code_size, info.guest_pc, guest_addr,
+			info.gpr_bitmask, info.fpr_bitmask, info.address_register, info.data_register,
+			info.size_in_bits, info.is_signed, info.is_load, info.is_fpr);
+	}
 
 	// queue block for recompilation later
 	Cpu->Clear(info.guest_pc, 1);

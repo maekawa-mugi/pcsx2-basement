@@ -1517,6 +1517,40 @@ void recFinishFullTLBAccessContext()
 	recEmitFullTLBAccessFaultExit();
 }
 
+u32 recGetFullTLBScaledBlockCycles()
+{
+	return scaleblockcycles();
+}
+
+void recEmitFullTLBAccessFaultExitForThunk(u32 stack_size, u32 scaled_cycles)
+{
+	pxAssert(EmuConfig.Cpu.EnableExperimentalEETLB);
+
+	_x86regs saved_x86regs[iREGCNT_GPR];
+	_xmmregs saved_xmmregs[iREGCNT_XMM];
+	std::memcpy(saved_x86regs, x86regs, sizeof(saved_x86regs));
+	std::memcpy(saved_xmmregs, xmmregs, sizeof(saved_xmmregs));
+	GPR_reg64 saved_const_regs[32];
+	std::memcpy(saved_const_regs, g_cpuConstRegs, sizeof(saved_const_regs));
+	const u32 saved_has_const = g_cpuHasConstReg;
+	const u32 saved_flushed_const = g_cpuFlushedConstReg;
+
+	xCMP(ptr8[EEMemory::GetRecompilerAccessFaultAddress()], 0);
+	xForwardJZ32 no_fault;
+	_eeFlushAllDirty();
+	if (stack_size != 0)
+		xADD(rsp, stack_size);
+	xADD(ptr64[&cpuRegs.cycle], scaled_cycles);
+	xJMP(DispatcherReg);
+
+	std::memcpy(x86regs, saved_x86regs, sizeof(saved_x86regs));
+	std::memcpy(xmmregs, saved_xmmregs, sizeof(saved_xmmregs));
+	std::memcpy(g_cpuConstRegs, saved_const_regs, sizeof(saved_const_regs));
+	g_cpuHasConstReg = saved_has_const;
+	g_cpuFlushedConstReg = saved_flushed_const;
+	no_fault.SetTarget();
+}
+
 u32 scaleblockcycles_clear()
 {
 	u32 scaled = scaleblockcycles_calculation();
@@ -2621,6 +2655,7 @@ static void recRecompile(const u32 startpc)
 
 	_initX86regs();
 	_initXMMregs();
+	vtlb_BeginFullTLBFastmemBlock();
 
 #ifdef TRACE_BLOCKS
 	xFastCall((void*)PreBlockCheck, pc);
@@ -3115,7 +3150,15 @@ StartRecomp:
 
 	pxAssert(xGetPtr() < SysMemory::GetEERecEnd());
 
-	s_pCurBlockEx->x86size = static_cast<u32>(xGetPtr() - recPtr);
+	// Slow paths are unreachable from normal block fallthrough because every block
+	// has already emitted its terminal dispatch above. Keep them out of the block's
+	// profiling size, but advance recPtr past them so the next block cannot overwrite
+	// them.
+	const u8* block_code_end = xGetPtr();
+	vtlb_EndFullTLBFastmemBlock();
+	pxAssert(xGetPtr() < SysMemory::GetEERecEnd());
+
+	s_pCurBlockEx->x86size = static_cast<u32>(block_code_end - recPtr);
 
 #if 0
 	// Example: Dump both x86/EE code
