@@ -30,11 +30,97 @@ static __fi void testNeg(mV, const xmm& xmmReg, const x32& gprTemp)
 	skip.SetTarget();
 }
 
+static void mVUemitLowerDivSoftHelperCall(microVU& mVU, u32 op)
+{
+	void* helper = (op == 0) ? (void*)vuLowerDivSoftDivHelper : (op == 1) ? (void*)vuLowerDivSoftSqrtHelper : (void*)vuLowerDivSoftRsqrtHelper;
+
+	mVU.regAlloc->flushAll();
+	xMOV(gprT1, ptr32[&mVU.regs().VI[REG_STATUS_FLAG].UL]);
+	xMOV(ptr32[&mVU.regs().statusflag], gprT1);
+	xMOV(ptr32[&mVU.regs().code], mVU.code);
+
+	mVUbackupRegs(mVU, true, false);
+	xLoadFarAddr(arg1reg, &mVU.regs());
+	xFastCall(helper, arg1reg);
+	mVUrestoreRegs(mVU, true, false);
+	if (op == 2)
+	{
+		xXOR(gprT2, gprT2);
+		xMOV(gprT1, ptr32[&mVU.regs().VF[_Ft_].UL[_Ftf_]]);
+		xAND(gprT1, 0x7f800000);
+		xForwardJNZ8 ft_not_zero_or_denorm;
+
+		xMOV(gprT1, ptr32[&mVU.regs().VF[_Fs_].UL[_Fsf_]]);
+		xAND(gprT1, 0x7fffffff);
+		xForwardJNZ8 rsqrt_ft_zero_fs_nonzero;
+		xMOV(gprT2, 0x410);
+		xForwardJump8 rsqrt_status_done_0;
+
+		rsqrt_ft_zero_fs_nonzero.SetTarget();
+		xMOV(gprT2, 0x820);
+		xTEST(ptr32[&mVU.regs().VF[_Ft_].UL[_Ftf_]], 0x80000000);
+		xForwardJZ8 rsqrt_status_done_1;
+		xOR(gprT2, 0x410);
+		xForwardJump8 rsqrt_status_done_2;
+
+		ft_not_zero_or_denorm.SetTarget();
+		xTEST(ptr32[&mVU.regs().VF[_Ft_].UL[_Ftf_]], 0x80000000);
+		xForwardJZ8 rsqrt_status_done_3;
+		xMOV(gprT2, 0x410);
+
+		rsqrt_status_done_0.SetTarget();
+		rsqrt_status_done_1.SetTarget();
+		rsqrt_status_done_2.SetTarget();
+		rsqrt_status_done_3.SetTarget();
+		xMOV(gprT1, ptr32[&mVU.regs().statusflag]);
+		xAND(gprT1, ~0xc30);
+		xOR(gprT1, gprT2);
+		xMOV(ptr32[&mVU.regs().statusflag], gprT1);
+		xXOR(gprT1, gprT1);
+		xTEST(gprT2, 0x410);
+		xForwardJZ8 rsqrt_no_invalid_divflag;
+		xOR(gprT1, divI);
+		rsqrt_no_invalid_divflag.SetTarget();
+		xTEST(gprT2, 0x820);
+		xForwardJZ8 rsqrt_no_divide_divflag;
+		xOR(gprT1, divD);
+		rsqrt_no_divide_divflag.SetTarget();
+		xMOV(ptr32[&mVU.divFlag], gprT1);
+	}
+
+	xMOVDZX(xmmT1, ptr32[&mVU.regs().q.UL]);
+	writeQreg(xmmT1, mVUinfo.writeQ);
+	xMOV(gprT1, ptr32[&mVU.regs().statusflag]);
+	xMOV(ptr32[&mVU.regs().VI[REG_STATUS_FLAG].UL], gprT1);
+	xXOR(gprT2, gprT2);
+	xTEST(gprT1, 0x10);
+	xForwardJZ8 not_invalid;
+	xOR(gprT2, divI);
+	not_invalid.SetTarget();
+	xTEST(gprT1, 0x20);
+	xForwardJZ8 no_div_flag;
+	xOR(gprT2, divD);
+	no_div_flag.SetTarget();
+	xMOV(ptr32[&mVU.divFlag], gprT2);
+	if (sFLAG.doFlag)
+	{
+		mVUallocSFLAGd(&mVU.regs().VI[REG_STATUS_FLAG].UL, gprT1, gprT2);
+		mVUallocSFLAGb(gprT1, sFLAG.write);
+	}
+}
+
 mVUop(mVU_DIV)
 {
 	pass1 { mVUanalyzeFDIV(mVU, _Fs_, _Fsf_, _Ft_, _Ftf_, 7); }
 	pass2
 	{
+		if (CHECK_VU_SOFT_DIVSQRT(mVU.index) && (mVU.index == 0 || IsVU1SoftNativeStageAllowed(6)))
+		{
+			mVUemitLowerDivSoftHelperCall(mVU, 0);
+			mVU.profiler.EmitOp(opDIV);
+			return;
+		}
+
 		xmm Ft;
 		if (_Ftf_) Ft = mVU.regAlloc->allocReg(_Ft_, 0, (1 << (3 - _Ftf_)));
 		else       Ft = mVU.regAlloc->allocReg(_Ft_);
@@ -84,6 +170,13 @@ mVUop(mVU_SQRT)
 	pass1 { mVUanalyzeFDIV(mVU, 0, 0, _Ft_, _Ftf_, 7); }
 	pass2
 	{
+		if (CHECK_VU_SOFT_DIVSQRT(mVU.index) && (mVU.index == 0 || IsVU1SoftNativeStageAllowed(6)))
+		{
+			mVUemitLowerDivSoftHelperCall(mVU, 1);
+			mVU.profiler.EmitOp(opSQRT);
+			return;
+		}
+
 		const xmm& Ft = mVU.regAlloc->allocReg(_Ft_, 0, (1 << (3 - _Ftf_)));
 
 		xMOV(ptr32[&mVU.divFlag], 0); // Clear I/D flags
@@ -111,6 +204,13 @@ mVUop(mVU_RSQRT)
 	pass1 { mVUanalyzeFDIV(mVU, _Fs_, _Fsf_, _Ft_, _Ftf_, 13); }
 	pass2
 	{
+		if (CHECK_VU_SOFT_DIVSQRT(mVU.index) && (mVU.index == 0 || IsVU1SoftNativeStageAllowed(6)))
+		{
+			mVUemitLowerDivSoftHelperCall(mVU, 2);
+			mVU.profiler.EmitOp(opRSQRT);
+			return;
+		}
+
 		const xmm& Fs = mVU.regAlloc->allocReg(_Fs_, 0, (1 << (3 - _Fsf_)));
 		const xmm& Ft = mVU.regAlloc->allocReg(_Ft_, 0, (1 << (3 - _Ftf_)));
 		const xmm& t1 = mVU.regAlloc->allocReg();
@@ -734,6 +834,27 @@ mVUop(mVU_FSAND)
 		if (_Imm12_ & 0x030c) DevCon.WriteLn(Color_Green, "mVU_FSAND: Checking U/O/US/OS Flags");
 		const xRegister32& reg = mVU.regAlloc->allocGPR(-1, _It_, mVUlow.backupVI);
 		mVUallocSFLAGc(reg, gprT1, sFLAG.read);
+		if (mVU.index == 1 && CHECK_VU_SOFT_DIVSQRT(1) && (_Imm12_ & 0x0c30))
+		{
+			xMOV(gprT1, ptr32[&mVU.divFlag]);
+			xTEST(gprT1, divI);
+			xForwardJZ8 no_invalid_divflag;
+			xOR(reg, 0x410);
+			no_invalid_divflag.SetTarget();
+			xTEST(gprT1, divD);
+			xForwardJZ8 no_divide_divflag;
+			xOR(reg, 0x820);
+			no_divide_divflag.SetTarget();
+		}
+		if (mVU.index == 1 && CHECK_VU_SOFT_ADDSUB(1) && CHECK_VU_SOFT_MUL(1) && _Imm12_ == 0xfff)
+		{
+			xTEST(ptr32[&mVU.regs().statusflag], 1u << 21);
+			xForwardJZ8 no_native_product_underflow;
+			xOR(reg, 0x200);
+			if (!(mVUcount & 1))
+				xOR(reg, 0x100);
+			no_native_product_underflow.SetTarget();
+		}
 		xAND(reg, _Imm12_);
 		mVU.regAlloc->clearNeeded(reg);
 		mVU.profiler.EmitOp(opFSAND);
@@ -1637,8 +1758,19 @@ mVUop(mVU_WAITP)
 
 mVUop(mVU_WAITQ)
 {
-	pass1 { mVUstall = std::max(mVUstall, mVUregs.q); }
-	pass2 { mVU.profiler.EmitOp(opWAITQ); }
+	pass1
+	{
+		mVUstall = std::max(mVUstall, mVUregs.q);
+		mVUinfo.doDivFlag = 1;
+	}
+	pass2
+	{
+		if (!sFLAG.doFlag)
+			xMOV(getFlagReg(sFLAG.write), getFlagReg(sFLAG.lastWrite));
+		xAND(getFlagReg(sFLAG.write), 0xfff3ffff);
+		xOR(getFlagReg(sFLAG.write), ptr32[&mVU.divFlag]);
+		mVU.profiler.EmitOp(opWAITQ);
+	}
 	pass3 { mVUlog("WAITQ"); }
 }
 

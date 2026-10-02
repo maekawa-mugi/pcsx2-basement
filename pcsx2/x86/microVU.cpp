@@ -3,6 +3,8 @@
 
 #include "microVU.h"
 
+#include "VUops.h"
+
 #include "common/AlignedMalloc.h"
 #include "common/Perf.h"
 #include "common/StringUtil.h"
@@ -304,9 +306,154 @@ _mVUt __fi void* mVUsearchProg(u32 startPC, uptr pState)
 
 recMicroVU0 CpuMicroVU0;
 recMicroVU1 CpuMicroVU1;
+bool mVU1Stage1NativeAllowed = false;
 
 recMicroVU0::recMicroVU0() { m_Idx = 0; IsInterpreter = false; }
 recMicroVU1::recMicroVU1() { m_Idx = 1; IsInterpreter = false; }
+
+struct mVU1Stage1ScanResult
+{
+	bool native_path = false;
+	const char* reason = "unknown";
+	u32 pc = 0;
+	u32 code = 0;
+};
+
+static bool mVU1UpperOpUsesSoftAddSub(u32 code)
+{
+	switch (code & 0x3f)
+	{
+		case 0x00: case 0x01: case 0x02: case 0x03: // ADDx/y/z/w
+		case 0x04: case 0x05: case 0x06: case 0x07: // SUBx/y/z/w
+		case 0x20: case 0x22: // ADDq/ADDi
+		case 0x24: case 0x26: // SUBq/SUBi
+		case 0x28: case 0x2c: // ADD/SUB
+		case 0x08: case 0x09: case 0x0a: case 0x0b: // MADDx/y/z/w
+		case 0x0c: case 0x0d: case 0x0e: case 0x0f: // MSUBx/y/z/w
+		case 0x21: case 0x23: // MADDq/MADDi
+		case 0x25: case 0x27: // MSUBq/MSUBi
+		case 0x29: case 0x2d: // MADD/MSUB
+			return true;
+		default:
+			break;
+	}
+
+	const u32 upper_op = code & 0x3f;
+	const u32 fd_op = (code >> 6) & 0x1f;
+	if (upper_op == 0x3c || upper_op == 0x3d)
+		return fd_op <= 3 || fd_op == 8 || fd_op == 9 || fd_op == 10 || fd_op == 11;
+	if (upper_op == 0x3e || upper_op == 0x3f)
+		return fd_op <= 3 || fd_op == 8 || fd_op == 9;
+	return false;
+}
+
+static bool mVU1UpperOpUsesSoftMul(u32 code)
+{
+	switch (code & 0x3f)
+	{
+		case 0x08: case 0x09: case 0x0a: case 0x0b: // MADDx/y/z/w
+		case 0x0c: case 0x0d: case 0x0e: case 0x0f: // MSUBx/y/z/w
+		case 0x18: case 0x19: case 0x1a: case 0x1b: // MULx/y/z/w
+		case 0x1c: case 0x1e: // MULq/MULi
+		case 0x21: case 0x23: // MADDq/MADDi
+		case 0x25: case 0x27: // MSUBq/MSUBi
+		case 0x29: case 0x2a: case 0x2d: case 0x2e: // MADD/MUL/MSUB/OPMSUB
+			return true;
+		default:
+			break;
+	}
+
+	const u32 upper_op = code & 0x3f;
+	const u32 fd_op = (code >> 6) & 0x1f;
+	if (upper_op == 0x3c)
+		return fd_op == 2 || fd_op == 3 || fd_op == 6 || fd_op == 7;
+	if (upper_op == 0x3d)
+		return fd_op == 2 || fd_op == 3 || fd_op == 6 || fd_op == 8 || fd_op == 9 || fd_op == 10 || fd_op == 11;
+	if (upper_op == 0x3e)
+		return fd_op == 2 || fd_op == 3 || fd_op == 6 || fd_op == 7 || fd_op == 10 || fd_op == 11;
+	if (upper_op == 0x3f)
+		return fd_op == 2 || fd_op == 3 || fd_op == 6 || fd_op == 8 || fd_op == 9;
+	return false;
+}
+
+static bool mVU1UpperOpIsStage1Native(u32 code)
+{
+	const u32 upper_op = code & 0x3f;
+	const u32 xyzw = (code >> 21) & 0xf;
+	if (upper_op == 0x28 || upper_op == 0x2a || upper_op == 0x2c)
+		return xyzw == 0xf || IsVU1SoftNativeStageAllowed(2);
+	if ((upper_op <= 0x07) || (upper_op >= 0x18 && upper_op <= 0x1b))
+		return IsVU1SoftNativeStageAllowed(3);
+	if (upper_op == 0x1e || upper_op == 0x22 || upper_op == 0x26)
+		return IsVU1SoftNativeStageAllowed(4);
+	if ((upper_op >= 0x08 && upper_op <= 0x0f) || upper_op == 0x23 || upper_op == 0x27 || upper_op == 0x29 || upper_op == 0x2d)
+		return IsVU1SoftNativeStageAllowed(5);
+	if (upper_op == 0x1c)
+		return IsVU1SoftNativeStageAllowed(6);
+	return false;
+}
+
+static bool mVU1LowerOpIsUnsafeForStage1Native(u32 code)
+{
+	const u32 lower_op = code & 0x7f;
+	if ((lower_op >= 0x10 && lower_op <= 0x1c) || (lower_op >= 0x20 && lower_op <= 0x2f))
+		return true;
+	if (lower_op == 0x40)
+	{
+		const u32 t3_op = (code >> 4) & 0x3;
+		const u32 sub_op = (code >> 6) & 0x1f;
+		return t3_op == 0 && sub_op == 27; // XGKICK
+	}
+	return false;
+}
+
+static mVU1Stage1ScanResult mVU1ScanNativeSoftFloatStage1(microVU& mVU, s32 start, s32 end)
+{
+	const bool soft_addsub = CHECK_VU_SOFT_ADDSUB(1) != 0;
+	const bool soft_mul = CHECK_VU_SOFT_MUL(1) != 0;
+	if (!soft_addsub && !soft_mul)
+		return {false, "soft-disabled", static_cast<u32>(start), 0};
+	if (mVU.index != 1)
+		return {false, "not-vu1", static_cast<u32>(start), 0};
+	if (start < 0 || end <= start)
+		return {false, "empty-range", static_cast<u32>(start), 0};
+
+	const u32* micro = reinterpret_cast<u32*>(mVU.regs().Micro);
+	bool has_stage1_native_op = false;
+	bool has_unsafe_lower_op = false;
+	for (u32 byte_pc = static_cast<u32>(start) & ~7u; byte_pc < static_cast<u32>(end); byte_pc += 8)
+	{
+		const u32 pc = ((byte_pc & (mVU.microMemSize - 8)) / 4) + 1;
+		const u32 code0 = micro[pc & mVU.progMemMask];
+		const u32 code1 = micro[(pc ^ 1) & mVU.progMemMask];
+		const bool needs_soft0 = (soft_addsub && mVU1UpperOpUsesSoftAddSub(code0)) || (soft_mul && mVU1UpperOpUsesSoftMul(code0));
+		const bool needs_soft1 = (soft_addsub && mVU1UpperOpUsesSoftAddSub(code1)) || (soft_mul && mVU1UpperOpUsesSoftMul(code1));
+		const bool stage1_native0 = needs_soft0 && mVU1UpperOpIsStage1Native(code0);
+		const bool stage1_native1 = needs_soft1 && mVU1UpperOpIsStage1Native(code1);
+		if (needs_soft0 && !stage1_native0)
+			return {false, "unsupported-upper-soft-op", pc * 4, code0};
+		if (needs_soft1 && !stage1_native1)
+			return {false, "unsupported-upper-soft-op", (pc ^ 1) * 4, code1};
+		has_stage1_native_op |= stage1_native0 || stage1_native1;
+		if (mVU1LowerOpIsUnsafeForStage1Native(code0))
+			has_unsafe_lower_op = true;
+		if (mVU1LowerOpIsUnsafeForStage1Native(code1))
+			has_unsafe_lower_op = true;
+		if (has_stage1_native_op && has_unsafe_lower_op)
+			return {false, "unsafe-lower-op", pc * 4, code0};
+	}
+
+	if (!has_stage1_native_op)
+		return {false, "no-stage1-native-op", static_cast<u32>(start), 0};
+
+	return {true, "accepted", static_cast<u32>(start), 0};
+}
+
+void mVU1UpdateStage1NativeAllowed(microVU& mVU, s32 start, s32 end)
+{
+	const mVU1Stage1ScanResult scan = mVU1ScanNativeSoftFloatStage1(mVU, start, end);
+	mVU1Stage1NativeAllowed = scan.native_path;
+}
 
 void recMicroVU0::Reserve()
 {
