@@ -7,6 +7,7 @@
 void ATA::DRQCmdDMADataToHost()
 {
 	//Ready to Start DMA
+	rdTransferred = 0; // ps2linux rig: an aborted transfer must not offset the next one
 	regStatus &= ~ATA_STAT_BUSY;
 	regStatus |= ATA_STAT_DRQ;
 	dmaReady = true;
@@ -32,6 +33,9 @@ void ATA::DRQCmdDMADataFromHost()
 		return;
 
 	nsectorLeft = nsector;
+	// ps2linux rig: an aborted transfer must not offset the next one
+	delete[] currentWrite;
+	wrTransferred = 0;
 	currentWrite = new u8[nsector * 512];
 	currentWriteLength = nsector * 512;
 	currentWriteSectors = HDD_GetLBA();
