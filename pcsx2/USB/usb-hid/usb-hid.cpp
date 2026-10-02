@@ -455,7 +455,7 @@ namespace usb_hid
 		{Q_KEY_CODE_FIND, "Find"},
 		{Q_KEY_CODE_FRONT, "Front"},
 		{Q_KEY_CODE_G, "G"},
-		{Q_KEY_CODE_GRAVE_ACCENT, "Agrave"},
+		{Q_KEY_CODE_GRAVE_ACCENT, "QuoteLeft"}, // netbsd-ps2 rig: was "Agrave", so ` and ~ never reached the guest
 		{Q_KEY_CODE_H, "H"},
 		{Q_KEY_CODE_HELP, "Help"},
 		{Q_KEY_CODE_HENKAN, "Henkan"},
