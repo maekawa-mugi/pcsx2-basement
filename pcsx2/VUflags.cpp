@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Common.h"
+#include "PS2Float.h"
 
 #include <cmath>
 #include <float.h>
@@ -12,10 +13,10 @@
 /*          NEW FLAGS                    */ //By asadr. Thnkx F|RES :p
 /*****************************************/
 
-static __ri u32 VU_MAC_UPDATE( int shift, VURegs * VU, float f )
+static __ri u32 VU_MAC_UPDATE( s32 shift, VURegs* VU, float f)
 {
 	u32 v = *(u32*)&f;
-	int exp = (v >> 23) & 0xff;
+	s32 exp = (v >> 23) & 0xff;
 	u32 s = v & 0x80000000;
 
 	if (s)
@@ -46,6 +47,16 @@ static __ri u32 VU_MAC_UPDATE( int shift, VURegs * VU, float f )
 	}
 }
 
+static __ri u32 VU_MAC_UPDATE(s32 shift, VURegs* VU, PS2Float f)
+{
+	return VU_MAC_UPDATE_PS2Float(VU, shift, f);
+}
+
+__fi bool IsOverflowSet(VURegs* VU, s32 shift)
+{
+	return (VU->macflag & (0x1000 << shift));
+}
+
 __fi u32 VU_MACx_UPDATE(VURegs * VU, float x)
 {
 	return VU_MAC_UPDATE(3, VU, x);
@@ -62,6 +73,26 @@ __fi u32 VU_MACz_UPDATE(VURegs * VU, float z)
 }
 
 __fi u32 VU_MACw_UPDATE(VURegs * VU, float w)
+{
+	return VU_MAC_UPDATE(0, VU, w);
+}
+
+__fi u32 VU_MACx_UPDATE(VURegs* VU, PS2Float x)
+{
+	return VU_MAC_UPDATE(3, VU, x);
+}
+
+__fi u32 VU_MACy_UPDATE(VURegs* VU, PS2Float y)
+{
+	return VU_MAC_UPDATE(2, VU, y);
+}
+
+__fi u32 VU_MACz_UPDATE(VURegs* VU, PS2Float z)
+{
+	return VU_MAC_UPDATE(1, VU, z);
+}
+
+__fi u32 VU_MACw_UPDATE(VURegs* VU, PS2Float w)
 {
 	return VU_MAC_UPDATE(0, VU, w);
 }
@@ -87,11 +118,6 @@ __fi void VU_MACw_CLEAR(VURegs * VU)
 }
 
 __ri void VU_STAT_UPDATE(VURegs * VU) {
-	int newflag = 0 ;
-	if (VU->macflag & 0x000F) newflag = 0x1;
-	if (VU->macflag & 0x00F0) newflag |= 0x2;
-	if (VU->macflag & 0x0F00) newflag |= 0x4;
-	if (VU->macflag & 0xF000) newflag |= 0x8;
 	// Save old sticky flags and D/I settings, everthing else is the new flags only
-	VU->statusflag = newflag;
+	VU_STAT_UPDATE_INLINE(VU);
 }
