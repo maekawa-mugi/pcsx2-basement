@@ -1518,7 +1518,7 @@ namespace EmuFolders
 
 #ifdef _M_X86 // TODO: Remove me once EE/VU/IOP recs are added.
 #define REC_VU1 (EmuConfig.Cpu.Recompiler.EnableVU1)
-#define THREAD_VU1 (REC_VU1 && EmuConfig.Speedhacks.vuThread && !(CHECK_VU_SOFT_ADDSUB(1) || CHECK_VU_SOFT_MUL(1)))
+#define THREAD_VU1 (REC_VU1 && EmuConfig.Speedhacks.vuThread)
 #define IsVU1SoftNativeStageAllowed(stage) true
 #else
 #define THREAD_VU1 false
