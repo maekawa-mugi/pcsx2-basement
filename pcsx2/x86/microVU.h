@@ -20,6 +20,9 @@
 #include "microVU_Misc.h"
 #include "microVU_IR.h"
 #include "microVU_Profiler.h"
+#include "microVU_SoftFloat.h"
+#include "microVU_SoftFloatTables.h"
+#include "SoftFloatEmitter.h"
 #include "common/Perf.h"
 
 class microBlockManager;
@@ -78,6 +81,42 @@ struct microProgManager
 
 static const uint mVUcacheSafeZone =  3; // Safe-Zone for program recompilation (in megabytes)
 
+struct alignas(16) microVUSoftBoothCacheEntry
+{
+	u64 key;
+	u32 correction_with_valid_bit;
+};
+static_assert(sizeof(microVUSoftBoothCacheEntry) == 16);
+
+static constexpr u32 mVUsoftBoothCacheSize = 16384;
+
+struct alignas(16) microVUSoftLowerCacheEntry
+{
+	u32 key_a;
+	u32 key_b;
+	u32 result;
+	u32 exception;
+	u32 valid;
+};
+static_assert(sizeof(microVUSoftLowerCacheEntry) == 32);
+
+struct alignas(64) microVUSoftLowerCacheSet
+{
+	std::array<microVUSoftLowerCacheEntry, 2> ways;
+};
+static_assert(sizeof(microVUSoftLowerCacheSet) == 64);
+
+struct alignas(16) microVUSoftUnaryCacheEntry
+{
+	u32 key;
+	u32 result;
+	u32 exception;
+	u32 valid;
+};
+static_assert(sizeof(microVUSoftUnaryCacheEntry) == 16);
+
+static constexpr u32 mVUsoftLowerCacheSize = 4096;
+
 struct microVU
 {
 
@@ -108,6 +147,23 @@ struct microVU
 	u8* compareStateF;// Function Ptr to search which compares all state.
 	u8* waitMTVU;     // Ptr to function to save registers/sync VU1 thread
 	u8* copyPLState;  // Ptr to function to copy pipeline state into microVU
+	const void* softMulExact;
+	const void* softMulExactVector;
+	const void* softAddExactLane;
+	const void* softAddLaneRepair;
+	const void* softMulBoothPacked;
+	const void* softMaddPacked[2];
+	const void* softMaddIntegratedLane;
+	const void* softMaddExactVector[2][2];
+	const void* softSrtReciprocalExact;
+	const void* softDivExact;
+	const void* softSqrtExact;
+	const void* softRsqrtExact;
+	std::unique_ptr<microVUSoftBoothCacheEntry[]> softBoothCache;
+	std::unique_ptr<microVUSoftUnaryCacheEntry[]> softSrtReciprocalCache;
+	std::unique_ptr<microVUSoftLowerCacheEntry[]> softDivCache;
+	std::unique_ptr<microVUSoftUnaryCacheEntry[]> softSqrtCache;
+	std::unique_ptr<microVUSoftLowerCacheSet[]> softRsqrtCache;
 	u8* resumePtrXG;  // Ptr to recompiled code position to resume xgkick
 	u32 code;         // Contains the current Instruction
 	u32 divFlag;      // 1 instance of I/D flags
@@ -299,8 +355,6 @@ extern void mVUdeleteProg(microVU& mVU, microProgram*& prog);
 _mVUt extern void* mVUsearchProg(u32 startPC, uptr pState);
 extern void* mVUexecuteVU0(u32 startPC, u32 cycles);
 extern void* mVUexecuteVU1(u32 startPC, u32 cycles);
-extern bool mVU1Stage1NativeAllowed;
-extern void mVU1UpdateStage1NativeAllowed(microVU& mVU, s32 start, s32 end);
 
 // recCall Function Pointer
 typedef void (*mVUrecCall)(u32, u32);
