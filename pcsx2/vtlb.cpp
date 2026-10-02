@@ -1645,22 +1645,34 @@ PageFaultHandler::HandlerResult PageFaultHandler::HandlePageFault(void* exceptio
 		// this was inside the fastmem area. check if it's a code page
 		// fprintf(stderr, "Fault on fastmem %p vaddr %08X\n", info.addr, vaddr);
 
-		uptr ptr = (uptr)PSM(vaddr);
-		uptr offset = (ptr - (uptr)eeMem->Main);
-		if (ptr && m_PageProtectInfo[offset >> __pageshift].Mode == ProtMode_Write)
+		// In Full TLB mode only KSEG RAM aliases are host-mapped at this stage.
+		// An unmapped low virtual address may numerically resemble a protected RAM
+		// page, but its architectural TLB mapping can point somewhere else entirely.
+		// Only classify a fault as an SMC write when the fault came from an alias
+		// which we actually installed.
+		const bool full_tlb_kseg_fastmem = EmuConfig.Cpu.IsFullTLBKsegFastmemEnabled();
+		const u32 direct_paddr = vaddr & 0x1fffffff;
+		const bool mapped_direct_ram = !full_tlb_kseg_fastmem ||
+			(vaddr >= 0x80000000 && vaddr < 0xc0000000 && direct_paddr < Ps2MemSize::ExposedRam);
+
+		if (is_write && mapped_direct_ram)
 		{
-			// fprintf(stderr, "Not backpatching code write at %08X\n", vaddr);
-			mmap_ClearCpuBlock(offset);
-			return HandlerResult::ContinueExecution;
+			const uptr ptr = reinterpret_cast<uptr>(PSM(vaddr));
+			const uptr offset = ptr ? (ptr - reinterpret_cast<uptr>(eeMem->Main)) : 0;
+			if (ptr && offset < Ps2MemSize::ExposedRam &&
+				m_PageProtectInfo[offset >> __pageshift].Mode == ProtMode_Write)
+			{
+				// fprintf(stderr, "Not backpatching code write at %08X\n", vaddr);
+				mmap_ClearCpuBlock(static_cast<uint>(offset));
+				return HandlerResult::ContinueExecution;
+			}
 		}
-		else
-		{
-			// fprintf(stderr, "Trying backpatching vaddr %08X\n", vaddr);
-			return vtlb_BackpatchLoadStore(reinterpret_cast<uptr>(exception_pc),
-					   reinterpret_cast<uptr>(fault_address)) ?
-			           HandlerResult::ContinueExecution :
-			           HandlerResult::ExecuteNextHandler;
-		}
+
+		// fprintf(stderr, "Trying backpatching vaddr %08X\n", vaddr);
+		return vtlb_BackpatchLoadStore(reinterpret_cast<uptr>(exception_pc),
+				   reinterpret_cast<uptr>(fault_address)) ?
+		           HandlerResult::ContinueExecution :
+		           HandlerResult::ExecuteNextHandler;
 	}
 	else
 	{
