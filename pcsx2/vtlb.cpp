@@ -1409,6 +1409,9 @@ void vtlb_Reset()
 	vtlb_RemoveFastmemMappings();
 	for (int i = 0; i < 48; i++)
 		UnmapTLB(tlb[i], i);
+
+	if (EmuConfig.Cpu.IsFullTLBKsegFastmemEnabled())
+		vtlb_CreateFullTLBKsegFastmemMappings();
 }
 
 void vtlb_Shutdown()
