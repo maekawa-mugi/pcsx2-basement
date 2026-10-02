@@ -119,9 +119,16 @@ bool mVUIsReservedCOP2(int hostreg)
 	return (hostreg == gprT1.GetId() || hostreg == gprT2.GetId() || hostreg == gprF0.GetId());
 }
 
-#define REC_COP2_mVU0(f, opName, mode) \
+#define REC_COP2_mVU0_INTERP(f, interp, opName, mode) \
 	void recV##f() \
 	{ \
+		if (CHECK_VU_SOFT(0)) \
+		{ \
+			iFlushCall(FLUSH_FOR_POSSIBLE_MICRO_EXEC); \
+			xADD(ptr64[&cpuRegs.cycle], scaleblockcycles_clear()); \
+			recCall(interp); \
+			return; \
+		} \
 		int _mode = (mode); \
 		setupMacroOp(_mode, opName); \
 		if (_mode & 4) \
@@ -138,6 +145,8 @@ bool mVUIsReservedCOP2(int hostreg)
 		} \
 		endMacroOp(_mode); \
 	}
+
+#define REC_COP2_mVU0(f, opName, mode) REC_COP2_mVU0_INTERP(f, V##f, opName, mode)
 
 #define INTERPRETATE_COP2_FUNC(f) \
 	void recV##f() \
@@ -257,7 +266,7 @@ REC_COP2_mVU0(MSUBAz, "MSUBAz", 0x110);
 REC_COP2_mVU0(MSUBAw, "MSUBAw", 0x110);
 REC_COP2_mVU0(OPMULA, "OPMULA", 0x110);
 REC_COP2_mVU0(OPMSUB, "OPMSUB", 0x110);
-REC_COP2_mVU0(CLIP,   "CLIP",   0x108);
+REC_COP2_mVU0_INTERP(CLIP, VCLIPw, "CLIP", 0x108);
 
 //------------------------------------------------------------------
 // Macro VU - Redirect Lower Instructions
