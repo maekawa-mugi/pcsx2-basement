@@ -3005,7 +3005,8 @@ void VMManager::CheckForCPUConfigChanges(const Pcsx2Config& old_config)
 	memBindConditionalHandlers();
 
 	if (EmuConfig.Cpu.IsFastmemEnabled() != old_config.Cpu.IsFastmemEnabled() ||
-		EmuConfig.Cpu.IsFullTLBKsegFastmemEnabled() != old_config.Cpu.IsFullTLBKsegFastmemEnabled())
+		EmuConfig.Cpu.IsFullTLBKsegFastmemEnabled() != old_config.Cpu.IsFullTLBKsegFastmemEnabled() ||
+		(EmuConfig.Cpu.IsFullTLBKsegFastmemEnabled() && EmuConfig.Cpu.ExtraMemory != old_config.Cpu.ExtraMemory))
 	{
 		vtlb_ResetFastmem();
 	}
