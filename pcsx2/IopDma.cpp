@@ -187,6 +187,8 @@ void psxDMA8Interrupt()
 {
 	if (HW_DMA8_CHCR & 0x01000000)
 	{
+		// ps2linux rig: MADR ends past the block, Sony's ATA DMA relay relies on it.
+		HW_DMA8_MADR += (HW_DMA8_BCR >> 16) * (HW_DMA8_BCR & 0xFFFF) * 4;
 		HW_DMA8_CHCR &= ~0x01000000;
 		psxDmaInterrupt2(1);
 	}
