@@ -57,7 +57,7 @@
       <ForcedIncludeFiles>PrecompiledHeader.h;%(ForcedIncludeFiles)</ForcedIncludeFiles>
       <PreprocessorDefinitions Condition="'$(Platform)'!='ARM64'">ENABLE_RAINTEGRATION;ENABLE_OPENGL;ENABLE_VULKAN;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <PreprocessorDefinitions>LZMA_API_STATIC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <PreprocessorDefinitions>QT_NO_EXCEPTIONS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>HAVE_PARALLEL_GS;QT_NO_EXCEPTIONS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <PreprocessorDefinitions>KDDW_FRONTEND_QT;KDDW_FRONTEND_QTWIDGETS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <!-- Needed for KDDockWidgets. -->
       <RuntimeTypeInfo>true</RuntimeTypeInfo>
@@ -360,6 +360,7 @@
     <QtUi Include="Settings\GraphicsPostProcessingSettingsTab.ui" />
     <QtUi Include="Settings\GraphicsSettingsHeader.ui" />
     <QtUi Include="Settings\GraphicsSoftwareRenderingSettingsTab.ui" />
+    <QtUi Include="Settings\GraphicsPGSRenderingSettingsTab.ui" />
     <QtUi Include="Settings\GraphicsTextureReplacementSettingsTab.ui" />
     <QtUi Include="Settings\GraphicsUpscalingFixesSettingsTab.ui" />
     <QtUi Include="Settings\InputBindingDialog.ui" />
