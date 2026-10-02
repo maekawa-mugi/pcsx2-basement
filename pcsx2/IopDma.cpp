@@ -174,6 +174,7 @@ void psxDma8(u32 madr, u32 bcr, u32 chcr)
 		case 0x01000200: //dev9 to cpu transfer
 			PSXDMA_LOG("*** DMA 8 - DEV9 dev9mem *** %lx addr = %lx size = %lx", chcr, madr, bcr);
 			DEV9readDMA8Mem(madr, size);
+			psxCpu->Clear(madr, static_cast<u32>(size / sizeof(u32)));
 			break;
 
 		default:

@@ -720,6 +720,9 @@ void GSDeviceMTL::DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex,
 
 	if (feedback_write_1) // FIXME I'm not sure dRect[0] is always correct
 		StretchRect(dTex, full_r, sTex[2], dRect[0], ShaderConvert::YUV, filter);
+
+	// Commit clear if nothing was drawn to dTex.
+	FlushClears(dTex);
 }}
 
 void GSDeviceMTL::DoInterlace(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect, ShaderInterlace shader, Filter filter, const InterlaceConstantBuffer& cb)
@@ -749,23 +752,12 @@ void GSDeviceMTL::DoShadeBoost(GSTexture* sTex, GSTexture* dTex, const float par
 
 bool GSDeviceMTL::DoCAS(GSTexture* sTex, GSTexture* dTex, bool sharpen_only, const std::array<u32, NUM_CAS_CONSTANTS>& constants)
 { @autoreleasepool {
-	g_perfmon.Put(GSPerfMon::TextureCopies, 1);
-
-	static constexpr int threadGroupWorkRegionDim = 16;
-	const int dispatchX = (dTex->GetWidth() + (threadGroupWorkRegionDim - 1)) / threadGroupWorkRegionDim;
-	const int dispatchY = (dTex->GetHeight() + (threadGroupWorkRegionDim - 1)) / threadGroupWorkRegionDim;
 	static_assert(sizeof(constants) == sizeof(GSMTLCASPSUniform));
-
-	EndRenderPass();
-	id<MTLComputeCommandEncoder> enc = [GetRenderCmdBuf() computeCommandEncoder];
-	[enc setLabel:@"CAS"];
-	[enc setComputePipelineState:m_cas_pipeline[sharpen_only]];
-	[enc setTexture:static_cast<GSTextureMTL*>(sTex)->GetTexture() atIndex:0];
-	[enc setTexture:static_cast<GSTextureMTL*>(dTex)->GetTexture() atIndex:1];
-	[enc setBytes:&constants length:sizeof(constants) atIndex:GSMTLBufferIndexUniforms];
-	[enc dispatchThreadgroups:MTLSizeMake(dispatchX, dispatchY, 1)
-	    threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
-	[enc endEncoding];
+	BeginRenderPass(@"CAS", dTex, MTLLoadActionDontCare, nullptr, MTLLoadActionDontCare);
+	[m_current_render.encoder setFragmentBytes:&constants
+	                                    length:sizeof(constants)
+	                                   atIndex:GSMTLBufferIndexUniforms];
+	RenderCopy(sTex, m_cas_pipeline[sharpen_only], GSVector4i(0, 0, dTex->GetSize().x, dTex->GetSize().y));
 	return true;
 }}
 
@@ -1000,7 +992,10 @@ bool GSDeviceMTL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 			Console.Warning("Metal: Couldn't find adapter %s, using default", GSConfig.Adapter.c_str());
 		m_dev = GSMTLDevice(MRCTransfer(MTLCreateSystemDefaultDevice()));
 		if (!m_dev.dev)
-			Host::ReportErrorAsync(TRANSLATE_SV("GSDeviceMTL", "No Metal Devices Available"), TRANSLATE_SV("GSDeviceMTL", "No Metal-supporting GPUs were found.  PCSX2 requires a Metal GPU (available on all Macs from 2012 onwards)."));
+		{
+			Host::ReportErrorAsync(TRANSLATE_SV("GSDeviceMTL", "No Metal Devices Available"), TRANSLATE_SV("GSDeviceMTL", "No Metal-supporting GPUs were found.  PCSX2 requires a Metal GPU (available on all Macs from 2012 onwards).  If you're using OCLP on a Mac that should support Metal, try rerunning the OCLP installer."));
+			return false;
+		}
 	}
 
 	m_name = [[m_dev.dev name] UTF8String];
@@ -1073,9 +1068,10 @@ bool GSDeviceMTL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 
 	// Init metal stuff
 	m_fn_constants = MRCTransfer([MTLFunctionConstantValues new]);
-	setFnConstantB(m_fn_constants, m_features.framebuffer_fetch,    GSMTLConstantIndex_FRAMEBUFFER_FETCH);
-	setFnConstantB(m_fn_constants, m_features.depth_feedback,       GSMTLConstantIndex_DEPTH_FEEDBACK);
-	setFnConstantB(m_fn_constants, m_dev.features.rov_requires_r32, GSMTLConstantIndex_ROV_NEEDS_R32);
+	setFnConstantB(m_fn_constants, m_features.framebuffer_fetch,       GSMTLConstantIndex_FRAMEBUFFER_FETCH);
+	setFnConstantB(m_fn_constants, m_features.depth_feedback,          GSMTLConstantIndex_DEPTH_FEEDBACK);
+	setFnConstantB(m_fn_constants, m_dev.features.rov_requires_r32,    GSMTLConstantIndex_ROV_NEEDS_R32);
+	setFnConstantB(m_fn_constants, m_dev.features.broken_shader_depth, GSMTLConstantIndex_BROKEN_SHADER_DEPTH);
 
 	m_draw_sync_fence = MRCTransfer([m_dev.dev newFence]);
 	[m_draw_sync_fence setLabel:@"Draw Sync Fence"];
@@ -1090,13 +1086,6 @@ bool GSDeviceMTL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 	[clearSpinBuffer updateFence:m_spin_fence];
 	[clearSpinBuffer endEncoding];
 	m_spin_pipeline = MakeComputePipeline(LoadShader(@"waste_time"), @"waste_time");
-
-	for (int sharpen_only = 0; sharpen_only < 2; sharpen_only++)
-	{
-		setFnConstantB(m_fn_constants, sharpen_only, GSMTLConstantIndex_CAS_SHARPEN_ONLY);
-		NSString* shader = m_dev.features.has_fast_half ? @"CASHalf" : @"CASFloat";
-		m_cas_pipeline[sharpen_only] = MakeComputePipeline(LoadShader(shader), sharpen_only ? @"CAS Sharpen" : @"CAS Upscale");
-	}
 
 	m_expand_index_buffer = CreatePrivateBufferWithContent(m_dev.dev, initCommands, MTLResourceHazardTrackingModeUntracked, EXPAND_BUFFER_SIZE, GenerateExpansionIndexBuffer);
 	[m_expand_index_buffer setLabel:@"Point/Sprite Expand Indices"];
@@ -1258,6 +1247,13 @@ bool GSDeviceMTL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 	m_primid_init_pipeline[0][3] = MakePipeline(pdesc, fs_triangle, LoadShader(@"ps_primid_rta_init_datm1"), @"PrimID DATM1 RTA Clear");
 
 	pdesc.colorAttachments[0].pixelFormat = ConvertPixelFormat(GSTexture::Format::Color);
+
+	for (int sharpen_only = 0; sharpen_only < 2; sharpen_only++)
+	{
+		setFnConstantB(m_fn_constants, sharpen_only, GSMTLConstantIndex_CAS_SHARPEN_ONLY);
+		m_cas_pipeline[sharpen_only] = MakePipeline(pdesc, fs_triangle, LoadShader(@"CASPS"), sharpen_only ? @"CAS Sharpen" : @"CAS Upscale");
+	}
+
 	applyAttribute(pdesc.vertexDescriptor, 0, MTLVertexFormatFloat2, offsetof(ConvertShaderVertex, pos),    0);
 	applyAttribute(pdesc.vertexDescriptor, 1, MTLVertexFormatFloat2, offsetof(ConvertShaderVertex, texpos), 0);
 	pdesc.vertexDescriptor.layouts[0].stride = sizeof(ConvertShaderVertex);
@@ -2350,6 +2346,9 @@ void GSDeviceMTL::RenderHW(GSHWDrawConfig& config)
 	if (config.tex && (config.ds == config.tex || config.rt == config.tex))
 		EndRenderPass(); // Barrier
 
+	if (m_dev.features.broken_shader_depth && (config.depth.ztst >= ZTST_GEQUAL || config.depth.zwe))
+		config.ps.zfloor = true; // Depth must always go through shader (see tfx vs for comment with details)
+
 	size_t vertsize = config.nverts * sizeof(*config.verts);
 	size_t idxsize = config.vs.UseFixedExpandIndexBuffer() ? 0 : (config.nindices * sizeof(*config.indices));
 	Map allocation = Allocate(m_vertex_upload_buf, vertsize + idxsize);
@@ -2747,7 +2746,7 @@ static simd::float4 ToSimd(const ImVec4& vec)
 
 void GSDeviceMTL::RenderImGui(ImDrawData* data)
 {
-	if (data->CmdListsCount == 0)
+	if (data->CmdLists.Size == 0)
 		return;
 	UpdateImGuiTextures();
 	simd::float4 transform;
@@ -2770,7 +2769,7 @@ void GSDeviceMTL::RenderImGui(ImDrawData* data)
 	simd::float2 clip_scale = ToSimd(data->FramebufferScale); // (1,1) unless using retina display which are often (2,2)
 	ImTextureID last_tex = reinterpret_cast<ImTextureID>(nullptr);
 
-	for (int i = 0; i < data->CmdListsCount; i++)
+	for (int i = 0; i < data->CmdLists.Size; i++)
 	{
 		const ImDrawList* cmd_list = data->CmdLists[i];
 		size_t vtx_size = cmd_list->VtxBuffer.Size * sizeof(ImDrawVert);

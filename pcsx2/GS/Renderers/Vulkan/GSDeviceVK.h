@@ -62,8 +62,7 @@ public:
 	// The interaction between raster order attachment access and fbfetch is unclear.
 	__fi bool UseFeedbackLoopLayout() const
 	{
-		return m_optional_extensions.vk_ext_attachment_feedback_loop_layout &&
-		       !m_optional_extensions.vk_ext_rasterization_order_attachment_access;
+		return m_optional_extensions.vk_ext_attachment_feedback_loop_layout && !m_features.framebuffer_fetch;
 	}
 
 	// Helpers for getting constants
@@ -209,7 +208,6 @@ private:
 	void CalibrateSpinTimestamp();
 	u64 GetCPUTimestamp();
 
-	// For pipeline statistics
 	enum class QueryState
 	{
 		None,
@@ -228,7 +226,7 @@ private:
 		u32 submit_timestamp = 0;
 		bool init_buffer_used = false;
 		bool needs_fence_wait = false;
-		bool timestamp_written = false;
+		QueryState timestamp_query_state = QueryState::None;
 		QueryState pipeline_statistics_query = QueryState::None;
 
 		std::vector<std::function<void()>> cleanup_resources;
@@ -348,7 +346,6 @@ public:
 				u32 topology : 2;
 				u32 rt : 1;
 				u32 ds : 1;
-				u32 line_width : 1;
 				u32 feedback_loop_flags : 3;
 			};
 
@@ -473,8 +470,6 @@ private:
 
 	VkRenderPass m_tfx_render_pass[2][2][2][3][2][2][3][3] = {}; // [rt][ds][colclip][date][fbl][dsp][rt_op][ds_op]
 
-	VkDescriptorSetLayout m_cas_ds_layout = VK_NULL_HANDLE;
-	VkPipelineLayout m_cas_pipeline_layout = VK_NULL_HANDLE;
 	std::array<VkPipeline, NUM_CAS_PIPELINES> m_cas_pipelines = {};
 	VkPipeline m_imgui_pipeline = VK_NULL_HANDLE;
 
@@ -482,6 +477,7 @@ private:
 	GSHWDrawConfig::PSConstantBuffer m_ps_cb_cache;
 	GSHWDrawConfig::VSPushConstants m_vs_pc_cache;
 
+	std::string m_convert_source;
 	std::string m_tfx_source;
 
 	GSTexture* CreateSurface(GSTexture::Usage usage, int width, int height, int levels, GSTexture::Format format) override;
@@ -575,6 +571,9 @@ public:
 	bool IsPresenting() const;
 
 	bool SetGPUTimingEnabled(bool enabled) override;
+	void StartGPUTiming(u32 index);
+	void EndGPUTiming(u32 index);
+	void ReadGPUTiming(u32 index);
 	float GetAndResetAccumulatedGPUTime() override;
 
 	bool SetGPUPipelineStatisticsEnabled(bool enabled) override;

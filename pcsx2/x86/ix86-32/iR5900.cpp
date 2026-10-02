@@ -1723,7 +1723,8 @@ void dynarecCheckBreakpoint()
 		auto cond = CBreakPoints::GetBreakPointCondition(BREAKPOINT_EE, pc);
 		if (cond == NULL || cond->Evaluate())
 		{
-			hit = true;
+			if(CBreakPoints::HandleBreakpointHit(BREAKPOINT_EE, pc))
+				hit = true;
 		}
 	}
 	//check breakpoint in delay slot
@@ -1731,7 +1732,8 @@ void dynarecCheckBreakpoint()
 	{
 		auto cond = CBreakPoints::GetBreakPointCondition(BREAKPOINT_EE, pc + 4);
 		if (cond == NULL || cond->Evaluate())
-			hit = true;
+			if(CBreakPoints::HandleBreakpointHit(BREAKPOINT_EE, pc + 4))
+				hit = true;
 	}
 
 	if (!hit)
@@ -1744,24 +1746,13 @@ void dynarecCheckBreakpoint()
 
 void dynarecMemcheck(size_t i)
 {
-	u32 op;
-	if (EmuConfig.Cpu.EnableExperimentalEETLB)
-	{
-		if (!EEMemory::TryFetch32(cpuRegs.pc, &op))
-			return;
-	}
-	else
-	{
-		op = memRead32(cpuRegs.pc);
-	}
-	const OPCODE& opcode = GetInstruction(op);
 	if (CBreakPoints::CheckSkipFirst(BREAKPOINT_EE, pc) != 0)
 	{
 		CBreakPoints::ClearSkipFirst(BREAKPOINT_EE);
 		return;
 	}
 
-	auto mc = CBreakPoints::GetMemChecks(BREAKPOINT_EE)[i];
+	const auto mc = CBreakPoints::GetMemChecks(BREAKPOINT_EE)[i];
 
 	if (mc.hasCond)
 	{
@@ -1769,13 +1760,8 @@ void dynarecMemcheck(size_t i)
 			return;
 	}
 
-	if (mc.result & MEMCHECK_LOG)
-	{
-		if (opcode.flags & IS_STORE)
-			DevCon.WriteLn("Hit store breakpoint @0x%x", cpuRegs.pc);
-		else
-			DevCon.WriteLn("Hit load breakpoint @0x%x", cpuRegs.pc);
-	}
+	if (!CBreakPoints::HandleMemCheckHit(BREAKPOINT_EE, mc.start, mc.end))
+		return;
 
 	CBreakPoints::SetBreakpointTriggered(true, BREAKPOINT_EE);
 	VMManager::SetPaused(true);
@@ -1802,7 +1788,7 @@ void recMemcheck(u32 op, u32 bits, bool store)
 	// ecx = access address
 	// edx = access address+size
 
-	auto checks = CBreakPoints::GetMemChecks(BREAKPOINT_EE);
+	const auto checks = CBreakPoints::GetMemChecks(BREAKPOINT_EE);
 	for (size_t i = 0; i < checks.size(); i++)
 	{
 		if (checks[i].result == 0)
@@ -3070,7 +3056,7 @@ StartRecomp:
 			if ((oldBlock->startpc + oldBlock->size * 4) <= HWADDR(startpc))
 				break;
 
-			if (memcmp(&recRAMCopy[oldBlock->startpc / 4], PSM(oldBlock->startpc),
+			if (memcmp(&recRAMCopy[oldBlock->startpc], PSM(oldBlock->startpc),
 					oldBlock->size * 4))
 			{
 				recClear(startpc, (pc - startpc) / 4);
@@ -3080,7 +3066,7 @@ StartRecomp:
 			}
 		}
 
-		memcpy(&recRAMCopy[HWADDR(startpc) / 4], PSM(startpc), pc - startpc);
+		memcpy(&recRAMCopy[HWADDR(startpc)], PSM(startpc), pc - startpc);
 	}
 
 	s_pCurBlock->SetFnptr((uptr)recPtr);
