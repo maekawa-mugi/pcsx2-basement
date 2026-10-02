@@ -57,6 +57,8 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v7
+        with:
+          submodules: recursive
 
       - name: Configure MSBuild Clang Version
         if: inputs.configuration != 'CMake'

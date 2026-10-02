@@ -1,6 +1,12 @@
 // SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
+#ifdef HAVE_PARALLEL_GS
+#include "GS/Renderers/parallel-gs/GSRendererPGS.h"
+extern std::unique_ptr<GSRendererPGS> g_pgs_renderer;
+extern std::unique_ptr<GSDevicePGS> g_pgs_device;
+#endif
+
 #include "GS/Renderers/Common/GSDevice.h"
 #include "Config.h"
 #include "Counters.h"
@@ -153,7 +159,15 @@ bool ImGuiManager::Initialize()
 		return false;
 	}
 
-	s_global_scale = std::max(0.5f, g_gs_device->GetWindowScale() * (GSConfig.OsdScale / 100.0f));
+	float window_scale = 1.0f;
+	if (g_gs_device)
+		window_scale = g_gs_device->GetWindowScale();
+#ifdef HAVE_PARALLEL_GS
+	else if (g_pgs_device)
+		window_scale = g_pgs_device->GetWindowScale();
+#endif
+
+	s_global_scale = std::max(0.5f, window_scale * (GSConfig.OsdScale / 100.0f));
 	s_scale_changed = false;
 
 	ImGuiContext& g = *ImGui::CreateContext();
@@ -183,8 +197,18 @@ bool ImGuiManager::Initialize()
 	g.ConfigNavWindowingKeyPrev = ImGuiKey_None;
 	g.ConfigNavWindowingWithGamepad = false;
 
-	s_window_width = static_cast<float>(g_gs_device->GetWindowWidth());
-	s_window_height = static_cast<float>(g_gs_device->GetWindowHeight());
+	if (g_gs_device)
+	{
+		s_window_width = static_cast<float>(g_gs_device->GetWindowWidth());
+		s_window_height = static_cast<float>(g_gs_device->GetWindowHeight());
+	}
+#ifdef HAVE_PARALLEL_GS
+	else if (g_pgs_device)
+	{
+		s_window_width = static_cast<float>(g_pgs_device->GetWindowWidth());
+		s_window_height = static_cast<float>(g_pgs_device->GetWindowHeight());
+	}
+#endif
 	io.DisplayFramebufferScale = ImVec2(1, 1); // We already scale things ourselves, this would double-apply scaling
 	io.DisplaySize = ImVec2(s_window_width, s_window_height);
 
@@ -233,7 +257,12 @@ void ImGuiManager::Shutdown(bool clear_state)
 	if (clear_state)
 		s_fullscreen_ui_was_initialized = false;
 
-	g_gs_device->DestroyImGuiTextures();
+	if (g_gs_device)
+		g_gs_device->DestroyImGuiTextures();
+#ifdef HAVE_PARALLEL_GS
+	else if (g_pgs_device)
+		g_pgs_device->DestroyImGuiTextures();
+#endif
 
 	if (ImGui::GetCurrentContext())
 		ImGui::DestroyContext();
@@ -258,8 +287,20 @@ float ImGuiManager::GetWindowHeight()
 
 void ImGuiManager::WindowResized()
 {
-	const u32 new_width = g_gs_device ? g_gs_device->GetWindowWidth() : 0;
-	const u32 new_height = g_gs_device ? g_gs_device->GetWindowHeight() : 0;
+	u32 new_width = 0, new_height = 0;
+
+	if (g_gs_device)
+	{
+		new_width = g_gs_device->GetWindowWidth();
+		new_height = g_gs_device->GetWindowHeight();
+	}
+#ifdef HAVE_PARALLEL_GS
+	else if (g_pgs_device)
+	{
+		new_width = g_pgs_device->GetWindowWidth();
+		new_height = g_pgs_device->GetWindowHeight();
+	}
+#endif
 
 	s_window_width = static_cast<float>(new_width);
 	s_window_height = static_cast<float>(new_height);
@@ -302,7 +343,15 @@ void ImGuiManager::ReloadFonts()
 
 void ImGuiManager::UpdateScale()
 {
-	const float window_scale = g_gs_device ? g_gs_device->GetWindowScale() : 1.0f;
+	float window_scale = 1.0f;
+
+	if (g_gs_device)
+		window_scale = g_gs_device->GetWindowScale();
+#ifdef HAVE_PARALLEL_GS
+	else if (g_pgs_device)
+		window_scale = g_pgs_device->GetWindowScale();
+#endif
+
 	const float scale = std::max(window_scale * (EmuConfig.GS.OsdScale / 100.0f), 0.5f);
 
 	if ((!ImGuiFullscreen::UpdateLayoutScale()) && scale == s_global_scale)
@@ -1375,7 +1424,9 @@ void ImGuiManager::DestroySoftwareCursorTextures()
 void ImGuiManager::UpdateSoftwareCursorTexture(u32 index)
 {
 	SoftwareCursor& sc = s_software_cursors[index];
-	if (sc.image_path.empty())
+
+	// TODO: Figure out how to deal with this in PGS.
+	if (sc.image_path.empty() || !g_gs_device)
 	{
 		sc.texture.reset();
 		return;
