@@ -860,6 +860,7 @@ void* mVUcompile(microVU& mVU, u32 startPC, uptr pState)
 	mVUoptimizePipeState(mVU);       // Optimize the End Pipeline State for nicer Block Linking
 	mVUdebugPrintBlocks(mVU, false); // Prints Start/End PC of blocks executed, for debugging...
 	mVUtestCycles(mVU, mFC);         // Update VU Cycles and Exit Early if Necessary
+	mVU1UpdateStage1NativeAllowed(mVU, mVUrange.start, (mVUrange.end >= 0) ? mVUrange.end : std::min<s32>(xPC + 8, mVU.microMemSize));
 
 	// Second Pass
 	iPC = mVUstartPC;

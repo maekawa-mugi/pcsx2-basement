@@ -83,6 +83,20 @@ alignas(16) static const u32 s_pos[4] = {0x7fffffff, 0xffffffff, 0xffffffff, 0xf
 		iFlushCall(FLUSH_INTERPRETER); \
 		xFastCall((void*)(uptr)R5900::Interpreter::OpcodeImpl::COP1::f); \
 	}
+
+#define FPURECOMPILE_CONSTCODE_SOFT(fn, xmminfo, softcheck) \
+	void rec##fn(void) \
+	{ \
+		if (softcheck) \
+		{ \
+			recCall(R5900::Interpreter::OpcodeImpl::COP1::fn); \
+			return; \
+		} \
+		if (CHECK_FPU_FULL) \
+			eeFPURecompileCode(DOUBLE::rec##fn##_xmm, R5900::Interpreter::OpcodeImpl::COP1::fn, xmminfo); \
+		else \
+			eeFPURecompileCode(rec##fn##_xmm, R5900::Interpreter::OpcodeImpl::COP1::fn, xmminfo); \
+	}
 //------------------------------------------------------------------
 
 //------------------------------------------------------------------
@@ -650,7 +664,7 @@ void recADD_S_xmm(int info)
 	//REC_FPUOP(ADD_S);
 }
 
-FPURECOMPILE_CONSTCODE(ADD_S, XMMINFO_WRITED | XMMINFO_READS | XMMINFO_READT);
+FPURECOMPILE_CONSTCODE_SOFT(ADD_S, XMMINFO_WRITED | XMMINFO_READS | XMMINFO_READT, CHECK_FPU_SOFT_ADDSUB);
 
 void recADDA_S_xmm(int info)
 {
@@ -659,7 +673,7 @@ void recADDA_S_xmm(int info)
 	ClampValues(recCommutativeOp(info, EEREC_ACC, 0));
 }
 
-FPURECOMPILE_CONSTCODE(ADDA_S, XMMINFO_WRITEACC | XMMINFO_READS | XMMINFO_READT);
+FPURECOMPILE_CONSTCODE_SOFT(ADDA_S, XMMINFO_WRITEACC | XMMINFO_READS | XMMINFO_READT, CHECK_FPU_SOFT_ADDSUB);
 //------------------------------------------------------------------
 
 //------------------------------------------------------------------
@@ -794,7 +808,7 @@ void recC_EQ_xmm(int info)
 	x86SetJ8(j8Ptr[1]);
 }
 
-FPURECOMPILE_CONSTCODE(C_EQ, XMMINFO_READS | XMMINFO_READT);
+FPURECOMPILE_CONSTCODE_SOFT(C_EQ, XMMINFO_READS | XMMINFO_READT, CHECK_FPU_SOFT);
 //REC_FPUFUNC(C_EQ);
 
 void recC_F()
@@ -881,7 +895,7 @@ void recC_LE_xmm(int info)
 	x86SetJ8(j8Ptr[1]);
 }
 
-FPURECOMPILE_CONSTCODE(C_LE, XMMINFO_READS | XMMINFO_READT);
+FPURECOMPILE_CONSTCODE_SOFT(C_LE, XMMINFO_READS | XMMINFO_READT, CHECK_FPU_SOFT);
 //REC_FPUFUNC(C_LE);
 
 void recC_LT_xmm(int info)
@@ -961,7 +975,7 @@ void recC_LT_xmm(int info)
 	x86SetJ8(j8Ptr[1]);
 }
 
-FPURECOMPILE_CONSTCODE(C_LT, XMMINFO_READS | XMMINFO_READT);
+FPURECOMPILE_CONSTCODE_SOFT(C_LT, XMMINFO_READS | XMMINFO_READT, CHECK_FPU_SOFT);
 //REC_FPUFUNC(C_LT);
 //------------------------------------------------------------------
 
@@ -1165,7 +1179,7 @@ void recDIV_S_xmm(int info)
 	_freeXMMreg(t0reg);
 }
 
-FPURECOMPILE_CONSTCODE(DIV_S, XMMINFO_WRITED | XMMINFO_READS | XMMINFO_READT);
+FPURECOMPILE_CONSTCODE_SOFT(DIV_S, XMMINFO_WRITED | XMMINFO_READS | XMMINFO_READT, CHECK_FPU_SOFT_DIVSQRT);
 //------------------------------------------------------------------
 
 
@@ -1370,7 +1384,7 @@ void recMADD_S_xmm(int info)
 	recMADDtemp(info, EEREC_D);
 }
 
-FPURECOMPILE_CONSTCODE(MADD_S, XMMINFO_WRITED | XMMINFO_READACC | XMMINFO_READS | XMMINFO_READT);
+FPURECOMPILE_CONSTCODE_SOFT(MADD_S, XMMINFO_WRITED | XMMINFO_READACC | XMMINFO_READS | XMMINFO_READT, CHECK_FPU_SOFT_ADDSUB || CHECK_FPU_SOFT_MUL);
 
 void recMADDA_S_xmm(int info)
 {
@@ -1379,7 +1393,7 @@ void recMADDA_S_xmm(int info)
 	recMADDtemp(info, EEREC_ACC);
 }
 
-FPURECOMPILE_CONSTCODE(MADDA_S, XMMINFO_WRITEACC | XMMINFO_READACC | XMMINFO_READS | XMMINFO_READT);
+FPURECOMPILE_CONSTCODE_SOFT(MADDA_S, XMMINFO_WRITEACC | XMMINFO_READACC | XMMINFO_READS | XMMINFO_READT, CHECK_FPU_SOFT_ADDSUB || CHECK_FPU_SOFT_MUL);
 //------------------------------------------------------------------
 
 
@@ -1590,7 +1604,7 @@ void recMSUB_S_xmm(int info)
 	recMSUBtemp(info, EEREC_D);
 }
 
-FPURECOMPILE_CONSTCODE(MSUB_S, XMMINFO_WRITED | XMMINFO_READACC | XMMINFO_READS | XMMINFO_READT);
+FPURECOMPILE_CONSTCODE_SOFT(MSUB_S, XMMINFO_WRITED | XMMINFO_READACC | XMMINFO_READS | XMMINFO_READT, CHECK_FPU_SOFT_ADDSUB || CHECK_FPU_SOFT_MUL);
 
 void recMSUBA_S_xmm(int info)
 {
@@ -1599,7 +1613,7 @@ void recMSUBA_S_xmm(int info)
 	recMSUBtemp(info, EEREC_ACC);
 }
 
-FPURECOMPILE_CONSTCODE(MSUBA_S, XMMINFO_WRITEACC | XMMINFO_READACC | XMMINFO_READS | XMMINFO_READT);
+FPURECOMPILE_CONSTCODE_SOFT(MSUBA_S, XMMINFO_WRITEACC | XMMINFO_READACC | XMMINFO_READS | XMMINFO_READT, CHECK_FPU_SOFT_ADDSUB || CHECK_FPU_SOFT_MUL);
 //------------------------------------------------------------------
 
 
@@ -1613,7 +1627,7 @@ void recMUL_S_xmm(int info)
 	ClampValues(recCommutativeOp(info, EEREC_D, 1));
 }
 
-FPURECOMPILE_CONSTCODE(MUL_S, XMMINFO_WRITED | XMMINFO_READS | XMMINFO_READT);
+FPURECOMPILE_CONSTCODE_SOFT(MUL_S, XMMINFO_WRITED | XMMINFO_READS | XMMINFO_READT, CHECK_FPU_SOFT_MUL);
 
 void recMULA_S_xmm(int info)
 {
@@ -1622,7 +1636,7 @@ void recMULA_S_xmm(int info)
 	ClampValues(recCommutativeOp(info, EEREC_ACC, 1));
 }
 
-FPURECOMPILE_CONSTCODE(MULA_S, XMMINFO_WRITEACC | XMMINFO_READS | XMMINFO_READT);
+FPURECOMPILE_CONSTCODE_SOFT(MULA_S, XMMINFO_WRITEACC | XMMINFO_READS | XMMINFO_READT, CHECK_FPU_SOFT_MUL);
 //------------------------------------------------------------------
 
 
@@ -1719,7 +1733,7 @@ void recSUB_S_xmm(int info)
 	recSUBop(info, EEREC_D);
 }
 
-FPURECOMPILE_CONSTCODE(SUB_S, XMMINFO_WRITED | XMMINFO_READS | XMMINFO_READT);
+FPURECOMPILE_CONSTCODE_SOFT(SUB_S, XMMINFO_WRITED | XMMINFO_READS | XMMINFO_READT, CHECK_FPU_SOFT_ADDSUB);
 
 
 void recSUBA_S_xmm(int info)
@@ -1728,7 +1742,7 @@ void recSUBA_S_xmm(int info)
 	recSUBop(info, EEREC_ACC);
 }
 
-FPURECOMPILE_CONSTCODE(SUBA_S, XMMINFO_WRITEACC | XMMINFO_READS | XMMINFO_READT);
+FPURECOMPILE_CONSTCODE_SOFT(SUBA_S, XMMINFO_WRITEACC | XMMINFO_READS | XMMINFO_READT, CHECK_FPU_SOFT_ADDSUB);
 //------------------------------------------------------------------
 
 
@@ -1781,7 +1795,7 @@ void recSQRT_S_xmm(int info)
 		xLDMXCSR(ptr32[&EmuConfig.Cpu.FPUFPCR.bitmask]);
 }
 
-FPURECOMPILE_CONSTCODE(SQRT_S, XMMINFO_WRITED | XMMINFO_READT);
+FPURECOMPILE_CONSTCODE_SOFT(SQRT_S, XMMINFO_WRITED | XMMINFO_READT, CHECK_FPU_SOFT_DIVSQRT);
 //------------------------------------------------------------------
 
 
@@ -1907,7 +1921,7 @@ void recRSQRT_S_xmm(int info)
 	_freeXMMreg(t0reg);
 }
 
-FPURECOMPILE_CONSTCODE(RSQRT_S, XMMINFO_WRITED | XMMINFO_READS | XMMINFO_READT);
+FPURECOMPILE_CONSTCODE_SOFT(RSQRT_S, XMMINFO_WRITED | XMMINFO_READS | XMMINFO_READT, CHECK_FPU_SOFT_DIVSQRT);
 
 #endif // FPU_RECOMPILE
 
