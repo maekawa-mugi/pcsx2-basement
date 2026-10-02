@@ -15,6 +15,7 @@
 #include "VMManager.h"
 #include "vtlb.h"
 #include "x86/BaseblockEx.h"
+#include "x86/iFPU.h"
 #include "x86/iR5900.h"
 #include "x86/iR5900Analysis.h"
 
@@ -692,6 +693,7 @@ static void recResetRaw()
 	xSetPtr(SysMemory::GetEERec());
 	_DynGen_Dispatchers();
 	vtlb_DynGenDispatchers();
+	R5900::Dynarec::OpcodeImpl::COP1::GenerateSoftFloatKernels();
 	recPtr = xGetPtr();
 
 	if (EmuConfig.Cpu.EnableExperimentalEETLB)
