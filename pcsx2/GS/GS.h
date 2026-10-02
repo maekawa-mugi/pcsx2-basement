@@ -20,6 +20,7 @@ enum class RenderAPI
 	Metal,
 	D3D12,
 	Vulkan,
+	Granite,
 	OpenGL
 };
 
@@ -93,6 +94,7 @@ void GSSetVSyncMode(GSVSyncMode mode, bool allow_present_throttle);
 void GSResetStats();
 
 GSRendererType GSGetCurrentRenderer();
+std::string GSGetDeviceName();
 bool GSIsHardwareRenderer();
 std::string GetDefaultAdapter();
 bool GSWantsExclusiveFullscreen();
@@ -101,6 +103,7 @@ std::vector<GSAdapterInfo> GSGetAdapterInfo(GSRendererType renderer);
 u32 GSGetMaxUpscaleMultiplier(u32 max_texture_size);
 GSVideoMode GSgetDisplayMode();
 void GSgetInternalResolution(int* width, int* height);
+float GSGetDisplayAspectRatio();
 void GSgetStats(SmallStringBase& info);
 void GSgetMemoryStats(SmallStringBase& info);
 void GSgetTitleStats(std::string& info);
@@ -114,6 +117,8 @@ void GSSetSoftwareRendering(bool software_renderer, GSInterlaceMode new_interlac
 bool GSSaveSnapshotToMemory(u32 window_width, u32 window_height, bool apply_aspect, bool crop_borders,
 	u32* width, u32* height, std::vector<u32>* pixels);
 void GSJoinSnapshotThreads();
+
+float GetCurrentAspectRatioFloat(bool is_progressive);
 
 namespace Host
 {

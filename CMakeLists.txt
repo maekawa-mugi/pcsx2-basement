@@ -33,6 +33,24 @@ check_no_parenthesis_in_path()
 detect_operating_system()
 detect_compiler()
 
+# parallel-gs targets are added before BuildParameters, so set the macOS
+# deployment target here too to avoid mixing SDK defaults with PCSX2's min OS.
+if(NOT CMAKE_GENERATOR MATCHES "Xcode")
+	set(CMAKE_OSX_DEPLOYMENT_TARGET 11.0)
+endif()
+
+# Need to make sure this is included early, so we can make sure we use our own Vulkan headers,
+# which are more recent than system headers.
+# Otherwise, Qt6 includes system Vulkan headers in SearchForStuff.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/pcsx2/GS/parallel-gs/CMakeLists.txt")
+	if(MSVC AND NOT CMAKE_MSVC_RUNTIME_LIBRARY)
+		set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+	endif()
+
+	set(PARALLEL_GS_STANDALONE ON CACHE BOOL "" FORCE)
+	add_subdirectory(pcsx2/GS/parallel-gs EXCLUDE_FROM_ALL)
+endif()
+
 #-------------------------------------------------------------------------------
 # Include specific module
 include(BuildParameters)

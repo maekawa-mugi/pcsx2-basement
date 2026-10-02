@@ -1,6 +1,11 @@
 // SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
+#ifdef HAVE_PARALLEL_GS
+#include "GS/Renderers/parallel-gs/GSRendererPGS.h"
+extern std::unique_ptr<GSDevicePGS> g_pgs_device;
+#endif
+
 #include "fmt/format.h"
 #include "Host.h"
 #include "GS/Renderers/Common/GSDevice.h"
@@ -44,7 +49,6 @@ namespace ImGuiFullscreen
 	static constexpr float MENU_BACKGROUND_ANIMATION_TIME = 0.5f;
 
 	static std::optional<RGBA8Image> LoadTextureImage(const char* path);
-	static std::shared_ptr<GSTexture> UploadTexture(const char* path, const RGBA8Image& image);
 	static std::optional<RGBA8Image> LoadSvgTextureImage(const char* path, ImVec2 size, SvgScaling mode);
 	static void TextureLoaderThread();
 
@@ -317,14 +321,28 @@ std::optional<RGBA8Image> ImGuiFullscreen::LoadTextureImage(const char* path)
 
 std::shared_ptr<GSTexture> ImGuiFullscreen::UploadTexture(const char* path, const RGBA8Image& image)
 {
-	GSTexture* texture = g_gs_device->CreateTexture(image.GetWidth(), image.GetHeight(), 1, GSTexture::Format::Color);
+	GSTexture *texture;
+
+#ifdef HAVE_PARALLEL_GS
+	if (g_pgs_device)
+	{
+		texture = g_pgs_device->CreateTexture(image.GetWidth(), image.GetHeight(), image.GetPixels(), image.GetPitch());
+		return std::shared_ptr<GSTexture>(texture);
+	}
+#endif
+
+	if (!g_gs_device)
+		return {};
+
+	texture = g_gs_device->CreateTexture(image.GetWidth(), image.GetHeight(), 1, GSTexture::Format::Color);
+
 	if (!texture)
 	{
 		Console.Error("failed to create %ux%u texture for resource", image.GetWidth(), image.GetHeight());
 		return {};
 	}
 
-	if (!texture->Update(GSVector4i(0, 0, image.GetWidth(), image.GetHeight()), image.GetPixels(), image.GetPitch()))
+	if (g_gs_device && !texture->Update(GSVector4i(0, 0, image.GetWidth(), image.GetHeight()), image.GetPixels(), image.GetPitch()))
 	{
 		Console.Error("Failed to upload %ux%u texture for resource", image.GetWidth(), image.GetHeight());
 		g_gs_device->Recycle(texture);
@@ -801,6 +819,8 @@ ImGuiFullscreen::FocusResetType ImGuiFullscreen::GetQueuedFocusResetType()
 
 void ImGuiFullscreen::ForceKeyNavEnabled()
 {
+	if (!ImGui::GetCurrentContext())
+		return;
 	ImGuiContext& g = *ImGui::GetCurrentContext();
 	g.ActiveIdSource = (g.ActiveIdSource == ImGuiInputSource_Mouse) ? ImGuiInputSource_Keyboard : g.ActiveIdSource;
 	g.NavInputSource = (g.NavInputSource == ImGuiInputSource_Mouse) ? ImGuiInputSource_Keyboard : g.ActiveIdSource;
