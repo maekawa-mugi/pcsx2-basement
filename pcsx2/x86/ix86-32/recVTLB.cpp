@@ -147,12 +147,12 @@ static bool TryDynGenFullTLBConstReadNonQuad(u32 bits, bool sign, bool xmm, u32 
 		return false;
 	}
 
-	const auto mapping = vtlbdata.vmap[address >> VTLB_PAGE_BITS];
-	if (mapping.isHandler(address))
+	const u32 paddr = address & 0x1fffffff;
+	const void* const pointer = vtlb_GetPhyPtr(paddr);
+	if (!pointer)
 		return false;
 
 	EE::Profiler.EmitConstMem(address);
-	const void* pointer = reinterpret_cast<const void*>(mapping.assumePtr(address));
 	if (!xmm)
 	{
 		const int reg = dest_reg_alloc ? dest_reg_alloc() : (_freeX86reg(eax), eax.GetId());
@@ -196,14 +196,15 @@ static bool TryDynGenFullTLBConstReadQuad(u32 address, vtlb_ReadRegAllocCallback
 		return false;
 	}
 
-	const auto mapping = vtlbdata.vmap[address >> VTLB_PAGE_BITS];
-	if (mapping.isHandler(address))
+	const u32 paddr = address & 0x1fffffff;
+	const void* const pointer = vtlb_GetPhyPtr(paddr);
+	if (!pointer)
 		return false;
 
 	EE::Profiler.EmitConstMem(address);
 	const int reg = dest_reg_alloc ? dest_reg_alloc() : (_freeXMMreg(0), 0);
 	if (reg >= 0)
-		xMOVAPS(xRegisterSSE(reg), ptr128[reinterpret_cast<const void*>(mapping.assumePtr(address))]);
+		xMOVAPS(xRegisterSSE(reg), ptr128[pointer]);
 	*result_reg = reg;
 	return true;
 }
@@ -216,12 +217,12 @@ static bool TryDynGenFullTLBConstWrite(u32 bits, bool xmm, u32 address, int valu
 		return false;
 	}
 
-	const auto mapping = vtlbdata.vmap[address >> VTLB_PAGE_BITS];
-	if (mapping.isHandler(address))
+	const u32 paddr = address & 0x1fffffff;
+	if (paddr >= Ps2MemSize::ExposedRam)
 		return false;
 
 	EE::Profiler.EmitConstMem(address);
-	void* pointer = reinterpret_cast<void*>(mapping.assumePtr(address));
+	void* const pointer = &eeMem->Main[paddr];
 	if (!xmm)
 	{
 		switch (bits)
@@ -252,7 +253,7 @@ static bool TryDynGenFullTLBConstWrite(u32 bits, bool xmm, u32 address, int valu
 		pxAssert(bits == 128);
 		xMOVAPS(ptr128[pointer], xRegisterSSE(value_reg));
 	}
-	xADD(ptr32[EEMemory::GetPhysicalWriteGenerationAddress(address & 0x1fffffff)], 1);
+	xADD(ptr32[EEMemory::GetPhysicalWriteGenerationAddress(paddr)], 1);
 	return true;
 }
 
