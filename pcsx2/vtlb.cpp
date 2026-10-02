@@ -1083,6 +1083,22 @@ static void vtlb_CreateFastmemMapping(u32 vaddr, u32 mainmem_offset, const PageP
 	s_fastmem_physical_mapping.emplace(mainmem_offset, vaddr);
 }
 
+static void vtlb_CreateFullTLBKsegFastmemMappings()
+{
+	// Keep this deliberately separate from the legacy virtual VTLB map. Full TLB
+	// only gets permanent aliases for direct-segment RAM at this stage.
+	for (u32 paddr = 0; paddr < Ps2MemSize::ExposedRam; paddr += VTLB_PAGE_SIZE)
+	{
+		u32 mainmem_offset, mainmem_size;
+		PageProtectionMode mode;
+		if (!vtlb_GetMainMemoryOffset(paddr, &mainmem_offset, &mainmem_size, &mode))
+			continue;
+
+		vtlb_CreateFastmemMapping(0x80000000u + paddr, mainmem_offset, mode);
+		vtlb_CreateFastmemMapping(0xa0000000u + paddr, mainmem_offset, mode);
+	}
+}
+
 static void vtlb_RemoveFastmemMapping(u32 vaddr)
 {
 	const u32 page = vaddr / VTLB_PAGE_SIZE;
@@ -1179,7 +1195,7 @@ bool vtlb_GetGuestAddress(uptr host_addr, u32* guest_addr)
 
 void vtlb_UpdateFastmemProtection(u32 paddr, u32 size, PageProtectionMode prot)
 {
-	if (!CHECK_FASTMEM)
+	if (!CHECK_FASTMEM && !EmuConfig.Cpu.IsFullTLBKsegFastmemEnabled())
 		return;
 
 	pxAssert((paddr & VTLB_PAGE_MASK) == 0);
@@ -1410,6 +1426,12 @@ void vtlb_ResetFastmem()
 	s_fastmem_backpatch_info.clear();
 	s_fastmem_faulting_pcs.clear();
 
+	if (EmuConfig.Cpu.IsFullTLBKsegFastmemEnabled())
+	{
+		vtlb_CreateFullTLBKsegFastmemMappings();
+		return;
+	}
+
 	if (!CHECK_FASTMEM || !CHECK_EEREC || !vtlbdata.vmap)
 		return;
 
@@ -1614,7 +1636,8 @@ PageFaultHandler::HandlerResult PageFaultHandler::HandlePageFault(void* exceptio
 	pxAssert(eeMem);
 
 	u32 vaddr;
-	if (CHECK_FASTMEM && vtlb_GetGuestAddress(reinterpret_cast<uptr>(fault_address), &vaddr))
+	if ((CHECK_FASTMEM || EmuConfig.Cpu.IsFullTLBKsegFastmemEnabled()) &&
+		vtlb_GetGuestAddress(reinterpret_cast<uptr>(fault_address), &vaddr))
 	{
 		// this was inside the fastmem area. check if it's a code page
 		// fprintf(stderr, "Fault on fastmem %p vaddr %08X\n", info.addr, vaddr);

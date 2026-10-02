@@ -1149,6 +1149,9 @@ void memReset()
 	vtlb_VMap(0x00000000,0x00000000,0x20000000);
 	vtlb_VMapUnmap(0x20000000,0x60000000);
 
+	if (EmuConfig.Cpu.IsFullTLBKsegFastmemEnabled())
+		vtlb_ResetFastmem();
+
 	std::memset(s_ba, 0, sizeof(s_ba));
 
 	s_ba[0xA] = 1; // Power on

@@ -48,8 +48,9 @@ bool _isAllocatableX86reg(int x86reg)
 	if (!CHECK_FASTMEM && x86reg == arg3reg.GetId())
 		return false;
 
-	// rbp is used as the fastmem base
-	if (CHECK_FASTMEM && x86reg == 5)
+	// rbp is used as the fastmem base. Full TLB initially uses it only for the
+	// direct KSEG RAM shadow mappings, while the legacy fastmem path stays disabled.
+	if ((CHECK_FASTMEM || EmuConfig.Cpu.IsFullTLBKsegFastmemEnabled()) && x86reg == 5)
 		return false;
 
 	// rbx is used to reference PCSX2 program text
@@ -58,7 +59,7 @@ bool _isAllocatableX86reg(int x86reg)
 
 #ifdef ENABLE_VTUNE
 	// vtune needs ebp...
-	if (!CHECK_FASTMEM && x86reg == 5)
+	if (!CHECK_FASTMEM && !EmuConfig.Cpu.IsFullTLBKsegFastmemEnabled() && x86reg == 5)
 		return false;
 #endif
 

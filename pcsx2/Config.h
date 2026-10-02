@@ -694,6 +694,7 @@ struct Pcsx2Config
 		void ApplySanityCheck();
 		bool IsEERecompilerEnabled() const { return Recompiler.EnableEE; }
 		bool IsFastmemEnabled() const { return IsEERecompilerEnabled() && Recompiler.EnableFastmem && !EnableExperimentalEETLB; }
+		bool IsFullTLBKsegFastmemEnabled() const { return IsEERecompilerEnabled() && Recompiler.EnableFastmem && EnableExperimentalEETLB; }
 
 		bool CpusChanged(const CpuOptions& right) const;
 

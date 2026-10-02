@@ -507,7 +507,7 @@ static const void* _DynGen_EnterRecompiledCode()
 		xLoadFarAddr(RTEXTPTR, ptr);
 #endif
 
-	if (CHECK_FASTMEM)
+	if (CHECK_FASTMEM || EmuConfig.Cpu.IsFullTLBKsegFastmemEnabled())
 		xMOV(RFASTMEMBASE, ptrNative[&vtlb_private::vtlbdata.fastmem_base]);
 
 	xJMP(DispatcherReg);

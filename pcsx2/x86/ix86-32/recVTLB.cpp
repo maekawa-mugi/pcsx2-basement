@@ -292,25 +292,31 @@ static void RestoreFullTLBXMMFromCall(int xmm_reg)
 	xADD(rsp, 16);
 }
 
+static void DynGenFullTLBCheckAlignment(const xRegister32& original_address,
+	EEMmu::AccessType access_type, u32 alignment_mask, int preserved_xmm_reg = -1)
+{
+	if (alignment_mask == 0)
+		return;
+
+	xTEST(original_address, alignment_mask);
+	xForwardJZ32 aligned;
+	xMOV(arg1regd, original_address);
+	xMOV(arg2regd, static_cast<u32>(access_type));
+	PreserveFullTLBXMMForCall(preserved_xmm_reg);
+	recPrepareFullTLBAccessContext();
+	xFastCall(reinterpret_cast<const void*>(EEMemory::RaiseRecompilerAddressError));
+	RestoreFullTLBXMMFromCall(preserved_xmm_reg);
+	recFinishFullTLBAccessContext();
+	aligned.SetTarget();
+}
+
 // Returns a packed {attributes, translated 4K page} value in RAX and, when the
 // page is directly accessible, its host base in arg4reg. Cache hits execute
 // entirely in generated code; only a miss enters the MMU resolver.
 static void DynGenFullTLBTranslate(const xRegister32& original_address, EEMmu::AccessType access_type,
 	u32 alignment_mask, int preserved_xmm_reg = -1)
 {
-	if (alignment_mask != 0)
-	{
-		xTEST(original_address, alignment_mask);
-		xForwardJZ32 aligned;
-		xMOV(arg1regd, original_address);
-		xMOV(arg2regd, static_cast<u32>(access_type));
-		PreserveFullTLBXMMForCall(preserved_xmm_reg);
-		recPrepareFullTLBAccessContext();
-		xFastCall(reinterpret_cast<const void*>(EEMemory::RaiseRecompilerAddressError));
-		RestoreFullTLBXMMFromCall(preserved_xmm_reg);
-		recFinishFullTLBAccessContext();
-		aligned.SetTarget();
-	}
+	DynGenFullTLBCheckAlignment(original_address, access_type, alignment_mask, preserved_xmm_reg);
 	_freeX86reg(arg4reg.GetId());
 
 	std::optional<xForwardJNE32> translated_segment_miss;
@@ -386,6 +392,40 @@ static void DynGenFullTLBTranslate(const xRegister32& original_address, EEMmu::A
 	translation_ready.SetTarget();
 	if (translated_segment_ready.has_value())
 		translated_segment_ready->SetTarget();
+}
+
+template <typename FastPath, typename SlowPath>
+static void DynGenFullTLBKsegFastmemPath(const xRegister32& original_address,
+	EEMmu::AccessType access_type, u32 alignment_mask, int preserved_xmm_reg,
+	const FastPath& fast_path, const SlowPath& slow_path)
+{
+	if (!EmuConfig.Cpu.IsFullTLBKsegFastmemEnabled() || !CanUseFullTLBDirectSegmentFastPath() ||
+		!CanUseFullTLBInlineMemoryPath())
+	{
+		slow_path();
+		return;
+	}
+
+	// KSEG0 and KSEG1 share the same physical 512 MiB direct window. When cache
+	// emulation requires KSEG0's cache mode, restrict this shortcut to KSEG1.
+	xMOV(eax, original_address);
+	xAND(eax, CanUseFullTLBKseg0FastPath() ? 0xc0000000 : 0xe0000000);
+	xCMP(eax, CanUseFullTLBKseg0FastPath() ? 0x80000000 : 0xa0000000);
+	xForwardJNE32 segment_miss;
+
+	xMOV(eax, original_address);
+	xAND(eax, 0x1fffffff);
+	xCMP(eax, Ps2MemSize::ExposedRam);
+	xForwardJAE32 ram_miss;
+
+	DynGenFullTLBCheckAlignment(original_address, access_type, alignment_mask, preserved_xmm_reg);
+	fast_path();
+	xForwardJump32 done;
+
+	segment_miss.SetTarget();
+	ram_miss.SetTarget();
+	slow_path();
+	done.SetTarget();
 }
 
 static void DynGenFullTLBPhysicalRead(u32 bits, bool sign, const xRegister32& original_address)
@@ -498,18 +538,26 @@ static int DynGenFullTLBReadNonQuad(u32 bits, bool sign, bool xmm, int addr_reg,
 	if (trace_gp_related_load)
 		xMOV(ptr32[EEMemory::GetFullTLBDiagnosticReadVAddrAddress()], original_address);
 
-	if (CanUseFullTLBInlineMemoryPath())
-	{
-		DynGenFullTLBTranslate(original_address, EEMmu::AccessType::Load, (bits / 8) - 1);
-		DynGenFullTLBPhysicalRead(bits, sign, original_address);
-	}
-	else
-	{
-		xMOV(arg1regd, original_address);
-		recPrepareFullTLBAccessContext();
-		xFastCall(GetFullTLBReadFunction(bits));
-		recFinishFullTLBAccessContext();
-	}
+	DynGenFullTLBKsegFastmemPath(original_address, EEMmu::AccessType::Load, (bits / 8) - 1, -1,
+		[&]() {
+			xMOV(arg1regd, original_address);
+			xADD(arg1reg, RFASTMEMBASE);
+			vtlb_private::DynGen_DirectRead(bits, sign);
+		},
+		[&]() {
+			if (CanUseFullTLBInlineMemoryPath())
+			{
+				DynGenFullTLBTranslate(original_address, EEMmu::AccessType::Load, (bits / 8) - 1);
+				DynGenFullTLBPhysicalRead(bits, sign, original_address);
+			}
+			else
+			{
+				xMOV(arg1regd, original_address);
+				recPrepareFullTLBAccessContext();
+				xFastCall(GetFullTLBReadFunction(bits));
+				recFinishFullTLBAccessContext();
+			}
+		});
 	if (trace_gp_related_load)
 	{
 		xMOV(arg1reg, rax);
@@ -554,18 +602,26 @@ static int DynGenFullTLBReadQuad(int addr_reg, vtlb_ReadRegAllocCallback dest_re
 		EE::Profiler.EmitMem(addr_reg);
 	}
 
-	if (CanUseFullTLBInlineMemoryPath())
-	{
-		DynGenFullTLBTranslate(original_address, EEMmu::AccessType::Load, 0xf);
-		DynGenFullTLBPhysicalRead(128, false, original_address);
-	}
-	else
-	{
-		xMOV(arg1regd, original_address);
-		recPrepareFullTLBAccessContext();
-		xFastCall(GetFullTLBReadFunction(128));
-		recFinishFullTLBAccessContext();
-	}
+	DynGenFullTLBKsegFastmemPath(original_address, EEMmu::AccessType::Load, 0xf, -1,
+		[&]() {
+			xMOV(arg1regd, original_address);
+			xADD(arg1reg, RFASTMEMBASE);
+			vtlb_private::DynGen_DirectRead(128, false);
+		},
+		[&]() {
+			if (CanUseFullTLBInlineMemoryPath())
+			{
+				DynGenFullTLBTranslate(original_address, EEMmu::AccessType::Load, 0xf);
+				DynGenFullTLBPhysicalRead(128, false, original_address);
+			}
+			else
+			{
+				xMOV(arg1regd, original_address);
+				recPrepareFullTLBAccessContext();
+				xFastCall(GetFullTLBReadFunction(128));
+				recFinishFullTLBAccessContext();
+			}
+		});
 	_freeX86reg(original_reg);
 	const int reg = dest_reg_alloc ? dest_reg_alloc() : (_freeXMMreg(0), 0);
 	if (reg >= 0)
@@ -908,20 +964,35 @@ static void DynGenFullTLBWrite(u32 bits, bool xmm, int addr_reg, int value_reg,
 		EE::Profiler.EmitMem(addr_reg);
 	}
 
-	if (CanUseFullTLBInlineMemoryPath())
-	{
-		DynGenFullTLBTranslate(original_address, EEMmu::AccessType::Store, (bits / 8) - 1,
-			xmm ? saved_value_reg : -1);
-		DynGenFullTLBPhysicalWrite(bits, xmm, original_address, saved_value_reg, GetFullTLBWriteFunction(bits));
-	}
-	else
-	{
-		xMOV(arg1regd, original_address);
-		DynGenFullTLBPrepareWriteValue(bits, xmm, saved_value_reg);
-		recPrepareFullTLBAccessContext();
-		xFastCall(GetFullTLBWriteFunction(bits));
-		recFinishFullTLBAccessContext();
-	}
+	DynGenFullTLBKsegFastmemPath(original_address, EEMmu::AccessType::Store, (bits / 8) - 1,
+		xmm ? saved_value_reg : -1,
+		[&]() {
+			xMOV(eax, original_address);
+			xAND(eax, 0x1fffffff);
+			xSHR(eax, VTLB_PAGE_BITS);
+			xADD(ptr32[xComplexAddress(arg3reg, EEMemory::GetPhysicalWriteGenerationBase(), rax * 4)], 1);
+			xMOV(arg1regd, original_address);
+			xADD(arg1reg, RFASTMEMBASE);
+			DynGenFullTLBPrepareWriteValue(bits, xmm, saved_value_reg);
+			vtlb_private::DynGen_DirectWrite(bits);
+		},
+		[&]() {
+			if (CanUseFullTLBInlineMemoryPath())
+			{
+				DynGenFullTLBTranslate(original_address, EEMmu::AccessType::Store, (bits / 8) - 1,
+					xmm ? saved_value_reg : -1);
+				DynGenFullTLBPhysicalWrite(
+					bits, xmm, original_address, saved_value_reg, GetFullTLBWriteFunction(bits));
+			}
+			else
+			{
+				xMOV(arg1regd, original_address);
+				DynGenFullTLBPrepareWriteValue(bits, xmm, saved_value_reg);
+				recPrepareFullTLBAccessContext();
+				xFastCall(GetFullTLBWriteFunction(bits));
+				recFinishFullTLBAccessContext();
+			}
+		});
 	if (xmm)
 		_freeXMMreg(saved_value_reg);
 	else
