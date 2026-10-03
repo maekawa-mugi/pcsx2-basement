@@ -324,6 +324,94 @@ namespace x86Emitter
 		{SIMDInstructionInfo(0xf3).p66().i(), SIMDInstructionInfo(0x73, 6).p66().i()}, // Q
 	};
 
+	static void EmitEVEX128(SIMDInstructionInfo info, const xRegisterSSE& dst, const xRegisterSSE& src1,
+		const xRegisterSSE& src2, const xRegisterK& mask, bool zeroing)
+	{
+		pxAssert(dst.GetOperandSize() == 16 && src1.GetOperandSize() == 16 && src2.GetOperandSize() == 16);
+		pxAssert(dst.GetId() >= 0 && dst.GetId() < static_cast<int>(iREGCNT_XMM_EVEX));
+		pxAssert(src1.GetId() >= 0 && src1.GetId() < static_cast<int>(iREGCNT_XMM_EVEX));
+		pxAssert(src2.GetId() >= 0 && src2.GetId() < static_cast<int>(iREGCNT_XMM_EVEX));
+		pxAssert(mask.GetId() < 8);
+		pxAssert(!zeroing || mask.GetId() != 0);
+
+		const u8 p0 =
+			((~dst.GetId() & 0x08) << 4) |
+			((~src2.GetId() & 0x10) << 2) |
+			((~src2.GetId() & 0x08) << 2) |
+			(~dst.GetId() & 0x10) |
+			static_cast<u8>(info.map);
+		const u8 p1 =
+			(info.w_bit ? 0x80 : 0) |
+			((~src1.GetId() & 0x0f) << 3) |
+			0x04 |
+			static_cast<u8>(info.prefix);
+		const u8 p2 =
+			(zeroing ? 0x80 : 0) |
+			((~src1.GetId() & 0x10) >> 1) |
+			mask.GetId();
+
+		xWrite8(0x62);
+		xWrite8(p0);
+		xWrite8(p1);
+		xWrite8(p2);
+		xWrite8(info.opcode);
+		xWrite8(0xc0 | ((dst.GetId() & 7) << 3) | (src2.GetId() & 7));
+	}
+
+	static void EmitEVEXMaskDest128(SIMDInstructionInfo info, const xRegisterK& dst,
+		const xRegisterSSE& src1, const xRegisterSSE& src2)
+	{
+		pxAssert(src1.GetOperandSize() == 16 && src2.GetOperandSize() == 16);
+		pxAssert(src1.GetId() >= 0 && src1.GetId() < static_cast<int>(iREGCNT_XMM_EVEX));
+		pxAssert(src2.GetId() >= 0 && src2.GetId() < static_cast<int>(iREGCNT_XMM_EVEX));
+		pxAssert(dst.GetId() < 8);
+
+		const u8 p0 =
+			0x90 |
+			((~src2.GetId() & 0x10) << 2) |
+			((~src2.GetId() & 0x08) << 2) |
+			static_cast<u8>(info.map);
+		const u8 p1 =
+			(info.w_bit ? 0x80 : 0) |
+			((~src1.GetId() & 0x0f) << 3) |
+			0x04 |
+			static_cast<u8>(info.prefix);
+		const u8 p2 = ((~src1.GetId() & 0x10) >> 1);
+
+		xWrite8(0x62);
+		xWrite8(p0);
+		xWrite8(p1);
+		xWrite8(p2);
+		xWrite8(info.opcode);
+		xWrite8(0xc0 | (dst.GetId() << 3) | (src2.GetId() & 7));
+	}
+
+	void xVPTERNLOGD(const xRegisterSSE& dst, const xRegisterSSE& src1, const xRegisterSSE& src2,
+		u8 imm8, const xRegisterK& mask, bool zeroing)
+	{
+		EmitEVEX128(SIMDInstructionInfo(0x25).p66().m0f3a().i(), dst, src1, src2, mask, zeroing);
+		xWrite8(imm8);
+	}
+
+	void xVPTERNLOGQ(const xRegisterSSE& dst, const xRegisterSSE& src1, const xRegisterSSE& src2,
+		u8 imm8, const xRegisterK& mask, bool zeroing)
+	{
+		EmitEVEX128(SIMDInstructionInfo(0x25).p66().m0f3a().i().w(), dst, src1, src2, mask, zeroing);
+		xWrite8(imm8);
+	}
+
+	void xVPCMPD(const xRegisterK& dst, const xRegisterSSE& src1, const xRegisterSSE& src2, u8 imm8)
+	{
+		EmitEVEXMaskDest128(SIMDInstructionInfo(0x1f).p66().m0f3a().i(), dst, src1, src2);
+		xWrite8(imm8);
+	}
+
+	void xVPCMPQ(const xRegisterK& dst, const xRegisterSSE& src1, const xRegisterSSE& src2, u8 imm8)
+	{
+		EmitEVEXMaskDest128(SIMDInstructionInfo(0x1f).p66().m0f3a().i().w(), dst, src1, src2);
+		xWrite8(imm8);
+	}
+
 	void xVPSLLVD(const xRegisterSSE& dst, const xRegisterSSE& src, const xRegisterSSE& counts)
 	{
 		EmitVEX(SIMDInstructionInfo(0x47).p66().m0f38().i(), dst, src, counts);

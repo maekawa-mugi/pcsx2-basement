@@ -603,6 +603,12 @@ namespace x86Emitter
 	extern const xImplSimd_Shift xPSRL;
 	extern void xVPSLLVD(const xRegisterSSE& dst, const xRegisterSSE& src, const xRegisterSSE& counts);
 	extern void xVPSRLVD(const xRegisterSSE& dst, const xRegisterSSE& src, const xRegisterSSE& counts);
+	extern void xVPTERNLOGD(const xRegisterSSE& dst, const xRegisterSSE& src1, const xRegisterSSE& src2, u8 imm8,
+		const xRegisterK& mask = k0, bool zeroing = false);
+	extern void xVPTERNLOGQ(const xRegisterSSE& dst, const xRegisterSSE& src1, const xRegisterSSE& src2, u8 imm8,
+		const xRegisterK& mask = k0, bool zeroing = false);
+	extern void xVPCMPD(const xRegisterK& dst, const xRegisterSSE& src1, const xRegisterSSE& src2, u8 imm8);
+	extern void xVPCMPQ(const xRegisterK& dst, const xRegisterSSE& src1, const xRegisterSSE& src2, u8 imm8);
 	extern const xImplSimd_ShiftWithoutQ xPSRA;
 	extern const xImplSimd_AddSub xPADD;
 	extern const xImplSimd_AddSub xPSUB;

@@ -461,6 +461,7 @@ namespace x86Emitter
 		bool operator!=(const xRegisterSSE& src) const { return this->Id != src.Id; }
 
 		static const inline xRegisterSSE& GetInstance(uint id);
+		static const inline xRegisterSSE& GetEVEXInstance(uint id);
 		static const inline xRegisterSSE& GetYMMInstance(uint id);
 
 		/// Returns the register to use when calling a C function.
@@ -470,6 +471,20 @@ namespace x86Emitter
 
 		/// Returns true if the specified register is caller-saved (volatile).
 		static inline bool IsCallerSaved(uint id);
+	};
+
+	class xRegisterK
+	{
+	public:
+		explicit constexpr xRegisterK(u8 regId)
+			: Id(regId)
+		{
+		}
+
+		constexpr u8 GetId() const { return Id; }
+
+	private:
+		u8 Id;
 	};
 
 	class xRegisterCL : public xRegister8
@@ -607,6 +622,7 @@ namespace x86Emitter
 	};
 
 	extern const xRegisterEmpty xEmptyReg;
+	extern const xRegisterK k0, k1, k2, k3, k4, k5, k6, k7;
 
 	// clang-format off
 	extern const xRegisterSSE
@@ -728,6 +744,24 @@ static constexpr const xAddressReg& RTEXTPTR = rbx;
 				&xmm12, &xmm13, &xmm14, &xmm15};
 
 		pxAssert(id < iREGCNT_XMM);
+		return *m_tbl_xmmRegs[id];
+	}
+
+	const xRegisterSSE& xRegisterSSE::GetEVEXInstance(uint id)
+	{
+		static const xRegisterSSE* const m_tbl_xmmRegs[] =
+		{
+			&xmm0, &xmm1, &xmm2, &xmm3,
+			&xmm4, &xmm5, &xmm6, &xmm7,
+			&xmm8, &xmm9, &xmm10, &xmm11,
+			&xmm12, &xmm13, &xmm14, &xmm15,
+			&xmm16, &xmm17, &xmm18, &xmm19,
+			&xmm20, &xmm21, &xmm22, &xmm23,
+			&xmm24, &xmm25, &xmm26, &xmm27,
+			&xmm28, &xmm29, &xmm30, &xmm31
+		};
+
+		pxAssert(id < iREGCNT_XMM_EVEX);
 		return *m_tbl_xmmRegs[id];
 	}
 

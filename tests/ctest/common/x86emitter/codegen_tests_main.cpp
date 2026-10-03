@@ -472,6 +472,19 @@ TEST(CodegenTests, SSETest)
 	CODEGEN_TEST(xPMAX.SD(xmm0, xmm1, xmm0), "66 0f 38 3d c1");             // pmaxsd xmm0, xmm1
 }
 
+TEST(CodegenTests, AVX512Test)
+{
+	CODEGEN_TEST(xVPTERNLOGD(xmm0, xmm1, xmm2, 0x96), "62 f3 75 08 25 c2 96");
+	CODEGEN_TEST(xVPTERNLOGD(xmm16, xmm17, xmm18, 0x96), "62 a3 75 00 25 c2 96");
+	CODEGEN_TEST(xVPTERNLOGD(xmm16, xmm17, xmm18, 0x96, k1, true), "62 a3 75 81 25 c2 96");
+	CODEGEN_TEST(xVPTERNLOGQ(xmm16, xmm17, xmm18, 0xe8), "62 a3 f5 00 25 c2 e8");
+	CODEGEN_TEST(xVPCMPD(k1, xmm16, xmm17, 0), "62 b3 7d 00 1f c9 00");
+	CODEGEN_TEST(xVPCMPD(k7, xmm16, xmm17, 4), "62 b3 7d 00 1f f9 04");
+	CODEGEN_TEST(xVPCMPQ(k2, xmm3, xmm4, 0), "62 f3 e5 08 1f d4 00");
+	CODEGEN_TEST(xVPCMPQ(k6, xmm31, xmm29, 4), "62 93 85 00 1f f5 04");
+	EXPECT_EQ(xRegisterSSE::GetEVEXInstance(31).GetId(), 31);
+}
+
 TEST(CodegenTests, AVXTest)
 {
 	x86Emitter::use_avx = true;
