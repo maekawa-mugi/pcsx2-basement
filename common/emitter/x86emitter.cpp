@@ -109,7 +109,15 @@ const xRegisterSSE
     xmm8(8), xmm9(9),
     xmm10(10), xmm11(11),
     xmm12(12), xmm13(13),
-    xmm14(14), xmm15(15);
+    xmm14(14), xmm15(15),
+    xmm16(16), xmm17(17),
+    xmm18(18), xmm19(19),
+    xmm20(20), xmm21(21),
+    xmm22(22), xmm23(23),
+    xmm24(24), xmm25(25),
+    xmm26(26), xmm27(27),
+    xmm28(28), xmm29(29),
+    xmm30(30), xmm31(31);
 
 const xRegisterSSE
     ymm0(0, xRegisterYMMTag()), ymm1(1, xRegisterYMMTag()),
@@ -230,7 +238,11 @@ const xRegister32
 		"xmm0", "xmm1", "xmm2", "xmm3",
 		"xmm4", "xmm5", "xmm6", "xmm7",
 		"xmm8", "xmm9", "xmm10", "xmm11",
-		"xmm12", "xmm13", "xmm14", "xmm15"
+		"xmm12", "xmm13", "xmm14", "xmm15",
+		"xmm16", "xmm17", "xmm18", "xmm19",
+		"xmm20", "xmm21", "xmm22", "xmm23",
+		"xmm24", "xmm25", "xmm26", "xmm27",
+		"xmm28", "xmm29", "xmm30", "xmm31"
 	};
 
 	const char* xRegisterBase::GetName()
@@ -240,9 +252,8 @@ const xRegister32
 		if (Id == xRegId_Empty)
 			return "empty";
 
-		// bad error?  Return a "big" error string.  Might break formatting of register tables
-		// but that's the least of your worries if you see this baby.
-		if (Id >= (int)iREGCNT_GPR || Id < 0)
+		// bad error? Return a "big" error string. SIMD registers have a wider EVEX namespace.
+		if (Id < 0 || (GetOperandSize() >= 16 ? Id >= static_cast<int>(iREGCNT_XMM_EVEX) : Id >= static_cast<int>(iREGCNT_GPR)))
 			return "!Register index out of range!";
 
 		switch (GetOperandSize())
