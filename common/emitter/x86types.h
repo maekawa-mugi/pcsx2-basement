@@ -726,8 +726,9 @@ static constexpr const xAddressReg& RTEXTPTR = rbx;
 	bool xRegisterSSE::IsCallerSaved(uint id)
 	{
 #ifdef _WIN32
-		// XMM6 through XMM15 are saved. Upper 128 bits is always volatile.
-		return (id < 6);
+		// XMM6 through XMM15 are nonvolatile in their low 128 bits. XMM16-XMM31
+		// are volatile when AVX-512 state is available.
+		return (id < 6 || id >= 16);
 #else
 		// All vector registers are volatile.
 		return true;
