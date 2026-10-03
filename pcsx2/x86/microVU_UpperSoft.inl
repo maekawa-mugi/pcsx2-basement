@@ -1933,15 +1933,15 @@ static void mVUGenerateSoftMulBoothPackedKernel(microVU& mVU)
 	const auto emitAdd3 = [&](int a, int b, int c, int lo, int hi) {
 		if (x86Emitter::avx512.HasCore())
 		{
-			xMOVAPS(xmm0, ptr128[rsp + a]);
-			xMOVAPS(xmm1, ptr128[rsp + b]);
-			xMOVAPS(xmm2, ptr128[rsp + c]);
-			xMOVAPS(xmm3, xmm0);
-			xVPTERNLOGD(xmm0, xmm1, xmm2, 0x96);
-			xVPTERNLOGD(xmm3, xmm1, xmm2, 0xe8);
-			xMOVAPS(ptr128[rsp + lo], xmm0);
-			xPSLL.D(xmm3, 1);
-			xMOVAPS(ptr128[rsp + hi], xmm3);
+			xVMOVDQA32(xmm16, ptr128[rsp + a]);
+			xVMOVDQA32(xmm17, ptr128[rsp + b]);
+			xVMOVDQA32(xmm18, ptr128[rsp + c]);
+			xVMOVDQA32(xmm19, xmm16);
+			xVPTERNLOGD(xmm16, xmm17, xmm18, 0x96);
+			xVPTERNLOGD(xmm19, xmm17, xmm18, 0xe8);
+			xVMOVDQA32(ptr128[rsp + lo], xmm16);
+			xVPSLLDImm(xmm19, xmm19, 1);
+			xVMOVDQA32(ptr128[rsp + hi], xmm19);
 			return;
 		}
 

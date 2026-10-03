@@ -679,6 +679,119 @@ const xRegister32
 		xOpWriteVEX(info, ext, dst, src2, extraRipOffset);
 	}
 
+	static void EmitSibMagicEVEX(uint regfield, const xIndirectVoid& info, u32 tuple_scale)
+	{
+		pxAssertMsg(regfield < 8, "Invalid x86 register identifier.");
+
+		const bool can_compress_displacement =
+			info.Displacement != 0 && tuple_scale != 0 &&
+			(info.Displacement % static_cast<sptr>(tuple_scale)) == 0 &&
+			is_s8(info.Displacement / static_cast<sptr>(tuple_scale));
+		int displacement_size = (info.Displacement == 0) ? 0 : (can_compress_displacement ? 1 : 2);
+		sptr encoded_displacement =
+			can_compress_displacement ? info.Displacement / static_cast<sptr>(tuple_scale) : info.Displacement;
+
+		pxAssert(!info.Base.IsEmpty() || !info.Index.IsEmpty() || displacement_size == 2);
+		pxAssert(info.Displacement == static_cast<s32>(info.Displacement) ||
+			(info.Base.IsEmpty() && info.Index.IsEmpty()));
+
+		if (!NeedsSibMagic(info))
+		{
+			if (info.Index.IsEmpty())
+			{
+				EmitSibMagic(regfield, reinterpret_cast<void*>(info.Displacement));
+				return;
+			}
+
+			if (info.Index == rbp && displacement_size == 0)
+			{
+				displacement_size = 1;
+				encoded_displacement = 0;
+			}
+			ModRM(displacement_size, regfield, info.Index.Id & 7);
+		}
+		else if (info.Base.IsEmpty())
+		{
+			ModRM(0, regfield, ModRm_UseSib);
+			SibSB(info.Scale, info.Index.Id, Sib_UseDisp32);
+			xWrite<s32>(info.Displacement);
+			return;
+		}
+		else
+		{
+			if (info.Base == rbp && displacement_size == 0)
+			{
+				displacement_size = 1;
+				encoded_displacement = 0;
+			}
+			ModRM(displacement_size, regfield, ModRm_UseSib);
+			SibSB(info.Scale, info.Index.Id & 7, info.Base.Id & 7);
+		}
+
+		if (displacement_size == 1)
+			xWrite<s8>(encoded_displacement);
+		else if (displacement_size == 2)
+			xWrite<s32>(info.Displacement);
+	}
+
+	static u8 GetEVEXMoveP0(const xRegisterSSE& reg, const xRegisterSSE& rm)
+	{
+		return ((~reg.GetId() & 0x08) << 4) |
+			((~rm.GetId() & 0x10) << 2) |
+			((~rm.GetId() & 0x08) << 2) |
+			(~reg.GetId() & 0x10) | 0x01;
+	}
+
+	static u8 GetEVEXMoveP0(const xRegisterSSE& reg, const xIndirectVoid& mem)
+	{
+		bool x = mem.Index.IsExtended();
+		bool b = mem.Base.IsExtended();
+		if (!NeedsSibMagic(mem))
+		{
+			b = x;
+			x = false;
+		}
+
+		return ((~reg.GetId() & 0x08) << 4) |
+			(x ? 0x00 : 0x40) |
+			(b ? 0x00 : 0x20) |
+			(~reg.GetId() & 0x10) | 0x01;
+	}
+
+	static void EmitEVEXMovePrefix(u8 p0, u8 opcode)
+	{
+		xWrite8(0x62);
+		xWrite8(p0);
+		xWrite8(0x7d);
+		xWrite8(0x08);
+		xWrite8(opcode);
+	}
+
+	void xVMOVDQA32(const xRegisterSSE& dst, const xRegisterSSE& src)
+	{
+		pxAssert(dst.GetOperandSize() == 16 && src.GetOperandSize() == 16);
+		pxAssert(dst.GetId() >= 0 && dst.GetId() < static_cast<int>(iREGCNT_XMM_EVEX));
+		pxAssert(src.GetId() >= 0 && src.GetId() < static_cast<int>(iREGCNT_XMM_EVEX));
+		EmitEVEXMovePrefix(GetEVEXMoveP0(dst, src), 0x6f);
+		EmitSibMagic(dst, src);
+	}
+
+	void xVMOVDQA32(const xRegisterSSE& dst, const xIndirectVoid& src)
+	{
+		pxAssert(dst.GetOperandSize() == 16);
+		pxAssert(dst.GetId() >= 0 && dst.GetId() < static_cast<int>(iREGCNT_XMM_EVEX));
+		EmitEVEXMovePrefix(GetEVEXMoveP0(dst, src), 0x6f);
+		EmitSibMagicEVEX(dst.GetId() & 7, src, 16);
+	}
+
+	void xVMOVDQA32(const xIndirectVoid& dst, const xRegisterSSE& src)
+	{
+		pxAssert(src.GetOperandSize() == 16);
+		pxAssert(src.GetId() >= 0 && src.GetId() < static_cast<int>(iREGCNT_XMM_EVEX));
+		EmitEVEXMovePrefix(GetEVEXMoveP0(src, dst), 0x7f);
+		EmitSibMagicEVEX(src.GetId() & 7, dst, 16);
+	}
+
 
 	// --------------------------------------------------------------------------------------
 	//  xSetPtr / xAlignPtr / xGetPtr / xAdvancePtr

@@ -609,6 +609,10 @@ namespace x86Emitter
 		const xRegisterK& mask = k0, bool zeroing = false);
 	extern void xVPCMPD(const xRegisterK& dst, const xRegisterSSE& src1, const xRegisterSSE& src2, u8 imm8);
 	extern void xVPCMPQ(const xRegisterK& dst, const xRegisterSSE& src1, const xRegisterSSE& src2, u8 imm8);
+	extern void xVMOVDQA32(const xRegisterSSE& dst, const xRegisterSSE& src);
+	extern void xVMOVDQA32(const xRegisterSSE& dst, const xIndirectVoid& src);
+	extern void xVMOVDQA32(const xIndirectVoid& dst, const xRegisterSSE& src);
+	extern void xVPSLLDImm(const xRegisterSSE& dst, const xRegisterSSE& src, u8 imm8);
 	extern const xImplSimd_ShiftWithoutQ xPSRA;
 	extern const xImplSimd_AddSub xPADD;
 	extern const xImplSimd_AddSub xPSUB;

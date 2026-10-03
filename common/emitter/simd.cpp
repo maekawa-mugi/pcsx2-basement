@@ -412,6 +412,29 @@ namespace x86Emitter
 		xWrite8(imm8);
 	}
 
+	void xVPSLLDImm(const xRegisterSSE& dst, const xRegisterSSE& src, u8 imm8)
+	{
+		pxAssert(dst.GetOperandSize() == 16 && src.GetOperandSize() == 16);
+		pxAssert(dst.GetId() >= 0 && dst.GetId() < static_cast<int>(iREGCNT_XMM_EVEX));
+		pxAssert(src.GetId() >= 0 && src.GetId() < static_cast<int>(iREGCNT_XMM_EVEX));
+
+		const u8 p0 =
+			0x90 |
+			((~src.GetId() & 0x10) << 2) |
+			((~src.GetId() & 0x08) << 2) |
+			0x01;
+		const u8 p1 = ((~dst.GetId() & 0x0f) << 3) | 0x05;
+		const u8 p2 = ((~dst.GetId() & 0x10) >> 1);
+
+		xWrite8(0x62);
+		xWrite8(p0);
+		xWrite8(p1);
+		xWrite8(p2);
+		xWrite8(0x72);
+		xWrite8(0xf0 | (src.GetId() & 7));
+		xWrite8(imm8);
+	}
+
 	void xVPSLLVD(const xRegisterSSE& dst, const xRegisterSSE& src, const xRegisterSSE& counts)
 	{
 		EmitVEX(SIMDInstructionInfo(0x47).p66().m0f38().i(), dst, src, counts);

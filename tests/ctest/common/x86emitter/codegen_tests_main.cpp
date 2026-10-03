@@ -482,6 +482,13 @@ TEST(CodegenTests, AVX512Test)
 	CODEGEN_TEST(xVPCMPD(k7, xmm16, xmm17, 4), "62 b3 7d 00 1f f9 04");
 	CODEGEN_TEST(xVPCMPQ(k2, xmm3, xmm4, 0), "62 f3 e5 08 1f d4 00");
 	CODEGEN_TEST(xVPCMPQ(k6, xmm31, xmm29, 4), "62 93 85 00 1f f5 04");
+	CODEGEN_TEST(xVMOVDQA32(xmm19, xmm16), "62 a1 7d 08 6f d8");
+	CODEGEN_TEST(xVMOVDQA32(xmm16, ptr128[rsp + 32]), "62 e1 7d 08 6f 44 24 02");
+	CODEGEN_TEST(xVMOVDQA32(ptr128[rsp + 32], xmm16), "62 e1 7d 08 7f 44 24 02");
+	CODEGEN_TEST(xVMOVDQA32(xmm16, ptr128[rsp + 20]), "62 e1 7d 08 6f 84 24 14 00 00 00");
+	CODEGEN_TEST(xVMOVDQA32(ptr128[r8 + 32], xmm17), "62 c1 7d 08 7f 48 02");
+	CODEGEN_TEST(xVPSLLDImm(xmm19, xmm19, 1), "62 b1 65 00 72 f3 01");
+	CODEGEN_TEST(xVPSLLDImm(xmm3, xmm19, 1), "62 b1 65 08 72 f3 01");
 	EXPECT_EQ(xRegisterSSE::GetEVEXInstance(31).GetId(), 31);
 }
 
