@@ -613,6 +613,11 @@ namespace x86Emitter
 	extern void xVMOVDQA32(const xRegisterSSE& dst, const xIndirectVoid& src);
 	extern void xVMOVDQA32(const xIndirectVoid& dst, const xRegisterSSE& src);
 	extern void xVPSLLDImm(const xRegisterSSE& dst, const xRegisterSSE& src, u8 imm8);
+	extern void xKMOVD(const xRegisterK& dst, const xRegister32& src);
+	extern void xKMOVD(const xRegister32& dst, const xRegisterK& src);
+	extern void xKORW(const xRegisterK& dst, const xRegisterK& src1, const xRegisterK& src2);
+	extern void xKANDW(const xRegisterK& dst, const xRegisterK& src1, const xRegisterK& src2);
+	extern void xKTESTW(const xRegisterK& lhs, const xRegisterK& rhs);
 	extern const xImplSimd_ShiftWithoutQ xPSRA;
 	extern const xImplSimd_AddSub xPADD;
 	extern const xImplSimd_AddSub xPSUB;

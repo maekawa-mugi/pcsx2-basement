@@ -489,6 +489,12 @@ TEST(CodegenTests, AVX512Test)
 	CODEGEN_TEST(xVMOVDQA32(ptr128[r8 + 32], xmm17), "62 c1 7d 08 7f 48 02");
 	CODEGEN_TEST(xVPSLLDImm(xmm19, xmm19, 1), "62 b1 65 00 72 f3 01");
 	CODEGEN_TEST(xVPSLLDImm(xmm3, xmm19, 1), "62 b1 65 08 72 f3 01");
+	CODEGEN_TEST(xKMOVD(k3, r11d), "c4 c1 7b 92 db");
+	CODEGEN_TEST(xKMOVD(eax, k3), "c5 fb 93 c3");
+	CODEGEN_TEST(xKORW(k1, k2, k3), "c5 ec 45 cb");
+	CODEGEN_TEST(xKANDW(k4, k5, k6), "c5 d4 41 e6");
+	CODEGEN_TEST(xKTESTW(k1, k1), "c5 f8 99 c9");
+	CODEGEN_TEST(xKTESTW(k7, k3), "c5 f8 99 fb");
 	EXPECT_EQ(xRegisterSSE::GetEVEXInstance(31).GetId(), 31);
 
 	for (u32 a = 0; a < 2; a++)

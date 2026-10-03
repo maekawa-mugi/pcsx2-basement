@@ -412,6 +412,62 @@ namespace x86Emitter
 		xWrite8(imm8);
 	}
 
+	void xKMOVD(const xRegisterK& dst, const xRegister32& src)
+	{
+		pxAssert(dst.GetId() < 8);
+		if (src.IsExtended())
+		{
+			xWrite8(0xc4);
+			xWrite8(0xc1);
+			xWrite8(0x7b);
+		}
+		else
+		{
+			xWrite8(0xc5);
+			xWrite8(0xfb);
+		}
+		xWrite8(0x92);
+		xWrite8(0xc0 | (dst.GetId() << 3) | (src.GetId() & 7));
+	}
+
+	void xKMOVD(const xRegister32& dst, const xRegisterK& src)
+	{
+		pxAssert(src.GetId() < 8);
+		xWrite8(0xc5);
+		xWrite8(dst.IsExtended() ? 0x7b : 0xfb);
+		xWrite8(0x93);
+		xWrite8(0xc0 | ((dst.GetId() & 7) << 3) | src.GetId());
+	}
+
+	static void EmitKBinaryW(u8 opcode, const xRegisterK& dst, const xRegisterK& src1,
+		const xRegisterK& src2)
+	{
+		pxAssert(dst.GetId() < 8 && src1.GetId() < 8 && src2.GetId() < 8);
+		xWrite8(0xc5);
+		xWrite8(0x84 | ((~src1.GetId() & 0x0f) << 3));
+		xWrite8(opcode);
+		xWrite8(0xc0 | (dst.GetId() << 3) | src2.GetId());
+	}
+
+	void xKORW(const xRegisterK& dst, const xRegisterK& src1, const xRegisterK& src2)
+	{
+		EmitKBinaryW(0x45, dst, src1, src2);
+	}
+
+	void xKANDW(const xRegisterK& dst, const xRegisterK& src1, const xRegisterK& src2)
+	{
+		EmitKBinaryW(0x41, dst, src1, src2);
+	}
+
+	void xKTESTW(const xRegisterK& lhs, const xRegisterK& rhs)
+	{
+		pxAssert(lhs.GetId() < 8 && rhs.GetId() < 8);
+		xWrite8(0xc5);
+		xWrite8(0xf8);
+		xWrite8(0x99);
+		xWrite8(0xc0 | (lhs.GetId() << 3) | rhs.GetId());
+	}
+
 	void xVPSLLDImm(const xRegisterSSE& dst, const xRegisterSSE& src, u8 imm8)
 	{
 		pxAssert(dst.GetOperandSize() == 16 && src.GetOperandSize() == 16);
