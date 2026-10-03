@@ -29,8 +29,29 @@ namespace x86Emitter
 	static constexpr int SHADOW_STACK_SIZE = 0;
 #endif
 
-	/// This will switch all SSE instructions to generate AVX instructions instead
+	/// This will switch all SSE instructions to generate AVX instructions instead.
 	extern bool use_avx;
+
+	struct AVX512Features
+	{
+		bool f = false;
+		bool cd = false;
+		bool vl = false;
+		bool dq = false;
+		bool bw = false;
+		bool vbmi = false;
+		bool vbmi2 = false;
+		bool vpopcntdq = false;
+		bool bitalg = false;
+		bool vnni = false;
+		bool vpclmulqdq = false;
+		bool vp2intersect = false;
+
+		constexpr bool HasCore() const { return f && vl; }
+	};
+
+	// Kept separate from use_avx because AVX-512 extensions are not a simple ISA ladder.
+	extern AVX512Features avx512;
 
 	extern void xWrite8(u8 val);
 	extern void xWrite16(u16 val);
