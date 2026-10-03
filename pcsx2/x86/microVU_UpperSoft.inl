@@ -2206,6 +2206,12 @@ static void mVUGenerateSoftMaddPackedKernels(microVU& mVU)
 	constexpr int native_lane_mask = booth_lane_mask + 4;
 	constexpr int scratch_end = native_lane_mask + 4;
 	constexpr int stack_size = ((scratch_end + 15) & ~15) + 8;
+	const bool use_avx512_masks = x86Emitter::avx512.HasCore();
+	const auto emitActiveKTest = []() {
+		xKMOVD(k3, r11d);
+		xKANDW(k1, k1, k3);
+		xKTESTW(k1, k1);
+	};
 	for (int subtract = 0; subtract < 2; subtract++)
 	{
 		mVU.softMaddPacked[subtract] = xGetAlignedCallTarget();
@@ -2228,33 +2234,65 @@ static void mVUGenerateSoftMaddPackedKernels(microVU& mVU)
 
 		// This shared entry handles only the normal packed domain. The operation-local
 		// lowering remains the exact fallback for denormals and extended exponents.
-		xMOVAPS(xmm3, xmm0);
-		xPSRL.D(xmm3, 23);
-		xPAND(xmm3, ptr128[s_vu_soft_exp_mask]);
-		xMOVAPS(xmm4, xmm3);
-		xPCMP.EQD(xmm3, ptr128[s_vu_soft_zero]);
-		xPCMP.EQD(xmm4, ptr128[s_vu_soft_exp_255]);
-		xPOR(xmm3, xmm4);
+		if (use_avx512_masks)
+		{
+			xVMOVDQA32(xmm16, ptr128[s_vu_soft_zero]);
+			xVMOVDQA32(xmm17, ptr128[s_vu_soft_exp_255]);
 
-		xMOVAPS(xmm4, xmm1);
-		xPSRL.D(xmm4, 23);
-		xPAND(xmm4, ptr128[s_vu_soft_exp_mask]);
-		xMOVAPS(xmm0, xmm4);
-		xPCMP.EQD(xmm4, ptr128[s_vu_soft_zero]);
-		xPCMP.EQD(xmm0, ptr128[s_vu_soft_exp_255]);
-		xPOR(xmm3, xmm4);
-		xPOR(xmm3, xmm0);
+			xMOVAPS(xmm3, xmm0);
+			xPSRL.D(xmm3, 23);
+			xPAND(xmm3, ptr128[s_vu_soft_exp_mask]);
+			xVPCMPD(k1, xmm3, xmm16, 0);
+			xVPCMPD(k2, xmm3, xmm17, 0);
+			xKORW(k1, k1, k2);
 
-		xMOVAPS(xmm4, xmm2);
-		xPSRL.D(xmm4, 23);
-		xPAND(xmm4, ptr128[s_vu_soft_exp_mask]);
-		xMOVAPS(xmm0, xmm4);
-		xPCMP.EQD(xmm4, ptr128[s_vu_soft_zero]);
-		xPCMP.EQD(xmm0, ptr128[s_vu_soft_exp_255]);
-		xPOR(xmm3, xmm4);
-		xPOR(xmm3, xmm0);
-		xMOVMSKPS(eax, xmm3);
-		xAND(eax, r11d);
+			xMOVAPS(xmm4, xmm1);
+			xPSRL.D(xmm4, 23);
+			xPAND(xmm4, ptr128[s_vu_soft_exp_mask]);
+			xVPCMPD(k2, xmm4, xmm16, 0);
+			xKORW(k1, k1, k2);
+			xVPCMPD(k2, xmm4, xmm17, 0);
+			xKORW(k1, k1, k2);
+
+			xMOVAPS(xmm4, xmm2);
+			xPSRL.D(xmm4, 23);
+			xPAND(xmm4, ptr128[s_vu_soft_exp_mask]);
+			xVPCMPD(k2, xmm4, xmm16, 0);
+			xKORW(k1, k1, k2);
+			xVPCMPD(k2, xmm4, xmm17, 0);
+			xKORW(k1, k1, k2);
+			emitActiveKTest();
+		}
+		else
+		{
+			xMOVAPS(xmm3, xmm0);
+			xPSRL.D(xmm3, 23);
+			xPAND(xmm3, ptr128[s_vu_soft_exp_mask]);
+			xMOVAPS(xmm4, xmm3);
+			xPCMP.EQD(xmm3, ptr128[s_vu_soft_zero]);
+			xPCMP.EQD(xmm4, ptr128[s_vu_soft_exp_255]);
+			xPOR(xmm3, xmm4);
+
+			xMOVAPS(xmm4, xmm1);
+			xPSRL.D(xmm4, 23);
+			xPAND(xmm4, ptr128[s_vu_soft_exp_mask]);
+			xMOVAPS(xmm0, xmm4);
+			xPCMP.EQD(xmm4, ptr128[s_vu_soft_zero]);
+			xPCMP.EQD(xmm0, ptr128[s_vu_soft_exp_255]);
+			xPOR(xmm3, xmm4);
+			xPOR(xmm3, xmm0);
+
+			xMOVAPS(xmm4, xmm2);
+			xPSRL.D(xmm4, 23);
+			xPAND(xmm4, ptr128[s_vu_soft_exp_mask]);
+			xMOVAPS(xmm0, xmm4);
+			xPCMP.EQD(xmm4, ptr128[s_vu_soft_zero]);
+			xPCMP.EQD(xmm0, ptr128[s_vu_soft_exp_255]);
+			xPOR(xmm3, xmm4);
+			xPOR(xmm3, xmm0);
+			xMOVMSKPS(eax, xmm3);
+			xAND(eax, r11d);
+		}
 		xForwardJNZ32 fail_input_domain;
 
 		// Identify products where the PS2 Booth tree can borrow into retained bit 15.
@@ -2262,13 +2300,25 @@ static void mVUGenerateSoftMaddPackedKernels(microVU& mVU)
 		xMOVAPS(xmm1, ptr128[rsp + operand_values]);
 		xMOVAPS(xmm4, xmm1);
 		xPAND(xmm4, ptr128[s_vu_soft_mantissa]);
-		xPCMP.EQD(xmm4, ptr128[s_vu_soft_zero]);
 		xMOVAPS(xmm0, ptr128[rsp + source_values]);
 		xPMUL.LD(xmm0, xmm0, ptr128[rsp + operand_values]);
 		xPAND(xmm0, ptr128[s_vu_soft_mantissa]);
-		xPCMP.GTD(xmm0, ptr128[s_vu_soft_borrow_limit]);
-		xPOR(xmm0, xmm4);
-		xMOVMSKPS(eax, xmm0);
+		if (use_avx512_masks)
+		{
+			xVMOVDQA32(xmm16, ptr128[s_vu_soft_zero]);
+			xVMOVDQA32(xmm17, ptr128[s_vu_soft_borrow_limit]);
+			xVPCMPD(k1, xmm4, xmm16, 0);
+			xVPCMPD(k2, xmm0, xmm17, 6);
+			xKORW(k1, k1, k2);
+			xKMOVD(eax, k1);
+		}
+		else
+		{
+			xPCMP.EQD(xmm4, ptr128[s_vu_soft_zero]);
+			xPCMP.GTD(xmm0, ptr128[s_vu_soft_borrow_limit]);
+			xPOR(xmm0, xmm4);
+			xMOVMSKPS(eax, xmm0);
+		}
 		xAND(eax, r11d);
 		xXOR(eax, r11d);
 		xMOV(ptr32[rsp + booth_lane_mask], eax);
@@ -2278,12 +2328,24 @@ static void mVUGenerateSoftMaddPackedKernels(microVU& mVU)
 		xMOVAPS(ptr128[rsp + product_values], xmm0);
 		xMOVAPS(xmm4, xmm0);
 		xPAND(xmm4, ptr128[s_vu_soft_abs]);
-		xMOVAPS(xmm3, ptr128[s_vu_soft_hidden_bit]);
-		xPCMP.GTD(xmm3, xmm4);
-		xPCMP.GTD(xmm4, ptr128[s_vu_soft_max_safe]);
-		xPOR(xmm3, xmm4);
-		xMOVMSKPS(eax, xmm3);
-		xAND(eax, r11d);
+		if (use_avx512_masks)
+		{
+			xVMOVDQA32(xmm16, ptr128[s_vu_soft_hidden_bit]);
+			xVMOVDQA32(xmm17, ptr128[s_vu_soft_max_safe]);
+			xVPCMPD(k1, xmm16, xmm4, 6);
+			xVPCMPD(k2, xmm4, xmm17, 6);
+			xKORW(k1, k1, k2);
+			emitActiveKTest();
+		}
+		else
+		{
+			xMOVAPS(xmm3, ptr128[s_vu_soft_hidden_bit]);
+			xPCMP.GTD(xmm3, xmm4);
+			xPCMP.GTD(xmm4, ptr128[s_vu_soft_max_safe]);
+			xPOR(xmm3, xmm4);
+			xMOVMSKPS(eax, xmm3);
+			xAND(eax, r11d);
+		}
 		xForwardJNZ32 fail_product_domain;
 
 		xCMP(ptr32[rsp + booth_lane_mask], 0);
@@ -2305,12 +2367,24 @@ static void mVUGenerateSoftMaddPackedKernels(microVU& mVU)
 		xMOVAPS(ptr128[rsp + product_values], xmm0);
 		xMOVAPS(xmm4, xmm0);
 		xPAND(xmm4, ptr128[s_vu_soft_abs]);
-		xMOVAPS(xmm3, ptr128[s_vu_soft_hidden_bit]);
-		xPCMP.GTD(xmm3, xmm4);
-		xPCMP.GTD(xmm4, ptr128[s_vu_soft_max_safe]);
-		xPOR(xmm3, xmm4);
-		xMOVMSKPS(eax, xmm3);
-		xAND(eax, r11d);
+		if (use_avx512_masks)
+		{
+			xVMOVDQA32(xmm16, ptr128[s_vu_soft_hidden_bit]);
+			xVMOVDQA32(xmm17, ptr128[s_vu_soft_max_safe]);
+			xVPCMPD(k1, xmm16, xmm4, 6);
+			xVPCMPD(k2, xmm4, xmm17, 6);
+			xKORW(k1, k1, k2);
+			emitActiveKTest();
+		}
+		else
+		{
+			xMOVAPS(xmm3, ptr128[s_vu_soft_hidden_bit]);
+			xPCMP.GTD(xmm3, xmm4);
+			xPCMP.GTD(xmm4, ptr128[s_vu_soft_max_safe]);
+			xPOR(xmm3, xmm4);
+			xMOVMSKPS(eax, xmm3);
+			xAND(eax, r11d);
+		}
 		xForwardJNZ32 fail_corrected_product_domain;
 		product_ready.SetTarget();
 
@@ -2336,9 +2410,18 @@ static void mVUGenerateSoftMaddPackedKernels(microVU& mVU)
 		xMOVAPS(xmm3, xmm2);
 		xPABS.D(xmm3, xmm3);
 		xMOVAPS(xmm4, xmm3);
-		xPCMP.GTD(xmm4, ptr128[s_vu_soft_exp_24]);
-		xMOVMSKPS(eax, xmm4);
-		xAND(eax, r11d);
+		if (use_avx512_masks)
+		{
+			xVMOVDQA32(xmm16, ptr128[s_vu_soft_exp_24]);
+			xVPCMPD(k1, xmm4, xmm16, 6);
+			emitActiveKTest();
+		}
+		else
+		{
+			xPCMP.GTD(xmm4, ptr128[s_vu_soft_exp_24]);
+			xMOVMSKPS(eax, xmm4);
+			xAND(eax, r11d);
+		}
 		xForwardJNZ32 fail_exponent_difference;
 
 		xPSUB.D(xmm3, ptr128[s_vu_soft_one]);
@@ -2354,12 +2437,24 @@ static void mVUGenerateSoftMaddPackedKernels(microVU& mVU)
 
 		xMOVAPS(xmm4, xmm0);
 		xPAND(xmm4, ptr128[s_vu_soft_abs]);
-		xMOVAPS(xmm3, ptr128[s_vu_soft_hidden_bit]);
-		xPCMP.GTD(xmm3, xmm4);
-		xPCMP.GTD(xmm4, ptr128[s_vu_soft_max_safe]);
-		xPOR(xmm3, xmm4);
-		xMOVMSKPS(eax, xmm3);
-		xAND(eax, r11d);
+		if (use_avx512_masks)
+		{
+			xVMOVDQA32(xmm16, ptr128[s_vu_soft_hidden_bit]);
+			xVMOVDQA32(xmm17, ptr128[s_vu_soft_max_safe]);
+			xVPCMPD(k1, xmm16, xmm4, 6);
+			xVPCMPD(k2, xmm4, xmm17, 6);
+			xKORW(k1, k1, k2);
+			emitActiveKTest();
+		}
+		else
+		{
+			xMOVAPS(xmm3, ptr128[s_vu_soft_hidden_bit]);
+			xPCMP.GTD(xmm3, xmm4);
+			xPCMP.GTD(xmm4, ptr128[s_vu_soft_max_safe]);
+			xPOR(xmm3, xmm4);
+			xMOVMSKPS(eax, xmm3);
+			xAND(eax, r11d);
+		}
 		xForwardJNZ32 fail_result_domain;
 
 		xMOVAPS(ptr128[r9 + VU_SOFT_RESULT_VALUE_OFFSET], xmm0);
