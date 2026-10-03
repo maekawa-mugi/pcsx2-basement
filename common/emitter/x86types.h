@@ -273,7 +273,7 @@ namespace x86Emitter
 		bool IsEmpty() const { return Id < 0; }
 		bool IsInvalid() const { return Id == xRegId_Invalid; }
 		bool IsExtended() const { return (Id >= 0 && (Id & 0x0F) > 7); } // Register 8-15 need an extra bit to be selected
-		bool IsEVEXHigh() const { return (Id >= 16); }
+		bool IsEVEXHigh() const { return (GetOperandSize() >= 16 && Id >= 16); }
 		bool IsExtended8Bit() const { return (Is8BitOp() && Id >= 0x10); }
 		bool IsMem() const { return false; }
 		bool IsReg() const { return true; }

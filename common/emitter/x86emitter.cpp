@@ -492,6 +492,7 @@ const xRegister32
 
 	void EmitRex(uint reg1, const xRegisterBase& reg2)
 	{
+		pxAssert(!reg2.IsEVEXHigh());
 		bool w = reg2.IsWide();
 		bool r = false;
 		bool x = false;
@@ -501,6 +502,7 @@ const xRegister32
 
 	void EmitRex(const xRegisterBase& reg1, const xRegisterBase& reg2)
 	{
+		pxAssert(!reg1.IsEVEXHigh() && !reg2.IsEVEXHigh());
 		bool w = reg1.IsWide() || reg2.IsWide();
 		bool r = reg1.IsExtended();
 		bool x = false;
@@ -510,6 +512,7 @@ const xRegister32
 
 	void EmitRex(const xRegisterBase& reg1, const void* src)
 	{
+		pxAssert(!reg1.IsEVEXHigh());
 		pxAssert(0); //see fixme
 		bool w = reg1.IsWide();
 		bool r = reg1.IsExtended();
@@ -520,6 +523,7 @@ const xRegister32
 
 	void EmitRex(const xRegisterBase& reg1, const xIndirectVoid& sib)
 	{
+		pxAssert(!reg1.IsEVEXHigh());
 		bool w = reg1.IsWide() || sib.IsWide();
 		bool r = reg1.IsExtended();
 		bool x = sib.Index.IsExtended();
@@ -534,6 +538,7 @@ const xRegister32
 
 	void EmitRex(SIMDInstructionInfo info, const xRegisterBase& reg1, const xRegisterBase& reg2)
 	{
+		pxAssert(!reg1.IsEVEXHigh() && !reg2.IsEVEXHigh());
 		bool w = false;
 		if (info.dst_w)
 			w |= reg1.IsWide();
@@ -547,6 +552,7 @@ const xRegister32
 
 	void EmitRex(SIMDInstructionInfo info, const xRegisterBase& reg1, const xIndirectVoid& sib)
 	{
+		pxAssert(!reg1.IsEVEXHigh());
 		bool w = false;
 		if (info.dst_w)
 			w |= reg1.IsWide();
@@ -565,6 +571,7 @@ const xRegister32
 
 	void EmitRex(SIMDInstructionInfo info, uint reg1, const xRegisterBase& reg2)
 	{
+		pxAssert(!reg2.IsEVEXHigh());
 		bool w = info.src_w ? reg2.IsWide() : false;
 		bool r = false;
 		bool x = false;
@@ -627,9 +634,26 @@ const xRegister32
 	__emitinline static u8 GetVEXW(const xIndirectVoid& arg) { return arg.GetOperandSize() == 8 ? 0x80 : 0; }
 	__emitinline static u8 GetVEXW(u32 ext) { return 0; }
 
+	__emitinline static void AssertVEXOperand(u32)
+	{
+	}
+
+	__emitinline static void AssertVEXOperand(const xRegisterBase& reg)
+	{
+		pxAssert(!reg.IsEVEXHigh());
+	}
+
+	__emitinline static void AssertVEXOperand(const xIndirectVoid&)
+	{
+	}
+
 	template <typename D, typename S2>
 	__emitinline void xOpWriteVEX(SIMDInstructionInfo info, D dst, u8 src1, const S2& src2, int extraRipOffset)
 	{
+		AssertVEXOperand(dst);
+		AssertVEXOperand(src2);
+		pxAssert(src1 < 16);
+
 		u8 m = static_cast<u8>(info.map);
 		u8 p = static_cast<u8>(info.prefix);
 		u8 w = 0;
