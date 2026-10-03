@@ -1868,7 +1868,8 @@ static void mVUGenerateSoftMulBoothPackedKernel(microVU& mVU)
 	constexpr int booth_negate = mantissa_b + 16;
 	constexpr int booth_data = booth_negate + 8 * 16;
 	constexpr int add3_values = booth_data + 8 * 16;
-	constexpr int stack_size = add3_values + 12 * 16;
+	const bool use_avx512_booth = x86Emitter::avx512.HasCore();
+	const int stack_size = add3_values + (use_avx512_booth ? 0 : 12 * 16);
 	const void* const uncached_kernel = xGetAlignedCallTarget();
 	xSUB(rsp, stack_size);
 	for (int reg = 0; reg < 5; reg++)
@@ -1931,20 +1932,6 @@ static void mVUGenerateSoftMulBoothPackedKernel(microVU& mVU)
 	}
 
 	const auto emitAdd3 = [&](int a, int b, int c, int lo, int hi) {
-		if (x86Emitter::avx512.HasCore())
-		{
-			xVMOVDQA32(xmm16, ptr128[rsp + a]);
-			xVMOVDQA32(xmm17, ptr128[rsp + b]);
-			xVMOVDQA32(xmm18, ptr128[rsp + c]);
-			xVMOVDQA32(xmm19, xmm16);
-			xVPTERNLOGD(xmm16, xmm17, xmm18, 0x96);
-			xVPTERNLOGD(xmm19, xmm17, xmm18, 0xe8);
-			xVMOVDQA32(ptr128[rsp + lo], xmm16);
-			xVPSLLDImm(xmm19, xmm19, 1);
-			xVMOVDQA32(ptr128[rsp + hi], xmm19);
-			return;
-		}
-
 		xMOVAPS(xmm0, ptr128[rsp + a]);
 		xPXOR(xmm0, ptr128[rsp + b]);
 		xMOVAPS(xmm1, xmm0);
@@ -1956,6 +1943,32 @@ static void mVUGenerateSoftMulBoothPackedKernel(microVU& mVU)
 		xPOR(xmm2, xmm1);
 		xPSLL.D(xmm2, 1);
 		xMOVAPS(ptr128[rsp + hi], xmm2);
+	};
+	const auto emitAdd3EVEXMemory = [&](int a, int b, int c, const xRegisterSSE& sum,
+		const xRegisterSSE& carry) {
+		xVMOVDQA32(sum, ptr128[rsp + a]);
+		xVMOVDQA32(carry, sum);
+		xVMOVDQA32(xmm30, ptr128[rsp + b]);
+		xVMOVDQA32(xmm31, ptr128[rsp + c]);
+		xVPTERNLOGD(sum, xmm30, xmm31, 0x96);
+		xVPTERNLOGD(carry, xmm30, xmm31, 0xe8);
+		xVPSLLDImm(carry, carry, 1);
+	};
+	const auto emitAdd3EVEXMemoryRegs = [&](int a, const xRegisterSSE& b, const xRegisterSSE& c,
+		const xRegisterSSE& sum, const xRegisterSSE& carry) {
+		xVMOVDQA32(sum, ptr128[rsp + a]);
+		xVMOVDQA32(carry, sum);
+		xVPTERNLOGD(sum, b, c, 0x96);
+		xVPTERNLOGD(carry, b, c, 0xe8);
+		xVPSLLDImm(carry, carry, 1);
+	};
+	const auto emitAdd3EVEXRegs = [&](const xRegisterSSE& a, const xRegisterSSE& b,
+		const xRegisterSSE& c, const xRegisterSSE& sum, const xRegisterSSE& carry) {
+		xVMOVDQA32(sum, a);
+		xVMOVDQA32(carry, a);
+		xVPTERNLOGD(sum, b, c, 0x96);
+		xVPTERNLOGD(carry, b, c, 0xe8);
+		xVPSLLDImm(carry, carry, 1);
 	};
 	constexpr int t0_lo = add3_values + 0 * 16;
 	constexpr int t0_hi = add3_values + 1 * 16;
@@ -1970,7 +1983,15 @@ static void mVUGenerateSoftMulBoothPackedKernel(microVU& mVU)
 	constexpr int t5_lo = add3_values + 10 * 16;
 	constexpr int t5_hi = add3_values + 11 * 16;
 
-	emitAdd3(booth_data + 1 * 16, booth_data + 2 * 16, booth_data + 3 * 16, t0_lo, t0_hi);
+	if (use_avx512_booth)
+	{
+		// Keep the AVX-512 path isolated until it has proper hardware performance testing.
+		emitAdd3EVEXMemory(booth_data + 1 * 16, booth_data + 2 * 16, booth_data + 3 * 16, xmm16, xmm17);
+	}
+	else
+	{
+		emitAdd3(booth_data + 1 * 16, booth_data + 2 * 16, booth_data + 3 * 16, t0_lo, t0_hi);
+	}
 	xMOVAPS(xmm0, ptr128[rsp + booth_data + 4 * 16]);
 	xPAND(xmm0, ptr128[s_vu_soft_low_11_mask]);
 	xMOVAPS(ptr128[rsp + booth_data + 4 * 16], xmm0);
@@ -1978,27 +1999,57 @@ static void mVUGenerateSoftMulBoothPackedKernel(microVU& mVU)
 	xMOVAPS(ptr128[rsp + mantissa_a], xmm0);
 	xPAND(xmm0, ptr128[s_vu_soft_low_12_mask]);
 	xMOVAPS(ptr128[rsp + booth_data + 5 * 16], xmm0);
-	emitAdd3(booth_data + 4 * 16, booth_data + 5 * 16, booth_data + 6 * 16, t1_lo, t1_hi);
+	if (use_avx512_booth)
+	{
+		emitAdd3EVEXMemory(booth_data + 4 * 16, booth_data + 5 * 16, booth_data + 6 * 16, xmm18, xmm19);
+	}
+	else
+	{
+		emitAdd3(booth_data + 4 * 16, booth_data + 5 * 16, booth_data + 6 * 16, t1_lo, t1_hi);
+	}
 	xMOVAPS(xmm0, ptr128[rsp + mantissa_a]);
 	xPAND(xmm0, ptr128[s_vu_soft_bit_11]);
 	xPOR(xmm0, ptr128[rsp + booth_negate + 6 * 16]);
-	xMOVAPS(xmm1, ptr128[rsp + t1_hi]);
-	xPOR(xmm1, xmm0);
-	xMOVAPS(ptr128[rsp + t1_hi], xmm1);
+	if (use_avx512_booth)
+	{
+		xVMOVDQA32(xmm1, xmm19);
+		xPOR(xmm1, xmm0);
+		xVMOVDQA32(xmm19, xmm1);
+	}
+	else
+	{
+		xMOVAPS(xmm1, ptr128[rsp + t1_hi]);
+		xPOR(xmm1, xmm0);
+		xMOVAPS(ptr128[rsp + t1_hi], xmm1);
+	}
 	xMOVAPS(xmm0, ptr128[rsp + mantissa_a]);
 	xPAND(xmm0, ptr128[s_vu_soft_bit_10]);
 	xPADD.D(xmm0, ptr128[rsp + booth_negate + 5 * 16]);
 	xMOVAPS(xmm1, ptr128[rsp + booth_data + 7 * 16]);
 	xPOR(xmm1, xmm0);
 	xMOVAPS(ptr128[rsp + booth_data + 7 * 16], xmm1);
-	emitAdd3(booth_data + 0 * 16, t0_lo, t0_hi, t2_lo, t2_hi);
-	emitAdd3(booth_data + 7 * 16, t1_lo, t1_hi, t3_lo, t3_hi);
-	emitAdd3(t2_hi, t3_lo, t3_hi, t4_lo, t4_hi);
-	emitAdd3(t2_lo, t4_lo, t4_hi, t5_lo, t5_hi);
-	xMOVAPS(xmm0, ptr128[rsp + t5_hi]);
+	if (use_avx512_booth)
+	{
+		emitAdd3EVEXMemoryRegs(booth_data + 0 * 16, xmm16, xmm17, xmm20, xmm21);
+		emitAdd3EVEXMemoryRegs(booth_data + 7 * 16, xmm18, xmm19, xmm22, xmm23);
+		emitAdd3EVEXRegs(xmm21, xmm22, xmm23, xmm24, xmm25);
+		emitAdd3EVEXRegs(xmm20, xmm24, xmm25, xmm26, xmm27);
+		xVMOVDQA32(xmm0, xmm27);
+	}
+	else
+	{
+		emitAdd3(booth_data + 0 * 16, t0_lo, t0_hi, t2_lo, t2_hi);
+		emitAdd3(booth_data + 7 * 16, t1_lo, t1_hi, t3_lo, t3_hi);
+		emitAdd3(t2_hi, t3_lo, t3_hi, t4_lo, t4_hi);
+		emitAdd3(t2_lo, t4_lo, t4_hi, t5_lo, t5_hi);
+		xMOVAPS(xmm0, ptr128[rsp + t5_hi]);
+	}
 	xPADD.D(xmm0, ptr128[rsp + booth_negate + 7 * 16]);
 	xPAND(xmm0, ptr128[s_vu_soft_low_15_mask]);
-	xMOVAPS(xmm1, ptr128[rsp + t5_lo]);
+	if (use_avx512_booth)
+		xVMOVDQA32(xmm1, xmm26);
+	else
+		xMOVAPS(xmm1, ptr128[rsp + t5_lo]);
 	xPAND(xmm1, ptr128[s_vu_soft_low_15_mask]);
 	xPADD.D(xmm0, xmm1);
 	xPXOR(xmm0, ptr128[rsp + full_lo]);

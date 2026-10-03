@@ -490,6 +490,19 @@ TEST(CodegenTests, AVX512Test)
 	CODEGEN_TEST(xVPSLLDImm(xmm19, xmm19, 1), "62 b1 65 00 72 f3 01");
 	CODEGEN_TEST(xVPSLLDImm(xmm3, xmm19, 1), "62 b1 65 08 72 f3 01");
 	EXPECT_EQ(xRegisterSSE::GetEVEXInstance(31).GetId(), 31);
+
+	for (u32 a = 0; a < 2; a++)
+	{
+		for (u32 b = 0; b < 2; b++)
+		{
+			for (u32 c = 0; c < 2; c++)
+			{
+				const u32 index = (a << 2) | (b << 1) | c;
+				EXPECT_EQ((0x96u >> index) & 1u, a ^ b ^ c);
+				EXPECT_EQ((0xe8u >> index) & 1u, (a & b) | (a & c) | (b & c));
+			}
+		}
+	}
 }
 
 TEST(CodegenTests, AVXTest)
