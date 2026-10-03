@@ -34,6 +34,7 @@
 #include "common/BitUtils.h"
 #include "common/Error.h"
 #include "common/FileSystem.h"
+#include "common/Image.h"
 #include "common/Path.h"
 #include "common/Timer.h"
 
@@ -416,7 +417,7 @@ __ri void ImGuiManager::DrawPerformanceOverlay(float& position_y, float scale, f
 				// GPU
 				const char* gpu_suffix = "";
 
-				if (GSConfig.Renderer != GSRendererType::SW)
+				if (GSConfig.Renderer != GSRendererType::SW && GSConfig.Renderer != GSRendererType::ParallelGS)
 				{
 					if (GSConfig.UseDebugDevice && GSConfig.HWROV)
 						gpu_suffix = " (Debug & ROV)";
@@ -428,7 +429,7 @@ __ri void ImGuiManager::DrawPerformanceOverlay(float& position_y, float scale, f
 
 				s_hardware_info_gpu_line.format(
 					"GPU: {}{}",
-					g_gs_device->GetName(),
+					GSGetDeviceName(),
 					gpu_suffix);
 
 				DRAW_LINE(osd_font, font_size, s_hardware_info_gpu_line.c_str(), white_color);
@@ -483,7 +484,7 @@ __ri void ImGuiManager::DrawPerformanceOverlay(float& position_y, float scale, f
 			if (GSConfig.OsdShowGPUDebug)
 			{
 #ifdef _WIN32
-				if (g_gs_device->GetRenderAPI() == RenderAPI::D3D12)
+				if (g_gs_device && g_gs_device->GetRenderAPI() == RenderAPI::D3D12)
 				{
 					GSDevice12* dev12 = static_cast<GSDevice12*>(g_gs_device.get());
 
@@ -561,7 +562,7 @@ __ri void ImGuiManager::DrawPerformanceOverlay(float& position_y, float scale, f
 			if (GSConfig.OsdShowGPUDebug)
 			{
 #ifdef _WIN32
-				if (g_gs_device->GetRenderAPI() == RenderAPI::D3D12)
+				if (g_gs_device && g_gs_device->GetRenderAPI() == RenderAPI::D3D12)
 					DRAW_LINE(osd_font, font_size, s_gpu_debug_info_line.c_str(), white_color);
 #endif
 			}
@@ -1367,7 +1368,7 @@ namespace SaveStateSelectorUI
 			std::string title;
 			std::string summary;
 			std::string filename;
-			std::unique_ptr<GSTexture> preview_texture;
+			std::shared_ptr<GSTexture> preview_texture;
 		};
 	} // namespace
 
@@ -1456,10 +1457,7 @@ void SaveStateSelectorUI::Close()
 void SaveStateSelectorUI::RefreshList(const std::string& serial, u32 crc)
 {
 	for (ListEntry& entry : s_slots)
-	{
-		if (entry.preview_texture)
-			g_gs_device->Recycle(entry.preview_texture.release());
-	}
+		entry.preview_texture.reset();
 
 	for (u32 i = 0; i < VMManager::NUM_SAVE_STATE_SLOTS; i++)
 		InitializeListEntry(serial, crc, &s_slots[i], static_cast<s32>(i + 1));
@@ -1473,9 +1471,7 @@ void SaveStateSelectorUI::Clear()
 	{
 		if (li.preview_texture)
 		{
-			MTGS::RunOnGSThread([tex = li.preview_texture.release()]() {
-				g_gs_device->Recycle(tex);
-			});
+			MTGS::RunOnGSThread([tex = std::move(li.preview_texture)]() mutable { tex.reset(); });
 		}
 
 		li = {};
@@ -1489,10 +1485,7 @@ void SaveStateSelectorUI::DestroyTextures()
 	Close();
 
 	for (ListEntry& entry : s_slots)
-	{
-		if (entry.preview_texture)
-			g_gs_device->Recycle(entry.preview_texture.release());
-	}
+		entry.preview_texture.reset();
 
 	s_placeholder_texture.reset();
 }
@@ -1576,15 +1569,10 @@ void SaveStateSelectorUI::InitializeListEntry(const std::string& serial, u32 crc
 	std::vector<u32> screenshot_pixels;
 	if (SaveState_ReadScreenshot(path, &screenshot_width, &screenshot_height, &screenshot_pixels))
 	{
-		li->preview_texture =
-			std::unique_ptr<GSTexture>(g_gs_device->CreateTexture(screenshot_width, screenshot_height, 1, GSTexture::Format::Color));
-		if (!li->preview_texture || !li->preview_texture->Update(GSVector4i(0, 0, screenshot_width, screenshot_height),
-										screenshot_pixels.data(), sizeof(u32) * screenshot_width))
-		{
+		li->preview_texture = ImGuiFullscreen::UploadTexture(
+			path.c_str(), RGBA8Image(screenshot_width, screenshot_height, std::move(screenshot_pixels)));
+		if (!li->preview_texture)
 			Console.Error("Failed to upload save state image to GPU");
-			if (li->preview_texture)
-				g_gs_device->Recycle(li->preview_texture.release());
-		}
 	}
 }
 

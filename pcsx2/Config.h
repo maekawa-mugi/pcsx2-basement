@@ -9,9 +9,12 @@
 #include "common/FPControl.h"
 
 #include <array>
+#include <cstdlib>
+#include <cstring>
 #include <string>
 #include <optional>
 #include <vector>
+#include <utility>
 
 // Macro used for removing some of the redtape involved in defining bitfield/union helpers.
 //
@@ -278,6 +281,7 @@ enum class GSRendererType : s8
 	VK = 14,
 	Metal = 17,
 	DX12 = 15,
+	ParallelGS = 18
 };
 
 enum class GSVSyncMode : u8
@@ -679,7 +683,10 @@ struct Pcsx2Config
 		bool
 			ExtraMemory : 1,
 			EnableExperimentalEETLB : 1,
-			EnableFullTLBDiagnosticTrace : 1;
+			EnableFullTLBDiagnosticTrace : 1,
+			FPUSoftFloat : 1,
+			VU0SoftFloat : 1,
+			VU1SoftFloat : 1;
 		BITFIELD_END
 
 		RecompilerOptions Recompiler;
@@ -910,6 +917,29 @@ struct Pcsx2Config
 		u8 ShadeBoost_Saturation = DEFAULT_SHADEBOOST_SATURATION;
 		u8 ShadeBoost_Gamma = DEFAULT_SHADEBOOST_GAMMA;
 		u8 PNGCompressionLevel = 1;
+
+		u8 PGSSuperSampling = 0;
+		u8 PGSHighResScanout = 0;
+		u8 PGSDisableMipmaps = 0;
+		u8 PGSDisableReadbackSync = 0;
+		u8 PGSSuperSampleTextures = 0;
+		u8 PGSSharpBackbuffer = 0;
+		u8 PGSBlendDemotion = 0;
+		u8 PGSTVEmulation = 0;
+		u8 PGSCable = 0;
+		u8 PGSCompositeDecode = 0;
+		u8 PGSDisableAutoProgressive = 0;
+		u8 PGSDisableCRTCEnhancements = 0;
+		u8 PGSPhosphorPrimaries = 0;
+		u8 PGSPhosphorGamma = 0;
+		u8 PGSDisplayCalibration = 0;
+		u16 PGSPaperWhite = 200;
+		u8 PGSHighRefreshInsertion = 0;
+		u8 PGSApertureGrille = 1;
+		u8 PGSPhosphorBloom = 100;
+		u8 PGSExposure = 100;
+		u8 PGSScanlineSharpness = 50;
+		u8 PGSScanlineBreathing = 50;
 
 		u16 SWExtraThreads = 2;
 		u16 SWExtraThreadsHeight = 4;
@@ -1539,10 +1569,14 @@ namespace EmuFolders
 #define CHECK_VU_SIGN_OVERFLOW(vunum) (((vunum) == 0) ? EmuConfig.Cpu.Recompiler.vu0SignOverflow : EmuConfig.Cpu.Recompiler.vu1SignOverflow)
 #define CHECK_VU_UNDERFLOW(vunum) (((vunum) == 0) ? EmuConfig.Cpu.Recompiler.vu0Underflow : EmuConfig.Cpu.Recompiler.vu1Underflow)
 
+#define CHECK_VU_SOFT(vunum) (((vunum) == 0) ? EmuConfig.Cpu.VU0SoftFloat : EmuConfig.Cpu.VU1SoftFloat)
+
 #define CHECK_FPU_OVERFLOW (EmuConfig.Cpu.Recompiler.fpuOverflow)
 #define CHECK_FPU_EXTRA_OVERFLOW (EmuConfig.Cpu.Recompiler.fpuExtraOverflow) // If enabled, Operands are checked for infinities before being used in the FPU recs
 #define CHECK_FPU_EXTRA_FLAGS 1 // Always enabled now // Sets D/I flags on FPU instructions
 #define CHECK_FPU_FULL (EmuConfig.Cpu.Recompiler.fpuFullMode)
+
+#define CHECK_FPU_SOFT (EmuConfig.Cpu.FPUSoftFloat)
 
 //------------ EE Recompiler defines - Comment to disable a recompiler ---------------
 

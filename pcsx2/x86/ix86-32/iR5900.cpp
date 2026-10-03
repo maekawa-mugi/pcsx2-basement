@@ -692,6 +692,7 @@ static void recResetRaw()
 	xSetPtr(SysMemory::GetEERec());
 	_DynGen_Dispatchers();
 	vtlb_DynGenDispatchers();
+	R5900::Dynarec::OpcodeImpl::COP1::GenerateSoftFloatKernels();
 	recPtr = xGetPtr();
 
 	if (EmuConfig.Cpu.EnableExperimentalEETLB)

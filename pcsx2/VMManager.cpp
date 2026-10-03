@@ -41,6 +41,7 @@
 #include "SPU2/spu2.h"
 #include "SupportURLs.h"
 #include "USB/USB.h"
+#include "VUops.h"
 #include "Vif_Dynarec.h"
 #include "VMManager.h"
 #include "ps2/BiosTools.h"
@@ -929,30 +930,39 @@ void VMManager::RequestDisplaySize(float scale /*= 0.0f*/)
 		return;
 
 	// scale x not y for aspect ratio
+	const float internal_aspect_ratio = static_cast<float>(iwidth) / static_cast<float>(iheight);
+	const float renderer_aspect_ratio = GSGetDisplayAspectRatio();
 	float x_scale;
-	switch (GSConfig.AspectRatio)
+	if (renderer_aspect_ratio > 0.0f)
 	{
-		case AspectRatioType::RAuto4_3_3_2:
-			if (EmuConfig.CurrentCustomAspectRatio > 0.f)
-				x_scale = EmuConfig.CurrentCustomAspectRatio / (static_cast<float>(iwidth) / static_cast<float>(iheight));
-			else if (GSgetDisplayMode() == GSVideoMode::SDTV_480P)
-				x_scale = (3.0f / 2.0f) / (static_cast<float>(iwidth) / static_cast<float>(iheight));
-			else
-				x_scale = (4.0f / 3.0f) / (static_cast<float>(iwidth) / static_cast<float>(iheight));
-			break;
-		case AspectRatioType::R4_3:
-			x_scale = (4.0f / 3.0f) / (static_cast<float>(iwidth) / static_cast<float>(iheight));
-			break;
-		case AspectRatioType::R16_9:
-			x_scale = (16.0f / 9.0f) / (static_cast<float>(iwidth) / static_cast<float>(iheight));
-			break;
-		case AspectRatioType::R10_7:
-			x_scale = (10.0f / 7.0f) / (static_cast<float>(iwidth) / static_cast<float>(iheight));
-			break;
-		case AspectRatioType::Stretch:
-		default:
-			x_scale = 1.0f;
-			break;
+		x_scale = renderer_aspect_ratio / internal_aspect_ratio;
+	}
+	else
+	{
+		switch (GSConfig.AspectRatio)
+		{
+			case AspectRatioType::RAuto4_3_3_2:
+				if (EmuConfig.CurrentCustomAspectRatio > 0.f)
+					x_scale = EmuConfig.CurrentCustomAspectRatio / internal_aspect_ratio;
+				else if (GSgetDisplayMode() == GSVideoMode::SDTV_480P)
+					x_scale = (3.0f / 2.0f) / internal_aspect_ratio;
+				else
+					x_scale = (4.0f / 3.0f) / internal_aspect_ratio;
+				break;
+			case AspectRatioType::R4_3:
+				x_scale = (4.0f / 3.0f) / internal_aspect_ratio;
+				break;
+			case AspectRatioType::R16_9:
+				x_scale = (16.0f / 9.0f) / internal_aspect_ratio;
+				break;
+			case AspectRatioType::R10_7:
+				x_scale = (10.0f / 7.0f) / internal_aspect_ratio;
+				break;
+			case AspectRatioType::Stretch:
+			default:
+				x_scale = 1.0f;
+				break;
+		}
 	}
 
 	float width = static_cast<float>(iwidth) * x_scale;
@@ -2754,7 +2764,7 @@ void VMManager::UpdateCPUImplementations()
 	psxCpu = CHECK_IOPREC ? &psxRec : &psxInt;
 
 	CpuVU0 = EmuConfig.Cpu.Recompiler.EnableVU0 ? static_cast<BaseVUmicroCPU*>(&CpuMicroVU0) : static_cast<BaseVUmicroCPU*>(&CpuIntVU0);
-	CpuVU1 = EmuConfig.Cpu.Recompiler.EnableVU1 ? static_cast<BaseVUmicroCPU*>(&CpuMicroVU1) : static_cast<BaseVUmicroCPU*>(&CpuIntVU1);
+	CpuVU1 = REC_VU1 ? static_cast<BaseVUmicroCPU*>(&CpuMicroVU1) : static_cast<BaseVUmicroCPU*>(&CpuIntVU1);
 #else
 	Cpu = &intCpu;
 	psxCpu = &psxInt;
@@ -3001,6 +3011,10 @@ void VMManager::CheckForCPUConfigChanges(const Pcsx2Config& old_config)
 
 	Console.WriteLn("Updating CPU configuration...");
 	FPControlRegister::SetCurrent(EmuConfig.Cpu.FPUFPCR);
+	if (EmuConfig.Cpu.VU0SoftFloat != old_config.Cpu.VU0SoftFloat)
+		VU0.accflag = 0;
+	if (EmuConfig.Cpu.VU1SoftFloat != old_config.Cpu.VU1SoftFloat)
+		VU1.accflag = 0;
 	Internal::ClearCPUExecutionCaches();
 	memBindConditionalHandlers();
 

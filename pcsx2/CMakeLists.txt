@@ -105,6 +105,7 @@ set(pcsx2Sources
 	MTGS.cpp
 	MTVU.cpp
 	Patch.cpp
+	PS2Float.cpp
 	Pcsx2Config.cpp
 	PerformanceMetrics.cpp
 	PrecompiledHeader.cpp
@@ -187,6 +188,7 @@ set(pcsx2Headers
 	MTVU.h
 	Memory.h
 	MemoryTypes.h
+	PS2Float.h
 	Patch.h
 	PerformanceMetrics.h
 	PrecompiledHeader.h
@@ -508,6 +510,7 @@ set(pcsx2GSSources
 	GS/GSPerfMon.cpp
 	GS/GSPng.cpp
 	GS/GSRingHeap.cpp
+	GS/GSScreenshot.cpp
 	GS/GSState.cpp
 	GS/GSTables.cpp
 	GS/GSUtil.cpp
@@ -547,6 +550,7 @@ set(pcsx2GSHeaders
 	GS/GSPerfMon.h
 	GS/GSPng.h
 	GS/GSRingHeap.h
+	GS/GSScreenshot.h
 	GS/GSState.h
 	GS/GSTables.h
 	GS/GSUtil.h
@@ -658,12 +662,33 @@ if(USE_VULKAN)
 		GS/Renderers/Vulkan/VKEntryPoints.h
 		GS/Renderers/Vulkan/VKEntryPoints.inl
 		GS/Renderers/Vulkan/VKLoader.h
+		GS/Renderers/Vulkan/VKLoaderPlatformDefines.h
 		GS/Renderers/Vulkan/VKShaderCache.h
 		GS/Renderers/Vulkan/VKStreamBuffer.h
 		GS/Renderers/Vulkan/VKSwapChain.h
 	)
 	target_link_libraries(PCSX2_FLAGS INTERFACE vulkan-headers)
 	target_include_directories(PCSX2_FLAGS INTERFACE ${SHADERC_INCLUDE_DIR})
+endif()
+
+if (TARGET parallel-gs)
+	message("Adding support for paraLLEl-GS")
+	target_link_libraries(PCSX2_FLAGS INTERFACE parallel-gs analog-video)
+	target_compile_definitions(PCSX2_FLAGS INTERFACE HAVE_PARALLEL_GS)
+	list(APPEND pcsx2GSSources GS/Renderers/parallel-gs/GSRendererPGS.cpp)
+	list(APPEND pcsx2GSHeaders GS/Renderers/parallel-gs/GSRendererPGS.h)
+	if (X11_API)
+		target_compile_definitions(granite-volk PUBLIC VK_USE_PLATFORM_XLIB_KHR)
+	endif()
+	if (WAYLAND_API)
+		target_compile_definitions(granite-volk PUBLIC VK_USE_PLATFORM_WAYLAND_KHR)
+	endif()
+	if (WIN32)
+		target_compile_definitions(granite-volk PUBLIC VK_USE_PLATFORM_WIN32_KHR)
+	endif()
+	if (APPLE)
+		target_compile_definitions(granite-volk PUBLIC VK_USE_PLATFORM_METAL_EXT)
+	endif()
 endif()
 
 set(pcsx2GSMetalShaders
@@ -1044,9 +1069,14 @@ set(pcsx2x86Headers
 	x86/microVU_Misc.h
 	x86/microVU_Misc.inl
 	x86/microVU_Profiler.h
+	x86/microVU_SoftFloat.h
+	x86/microVU_SoftFloatTables.h
+	x86/microVU_SoftFloatTablesRuntime.cpp
 	x86/microVU_Tables.inl
 	x86/microVU_Upper.inl
+	x86/microVU_UpperSoft.inl
 	x86/newVif.h
+	x86/SoftFloatEmitter.h
 	x86/Vif_UnpackSSE.h
 	x86/R5900_Profiler.h
 	)
@@ -1094,6 +1124,17 @@ if(LTO_PCSX2_CORE)
 	fixup_file_properties(PCSX2_LTO)
 else()
 	target_sources(PCSX2 PRIVATE ${pcsx2LTOSources})
+endif()
+
+# Keep the generated correction tables out of LTO and the precompiled-header pipeline
+if(ARCH_X86)
+	set_source_files_properties(x86/microVU_SoftFloatTables.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+	if(MSVC AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+		set_source_files_properties(x86/microVU_SoftFloatTables.cpp PROPERTIES COMPILE_OPTIONS "/GL-")
+	else()
+		set_source_files_properties(x86/microVU_SoftFloatTables.cpp PROPERTIES COMPILE_OPTIONS "-fno-lto")
+	endif()
+	target_sources(PCSX2 PRIVATE x86/microVU_SoftFloatTables.cpp)
 endif()
 
 # common Sources
@@ -1298,6 +1339,34 @@ function(setup_main_executable target)
 			endif()
 			pcsx2_resource(${target} ${path} ${CMAKE_SOURCE_DIR}/bin/)
 		endforeach()
+	endif()
+
+	# Keep license texts and attribution with binaries even without the submodule sources.
+	set(DISTRIBUTION_LICENSE_FILES
+		"${CMAKE_SOURCE_DIR}/COPYING.GPLv3"
+		"${CMAKE_SOURCE_DIR}/COPYING.LGPLv3"
+		"${CMAKE_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
+	)
+	if(APPLE)
+		target_sources(${target} PRIVATE ${DISTRIBUTION_LICENSE_FILES})
+		set_source_files_properties(${DISTRIBUTION_LICENSE_FILES} PROPERTIES MACOSX_PACKAGE_LOCATION Resources/docs)
+	else()
+		if(WIN32)
+			set(LICENSE_OUTPUT_DIR "$<TARGET_FILE_DIR:${target}>/docs")
+			set(LICENSE_INSTALL_DIR "${CMAKE_SOURCE_DIR}/bin/docs")
+		else()
+			set(LICENSE_OUTPUT_DIR "$<TARGET_FILE_DIR:${target}>/resources/docs")
+			if(PACKAGE_MODE)
+				set(LICENSE_INSTALL_DIR "${CMAKE_INSTALL_FULL_DATADIR}/PCSX2/resources/docs")
+			else()
+				set(LICENSE_INSTALL_DIR "${CMAKE_SOURCE_DIR}/bin/resources/docs")
+			endif()
+		endif()
+		add_custom_command(TARGET ${target} POST_BUILD
+			COMMAND "${CMAKE_COMMAND}" -E make_directory "${LICENSE_OUTPUT_DIR}"
+			COMMAND "${CMAKE_COMMAND}" -E copy_if_different ${DISTRIBUTION_LICENSE_FILES} "${LICENSE_OUTPUT_DIR}"
+			VERBATIM)
+		install(FILES ${DISTRIBUTION_LICENSE_FILES} DESTINATION "${LICENSE_INSTALL_DIR}" COMPONENT Licenses)
 	endif()
 
 	get_property(PCSX2_SOURCE_DIR GLOBAL PROPERTY PCSX2_SOURCE_DIR)

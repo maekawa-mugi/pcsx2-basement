@@ -3,11 +3,25 @@
 
 #pragma once
 
+#include "GS/MultiISA.h"
+
+// Private ABI shared only by generated upper-FMAC kernels and their emitters.
+struct VuSoftFmacJitResult
+{
+	u32 value[4];
+	u32 mac_flags;
+	u32 status_flags; // Four-bit status nibble.
+	u32 mul_stage_status_flags; // Four-bit product-status nibble.
+	u32 sticky_status_flags; // OR of the two four-bit status nibbles.
+	u32 acc_overflow_mask;
+};
+static_assert(sizeof(VuSoftFmacJitResult) == 9 * sizeof(u32));
+
 //------------------------------------------------------------------
 // mVUupdateFlags() - Updates status/mac flags
 //------------------------------------------------------------------
 
-#define AND_XYZW ((_XYZW_SS && modXYZW) ? (1) : (mFLAG.doFlag ? (_X_Y_Z_W) : (flipMask[_X_Y_Z_W])))
+#define AND_XYZW ((_XYZW_SS && modXYZW) ? (1) : (mFLAG.doFlag ? (_X_Y_Z_W) : (s_vu_soft_lane_mask[_X_Y_Z_W])))
 #define ADD_XYZW ((_XYZW_SS && modXYZW) ? (_X ? 3 : (_Y ? 2 : (_Z ? 1 : 0))) : 0)
 #define SHIFT_XYZW(gprReg) \
 	do { \
@@ -23,13 +37,52 @@ alignas(16) const u32 sse4_compvals[2][4] = {
 	{0x7fffffff, 0x7fffffff, 0x7fffffff, 0x7fffffff}, //1111
 };
 
+alignas(4) static constexpr u32 s_vu_soft_truncate_mxcsr = 0x7f80;
+alignas(4) static constexpr u32 s_vu_soft_truncate_daz_ftz_mxcsr = 0xffc0;
+alignas(16) static constexpr u32 s_vu_soft_zero[4] = {};
+alignas(16) static constexpr u32 s_vu_soft_one[4] = {1, 1, 1, 1};
+alignas(16) static constexpr u32 s_vu_soft_exp_24[4] = {24, 24, 24, 24};
+alignas(16) static constexpr u32 s_vu_soft_exp_33[4] = {33, 33, 33, 33};
+alignas(16) static constexpr u32 s_vu_soft_exp_255[4] = {255, 255, 255, 255};
+alignas(16) static constexpr u32 s_vu_soft_all_ones[4] = {0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff};
+alignas(16) static constexpr u32 s_vu_soft_sign[4] = {0x80000000, 0x80000000, 0x80000000, 0x80000000};
+alignas(16) static constexpr u32 s_vu_soft_abs[4] = {0x7fffffff, 0x7fffffff, 0x7fffffff, 0x7fffffff};
+alignas(16) static constexpr u32 s_vu_soft_max_finite[4] = {0x7f7fffff, 0x7f7fffff, 0x7f7fffff, 0x7f7fffff};
+alignas(16) static constexpr u32 s_vu_soft_max_safe[4] = {0x7f7ffffe, 0x7f7ffffe, 0x7f7ffffe, 0x7f7ffffe};
+alignas(16) static constexpr u32 s_vu_soft_safe_range_biased_max[4] = {0xfefffffe, 0xfefffffe, 0xfefffffe, 0xfefffffe};
+alignas(16) static constexpr u32 s_vu_soft_finite_range_biased_max[4] = {0xfeffffff, 0xfeffffff, 0xfeffffff, 0xfeffffff};
+alignas(16) static constexpr u32 s_vu_soft_exp_field[4] = {0x7f800000, 0x7f800000, 0x7f800000, 0x7f800000};
+alignas(16) static constexpr u32 s_vu_soft_exp_field_253[4] = {0x7e800000, 0x7e800000, 0x7e800000, 0x7e800000};
+alignas(16) static constexpr u32 s_vu_soft_exp_mask[4] = {0xff, 0xff, 0xff, 0xff};
+alignas(16) static constexpr u32 s_vu_soft_mantissa[4] = {0x7fffff, 0x7fffff, 0x7fffff, 0x7fffff};
+alignas(16) static constexpr u32 s_vu_soft_hidden_bit[4] = {0x800000, 0x800000, 0x800000, 0x800000};
+alignas(16) static constexpr u32 s_vu_soft_float_one[4] = {0x3f800000, 0x3f800000, 0x3f800000, 0x3f800000};
+alignas(16) static constexpr u32 s_vu_soft_borrow_limit[4] = {0x7fff, 0x7fff, 0x7fff, 0x7fff};
+alignas(16) static constexpr u8 s_vu_soft_lane_mask[16] = {0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15};
+alignas(16) static constexpr u8 s_vu_soft_booth_decode_bytes[16] = {0, 1, 1, 2, 0x12, 0x11, 0x11, 0};
+alignas(16) static constexpr u32 s_vu_soft_magnitude[4] = {7, 7, 7, 7};
+alignas(16) static constexpr u32 s_vu_soft_booth_magnitude[4] = {3, 3, 3, 3};
+alignas(16) static constexpr u32 s_vu_soft_bit_15[4] = {0x8000, 0x8000, 0x8000, 0x8000};
+alignas(16) static constexpr u32 s_vu_soft_bit_11[4] = {0x800, 0x800, 0x800, 0x800};
+alignas(16) static constexpr u32 s_vu_soft_bit_10[4] = {0x400, 0x400, 0x400, 0x400};
+alignas(16) static constexpr u32 s_vu_soft_low_11_mask[4] = {~0x7ffu, ~0x7ffu, ~0x7ffu, ~0x7ffu};
+alignas(16) static constexpr u32 s_vu_soft_low_12_mask[4] = {~0xfffu, ~0xfffu, ~0xfffu, ~0xfffu};
+alignas(16) static constexpr u32 s_vu_soft_low_15_mask[4] = {~0x7fffu, ~0x7fffu, ~0x7fffu, ~0x7fffu};
+alignas(16) static constexpr auto s_vu_soft_x86_lane_masks = [] {
+	std::array<std::array<u32, 4>, 16> masks = {};
+	for (u32 mask = 0; mask < masks.size(); mask++)
+	{
+		for (u32 lane = 0; lane < 4; lane++)
+			masks[mask][lane] = (mask & (1u << lane)) ? 0xffffffffu : 0;
+	}
+	return masks;
+}();
 // Note: If modXYZW is true, then it adjusts XYZW for Single Scalar operations
 static void mVUupdateFlags(mV, const xmm& reg, const xmm& regT1in = xEmptyReg, const xmm& regT2in = xEmptyReg, bool modXYZW = 1)
 {
 	const x32& mReg = gprT1;
 	const x32& sReg = getFlagReg(sFLAG.write);
 	bool regT1b = regT1in.IsEmpty(), regT2b = false;
-	static const u16 flipMask[16] = {0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15};
 
 	//SysPrintf("Status = %d; Mac = %d\n", sFLAG.doFlag, mFLAG.doFlag);
 	if (!sFLAG.doFlag && !mFLAG.doFlag)
@@ -74,10 +127,8 @@ static void mVUupdateFlags(mV, const xmm& reg, const xmm& regT1in = xEmptyReg, c
 	xOR(mReg, gprT2);
 
 	//-------------------------Overflow Flags-----------------------------------
-	// We can't really do this because of the limited range of x86 and the value MIGHT genuinely be FLT_MAX (x86)
-	// so this will need to remain as a gamefix for the one game that needs it (Superman Returns)
-	// until some sort of soft float implementation.
-	if (sFLAG.doFlag && CHECK_VUOVERFLOWHACK)
+	// Legacy fallback for paths which do not have software result classification.
+	if (sFLAG.doFlag && CHECK_VUOVERFLOWHACK && !CHECK_VU_SOFT(mVU.index))
 	{
 		//Calculate overflow
 		xAND.PS(regT1, regT2, ptr128[&sse4_compvals[1][0]]); // Remove sign flags (we don't care)
@@ -227,12 +278,43 @@ static void setupFtReg(microVU& mVU, xmm& Ft, xmm& tempFt, int opCase, int clamp
 	}
 }
 
+static void mVUemitExtractLane(const x32& dst, const xmm& src, int lane)
+{
+	if (lane == 0)
+		xMOVD(dst, src);
+	else
+		xPEXTR.D(dst, src, lane);
+}
+
+#include "microVU_UpperSoft.inl"
+
 // Normal FMAC Opcodes
 static void mVU_FMACa(microVU& mVU, int recPass, int opCase, int opType, bool isACC, microOpcode opEnum, int clampType)
 {
-	pass1 { setupPass1(mVU, opCase, isACC, ((opType == 3) || (opType == 4))); }
+	pass1
+	{
+		setupPass1(mVU, opCase, isACC, ((opType == 3) || (opType == 4)));
+	}
 	pass2
 	{
+		const VuUpperFmacSoftKind soft_kind = (opType == 0 || opType == 5) ? VuUpperFmacSoftKind::Add :
+			(opType == 1) ? VuUpperFmacSoftKind::Sub : VuUpperFmacSoftKind::Mul;
+		const VuUpperFmacSoftDestination soft_destination = isACC ?
+			VuUpperFmacSoftDestination::Acc : VuUpperFmacSoftDestination::Fd;
+		const VuUpperFmacSoftDescriptor soft_op = mVUmakeUpperSoftDescriptor(mVU, opCase, soft_kind, soft_destination);
+		const bool soft_candidate = opType == 0 || opType == 1 || opType == 2 || opType == 5;
+		if (soft_candidate && CHECK_VU_SOFT(mVU.index))
+		{
+			if (isACC && opType == 2 && mVUtryStartUpperSoftRegisterDotFusion(mVU, soft_op))
+			{
+				mVU.profiler.EmitOp(opEnum);
+				return;
+			}
+			mVUemitUpperSoftExact(mVU, soft_op);
+			mVU.profiler.EmitOp(opEnum);
+			return;
+		}
+
 		if (doSafeSub(mVU, opCase, opType, isACC))
 			return;
 
@@ -286,9 +368,26 @@ static void mVU_FMACa(microVU& mVU, int recPass, int opCase, int opType, bool is
 // MADDA/MSUBA Opcodes
 static void mVU_FMACb(microVU& mVU, int recPass, int opCase, int opType, microOpcode opEnum, int clampType)
 {
-	pass1 { setupPass1(mVU, opCase, true, false); }
+	pass1
+	{
+		setupPass1(mVU, opCase, true, false);
+	}
 	pass2
 	{
+		const VuUpperFmacSoftKind soft_kind = opType == 0 ? VuUpperFmacSoftKind::Madd : VuUpperFmacSoftKind::Msub;
+		const VuUpperFmacSoftDescriptor soft_op = mVUmakeUpperSoftDescriptor(
+			mVU, opCase, soft_kind, VuUpperFmacSoftDestination::Acc);
+		if (CHECK_VU_SOFT(mVU.index))
+		{
+			if (mVUisUpperSoftRegisterDotFusionContinuation(mVU, soft_op))
+			{
+				mVU.profiler.EmitOp(opEnum);
+				return;
+			}
+			mVUemitUpperSoftExact(mVU, soft_op);
+			mVU.profiler.EmitOp(opEnum);
+			return;
+		}
 		xmm Fs, Ft, ACC, tempFt;
 		setupFtReg(mVU, Ft, tempFt, opCase, clampType);
 
@@ -334,9 +433,26 @@ static void mVU_FMACb(microVU& mVU, int recPass, int opCase, int opType, microOp
 // MADD Opcodes
 static void mVU_FMACc(microVU& mVU, int recPass, int opCase, microOpcode opEnum, int clampType)
 {
-	pass1 { setupPass1(mVU, opCase, false, false); }
+	pass1
+	{
+		setupPass1(mVU, opCase, false, false);
+	}
 	pass2
 	{
+		const VuUpperFmacSoftDescriptor soft_op = mVUmakeUpperSoftDescriptor(
+			mVU, opCase, VuUpperFmacSoftKind::Madd, VuUpperFmacSoftDestination::Fd);
+		if (CHECK_VU_SOFT(mVU.index))
+		{
+			if (mVUisUpperSoftRegisterDotFusionContinuation(mVU, soft_op))
+			{
+				mVU.profiler.EmitOp(opEnum);
+				return;
+			}
+			mVUemitUpperSoftExact(mVU, soft_op);
+			mVU.profiler.EmitOp(opEnum);
+			return;
+		}
+
 		xmm Fs, Ft, ACC, tempFt;
 		setupFtReg(mVU, Ft, tempFt, opCase, clampType);
 
@@ -371,9 +487,21 @@ static void mVU_FMACc(microVU& mVU, int recPass, int opCase, microOpcode opEnum,
 // MSUB Opcodes
 static void mVU_FMACd(microVU& mVU, int recPass, int opCase, microOpcode opEnum, int clampType)
 {
-	pass1 { setupPass1(mVU, opCase, false, false); }
+	pass1
+	{
+		setupPass1(mVU, opCase, false, false);
+	}
 	pass2
 	{
+		const VuUpperFmacSoftDescriptor soft_op = mVUmakeUpperSoftDescriptor(
+			mVU, opCase, VuUpperFmacSoftKind::Msub, VuUpperFmacSoftDestination::Fd);
+		if (CHECK_VU_SOFT(mVU.index))
+		{
+			mVUemitUpperSoftExact(mVU, soft_op);
+			mVU.profiler.EmitOp(opEnum);
+			return;
+		}
+
 		xmm Fs, Ft, Fd, tempFt;
 		setupFtReg(mVU, Ft, tempFt, opCase, clampType);
 
@@ -421,9 +549,35 @@ mVUop(mVU_ABS)
 // OPMULA Opcode
 mVUop(mVU_OPMULA)
 {
-	pass1 { mVUanalyzeFMAC1(mVU, 0, _Fs_, _Ft_); }
+	pass1
+	{
+		mVUanalyzeFMAC1(mVU, 0, _Fs_, _Ft_);
+		if (CHECK_VU_SOFT(mVU.index))
+		{
+			// OPMULA's destination is ACC, but its status side effects are still
+			// observable by same-cycle FSAND and by a following OPMSUB. Keep that
+			// value live when the exact soft-float path is selected.
+			sFLAG.doNonSticky = true;
+			sFLAG.doValue = true;
+		}
+	}
 	pass2
 	{
+		if (CHECK_VU_SOFT(mVU.index))
+		{
+			mVU.regAlloc->flushCallerSavedGPRs();
+			const xmm& source = mVU.regAlloc->allocReg(_Fs_, 0, 0xf);
+			const xmm& operand = mVU.regAlloc->allocReg(_Ft_, 0, 0xf);
+			xPSHUF.D(source, source, 0xC9); // WXZY
+			xPSHUF.D(operand, operand, 0xD2); // WYXZ
+			const xmm& destination = mVU.regAlloc->allocReg(32, 32, _X_Y_Z_W);
+			const VuUpperFmacSoftDescriptor soft_op = {
+				VuUpperFmacSoftKind::Mul, VuUpperFmacSoftOperandSource::Ft, VuUpperFmacSoftDestination::Acc};
+			mVUemitUpperInlineMulExactResult(mVU, soft_op,
+				source, operand, destination);
+			mVU.profiler.EmitOp(opOPMULA);
+			return;
+		}
 		const xmm& Ft = mVU.regAlloc->allocReg(_Ft_, 0, _X_Y_Z_W);
 		const xmm& Fs = mVU.regAlloc->allocReg(_Fs_, 32, _X_Y_Z_W);
 
@@ -447,9 +601,30 @@ mVUop(mVU_OPMULA)
 // OPMSUB Opcode
 mVUop(mVU_OPMSUB)
 {
-	pass1 { mVUanalyzeFMAC1(mVU, _Fd_, _Fs_, _Ft_); }
+	pass1
+	{
+		mVUanalyzeFMAC1(mVU, _Fd_, _Fs_, _Ft_);
+	}
 	pass2
 	{
+		if (CHECK_VU_SOFT(mVU.index))
+		{
+			mVU.regAlloc->flushCallerSavedGPRs();
+			const xmm& source = mVU.regAlloc->allocReg(_Fs_, 0, 0xf);
+			const xmm& operand = mVU.regAlloc->allocReg(_Ft_, 0, 0xf);
+			xPSHUF.D(source, source, 0xC9); // WXZY
+			xPSHUF.D(operand, operand, 0xD2); // WYXZ
+			const xmm& accumulator = mVU.regAlloc->allocReg(32);
+			const int destination_load = _X_Y_Z_W == 0xf ? -1 : _Fd_;
+			const xmm& destination = mVU.regAlloc->allocReg(destination_load, _Fd_, _X_Y_Z_W);
+			const VuUpperFmacSoftDescriptor soft_op = {
+				VuUpperFmacSoftKind::Msub, VuUpperFmacSoftOperandSource::Ft, VuUpperFmacSoftDestination::Fd};
+			mVUemitUpperInlineMaddExactResult(mVU, soft_op,
+				source, operand, accumulator, destination);
+			mVU.profiler.EmitOp(opOPMSUB);
+			return;
+		}
+
 		const xmm& Ft = mVU.regAlloc->allocReg(_Ft_, 0, 0xf);
 		const xmm& Fs = mVU.regAlloc->allocReg(_Fs_, 0, 0xf);
 		const xmm& ACC = mVU.regAlloc->allocReg(32, _Fd_, _X_Y_Z_W);

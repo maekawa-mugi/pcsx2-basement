@@ -3,9 +3,13 @@
 
 #include "microVU.h"
 
+#include "VUops.h"
+
 #include "common/AlignedMalloc.h"
 #include "common/Perf.h"
 #include "common/StringUtil.h"
+
+static constexpr size_t mVUsoftDivCapTailReserve = 256;
 
 //------------------------------------------------------------------
 // Micro VU - Main Functions
@@ -24,6 +28,8 @@ void mVUinit(microVU& mVU, uint vuIndex)
 	mVU.progMemMask  =  mVU.progSize-1;
 	mVU.cache        = vuIndex ? SysMemory::GetVU1Rec() : SysMemory::GetVU0Rec();
 	mVU.prog.x86end  = (vuIndex ? SysMemory::GetVU1RecEnd() : SysMemory::GetVU0RecEnd()) - (mVUcacheSafeZone * _1mb);
+	// Keep the cold DIV cap fallback outside normal program allocation.
+	mVU.prog.x86end -= mVUsoftDivCapTailReserve;
 
 	mVU.regAlloc.reset(new microRegAlloc(mVU.index));
 }
@@ -31,6 +37,26 @@ void mVUinit(microVU& mVU, uint vuIndex)
 // Resets Rec Data
 void mVUreset(microVU& mVU, bool resetReserve)
 {
+	const bool use_soft_float = CHECK_VU_SOFT(mVU.index);
+	const bool use_soft_madd_packed =
+		use_soft_float && g_cpu.vectorISA >= ProcessorFeatures::VectorISA::AVX2;
+
+	if (use_soft_float)
+	{
+		MicroVUSoftFloatTables::InitializeCorrectionTables();
+
+		if (!mVU.softBoothCache)
+			mVU.softBoothCache = std::make_unique<microVUSoftBoothCacheEntry[]>(mVUsoftBoothCacheSize);
+		if (!mVU.softSrtReciprocalCache)
+			mVU.softSrtReciprocalCache =
+				std::make_unique<microVUSoftUnaryCacheEntry[]>(mVUsoftLowerCacheSize);
+		if (!mVU.softDivCache)
+			mVU.softDivCache = std::make_unique<microVUSoftLowerCacheEntry[]>(mVUsoftLowerCacheSize);
+		if (!mVU.softSqrtCache)
+			mVU.softSqrtCache = std::make_unique<microVUSoftUnaryCacheEntry[]>(mVUsoftLowerCacheSize);
+		if (!mVU.softRsqrtCache)
+			mVU.softRsqrtCache = std::make_unique<microVUSoftLowerCacheSet[]>(mVUsoftLowerCacheSize);
+	}
 	if (THREAD_VU1)
 	{
 		DevCon.Warning("mVU Reset");
@@ -49,7 +75,29 @@ void mVUreset(microVU& mVU, bool resetReserve)
 	mVUGenerateWaitMTVU(mVU);
 	mVUGenerateCopyPipelineState(mVU);
 	mVUGenerateCompareState(mVU);
-
+	if (use_soft_float)
+	{
+		mVUGenerateSoftAddExactLaneKernel(mVU);
+		mVUGenerateSoftAddLaneRepairKernel(mVU);
+		mVUGenerateSoftMulExactKernel(mVU);
+		mVUGenerateSoftMulExactVectorKernel(mVU);
+		mVUGenerateSoftMulBoothPackedKernel(mVU);
+		if (use_soft_madd_packed)
+			mVUGenerateSoftMaddPackedKernels(mVU);
+		mVUGenerateSoftMaddIntegratedLaneKernel(mVU);
+		mVUGenerateSoftMaddExactVectorKernels(mVU);
+		mVUGenerateLowerSrtReciprocalSoftExactKernel(mVU);
+		const mVUSoftDivCapTailPatch div_cap_tail = mVUGenerateLowerDivSoftExactKernel(mVU);
+		mVUGenerateLowerSqrtSoftExactKernel(mVU);
+		mVUGenerateLowerRsqrtSoftExactKernel(mVU);
+		u8* const main_region_end = xGetPtr();
+		u8* const rec_end = mVU.index ? SysMemory::GetVU1RecEnd() : SysMemory::GetVU0RecEnd();
+		u8* const tail_begin = rec_end - mVUsoftDivCapTailReserve;
+		xSetPtr(tail_begin);
+		mVUGenerateLowerDivSoftCapTail(div_cap_tail);
+		pxAssert(static_cast<size_t>(xGetPtr() - tail_begin) <= mVUsoftDivCapTailReserve);
+		xSetPtr(main_region_end);
+	}
 	mVU.regs().nextBlockCycles = 0;
 	memset(&mVU.prog.lpState, 0, sizeof(mVU.prog.lpState));
 	mVU.profiler.Reset(mVU.index);

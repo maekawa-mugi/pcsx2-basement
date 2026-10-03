@@ -8,6 +8,7 @@
 #include "GS/GSDump.h"
 #include "GS/GSGL.h"
 #include "GS/GSPerfMon.h"
+#include "GS/GSScreenshot.h"
 #include "GS/GSUtil.h"
 #include "GSDumpReplayer.h"
 #include "Host.h"
@@ -16,7 +17,6 @@
 #include "VMManager.h"
 
 #include "common/FileSystem.h"
-#include "common/Image.h"
 #include "common/Path.h"
 #include "common/StringUtil.h"
 #include "common/Timer.h"
@@ -26,9 +26,6 @@
 
 #include <algorithm>
 #include <array>
-#include <deque>
-#include <thread>
-#include <mutex>
 
 static void DumpGSPrivRegs(const GSPrivRegSet& r, const std::string& filename);
 
@@ -37,9 +34,6 @@ static constexpr std::array<PresentShader, 8> s_tv_shader_indices = {
 	PresentShader::DIAGONAL_FILTER, PresentShader::TRIANGULAR_FILTER,
 	PresentShader::COMPLEX_FILTER, PresentShader::LOTTES_FILTER,
 	PresentShader::SUPERSAMPLE_4xRGSS, PresentShader::SUPERSAMPLE_AUTO};
-
-static std::deque<std::thread> s_screenshot_threads;
-static std::mutex s_screenshot_threads_mutex;
 
 std::unique_ptr<GSRenderer> g_gs_renderer;
 
@@ -286,7 +280,7 @@ float GSRenderer::GetModXYOffset()
 	return 0.0f;
 }
 
-static float GetCurrentAspectRatioFloat(bool is_progressive)
+float GetCurrentAspectRatioFloat(bool is_progressive)
 {
 	switch (GSConfig.AspectRatio)
 	{
@@ -450,74 +444,6 @@ static GSVector4i CalculateDrawSrcRect(const GSTexture* src, const GSVector2i re
 	const int right =  size.x - static_cast<int>(static_cast<float>(GSConfig.Crop[2] * scale.x) * upscale);
 	const int bottom = size.y - static_cast<int>(static_cast<float>(GSConfig.Crop[3] * scale.y) * upscale);
 	return GSVector4i(left, top, right, bottom);
-}
-
-static const char* GetScreenshotSuffix()
-{
-	static constexpr const char* suffixes[static_cast<u8>(GSScreenshotFormat::Count)] = {
-		"png", "jpg", "webp"};
-	return suffixes[static_cast<u8>(GSConfig.ScreenshotFormat)];
-}
-
-static void CompressAndWriteScreenshot(std::string filename, u32 width, u32 height, std::vector<u32> pixels)
-{
-	RGBA8Image image;
-	image.SetPixels(width, height, std::move(pixels));
-
-	std::string key(fmt::format("GSScreenshot_{}", filename));
-
-	if (!GSDumpReplayer::IsRunner())
-	{
-		Host::AddIconOSDMessage(key, ICON_FA_CAMERA,
-			fmt::format(TRANSLATE_FS("GS", "Saving screenshot to '{}'."), Path::GetFileName(filename)), 60.0f);
-	}
-
-	// maybe std::async would be better here.. but it's definitely worth threading, large screenshots take a while to compress.
-	std::unique_lock lock(s_screenshot_threads_mutex);
-	s_screenshot_threads.emplace_back([key = std::move(key), filename = std::move(filename), image = std::move(image),
-										  quality = GSConfig.ScreenshotQuality]() {
-		if (image.SaveToFile(filename.c_str(), quality))
-		{
-			if (!GSDumpReplayer::IsRunner())
-			{
-				Host::AddIconOSDMessage(std::move(key), ICON_FA_CAMERA,
-					fmt::format(TRANSLATE_FS("GS", "Saved screenshot to '{}'."), Path::GetFileName(filename)),
-					Host::OSD_INFO_DURATION);
-			}
-		}
-		else
-		{
-			Host::AddIconOSDMessage(std::move(key), ICON_FA_CAMERA,
-				fmt::format(TRANSLATE_FS("GS", "Failed to save screenshot to '{}'."), Path::GetFileName(filename),
-					Host::OSD_ERROR_DURATION));
-		}
-
-		// remove ourselves from the list, if the GS thread is waiting for us, we won't be in there
-		const auto this_id = std::this_thread::get_id();
-		std::unique_lock lock(s_screenshot_threads_mutex);
-		for (auto it = s_screenshot_threads.begin(); it != s_screenshot_threads.end(); ++it)
-		{
-			if (it->get_id() == this_id)
-			{
-				it->detach();
-				s_screenshot_threads.erase(it);
-				break;
-			}
-		}
-	});
-}
-
-void GSJoinSnapshotThreads()
-{
-	std::unique_lock lock(s_screenshot_threads_mutex);
-	while (!s_screenshot_threads.empty())
-	{
-		std::thread save_thread(std::move(s_screenshot_threads.front()));
-		s_screenshot_threads.pop_front();
-		lock.unlock();
-		save_thread.join();
-		lock.lock();
-	}
 }
 
 bool GSRenderer::BeginPresentFrame(bool frame_skip)
@@ -781,7 +707,7 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 			aspect_correct, true,
 			&screenshot_width, &screenshot_height, &screenshot_pixels))
 		{
-			CompressAndWriteScreenshot(fmt::format("{}.{}", m_snapshot, GetScreenshotSuffix()),
+			GSCompressAndWriteScreenshot(GSGetScreenshotFilename(m_snapshot),
 				screenshot_width, screenshot_height, std::move(screenshot_pixels));
 		}
 		else

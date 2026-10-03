@@ -289,6 +289,9 @@
     <Filter Include="System\Ps2\EmotionEngine\EE\Dynarec\arm64">
       <UniqueIdentifier>{cd8ec519-2196-43f7-86de-7faced2d4296}</UniqueIdentifier>
     </Filter>
+    <Filter Include="System\Ps2\EmotionEngine\Shared">
+      <UniqueIdentifier>{e244cd3f-4431-4628-a294-d22c9614133b}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <None Include="Docs\License.txt">
@@ -477,6 +480,12 @@
       <Filter>System\Ps2\EmotionEngine\VU</Filter>
     </ClCompile>
     <ClCompile Include="x86\microVU.cpp">
+      <Filter>System\Ps2\EmotionEngine\VU\Dynarec\microVU</Filter>
+    </ClCompile>
+    <ClCompile Include="x86\microVU_SoftFloatTables.cpp">
+      <Filter>System\Ps2\EmotionEngine\VU\Dynarec\microVU</Filter>
+    </ClCompile>
+    <ClCompile Include="x86\microVU_SoftFloatTablesRuntime.cpp">
       <Filter>System\Ps2\EmotionEngine\VU\Dynarec\microVU</Filter>
     </ClCompile>
     <ClCompile Include="VU0.cpp">
@@ -1025,6 +1034,9 @@
     <ClCompile Include="GS\GSPng.cpp">
       <Filter>System\Ps2\GS</Filter>
     </ClCompile>
+    <ClCompile Include="GS\GSScreenshot.cpp">
+      <Filter>System\Ps2\GS</Filter>
+    </ClCompile>
     <ClCompile Include="GS\GSRingHeap.cpp">
       <Filter>System\Ps2\GS</Filter>
     </ClCompile>
@@ -1467,6 +1479,9 @@
     <ClCompile Include="GS\GSDrawingEnvironment.cpp">
       <Filter>System\Ps2\GS\Renderers\Software</Filter>
     </ClCompile>
+    <ClCompile Include="PS2Float.cpp">
+      <Filter>System\Ps2\EmotionEngine\Shared</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Patch.h">
@@ -1665,6 +1680,18 @@
       <Filter>System\Ps2\GS\GIF</Filter>
     </ClInclude>
     <ClInclude Include="x86\microVU_Profiler.h">
+      <Filter>System\Ps2\EmotionEngine\VU\Dynarec\microVU</Filter>
+    </ClInclude>
+    <ClInclude Include="x86\microVU_SoftFloat.h">
+      <Filter>System\Ps2\EmotionEngine\VU\Dynarec\microVU</Filter>
+    </ClInclude>
+    <ClInclude Include="x86\microVU_SoftFloatTables.h">
+      <Filter>System\Ps2\EmotionEngine\VU\Dynarec\microVU</Filter>
+    </ClInclude>
+    <ClInclude Include="x86\microVU_UpperSoft.inl">
+      <Filter>System\Ps2\EmotionEngine\VU\Dynarec\microVU</Filter>
+    </ClInclude>
+    <ClInclude Include="x86\SoftFloatEmitter.h">
       <Filter>System\Ps2\EmotionEngine\VU\Dynarec\microVU</Filter>
     </ClInclude>
     <ClInclude Include="DebugTools\DebugInterface.h">
@@ -1932,6 +1959,9 @@
       <Filter>System\Ps2\GS</Filter>
     </ClInclude>
     <ClInclude Include="GS\GSPng.h">
+      <Filter>System\Ps2\GS</Filter>
+    </ClInclude>
+    <ClInclude Include="GS\GSScreenshot.h">
       <Filter>System\Ps2\GS</Filter>
     </ClInclude>
     <ClInclude Include="GS\GSRingHeap.h">
@@ -2406,6 +2436,9 @@
     </ClInclude>
     <ClInclude Include="SIO\Pad\PadNegcon.h">
       <Filter>System\Ps2\Iop\SIO\PAD</Filter>
+    </ClInclude>
+    <ClInclude Include="PS2Float.h">
+      <Filter>System\Ps2\EmotionEngine\Shared</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

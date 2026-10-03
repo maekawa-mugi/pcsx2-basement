@@ -707,7 +707,7 @@ void GameDatabaseSchema::GameEntry::applyGSHardwareFixes(Pcsx2Config::GSOptions&
 
 	// Only apply GS HW fixes if the user hasn't manually enabled HW fixes.
 	const bool apply_auto_fixes = !config.ManualUserHacks;
-	const bool is_sw_renderer = EmuConfig.GS.Renderer == GSRendererType::SW;
+	const bool is_sw_renderer = EmuConfig.GS.Renderer == GSRendererType::SW || EmuConfig.GS.Renderer == GSRendererType::ParallelGS;
 	if (!apply_auto_fixes)
 		Console.Warning("GameDB: Manual GS hardware renderer fixes are enabled, not using automatic hardware renderer fixes from GameDB.");
 
