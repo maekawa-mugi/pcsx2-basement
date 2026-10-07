@@ -84,6 +84,8 @@ u32 scaleblockcycles_clear();
 void recPrepareFullTLBAccessContext();
 void recFinishFullTLBAccessContext();
 void recEmitFullTLBAccessFaultExit();
+u32 recGetFullTLBScaledBlockCycles();
+void recEmitFullTLBAccessFaultExitForThunk(u32 stack_size, u32 scaled_cycles);
 
 namespace R5900
 {

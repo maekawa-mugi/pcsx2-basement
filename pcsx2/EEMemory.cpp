@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Common.h"
+#include "FullTLBStats.h"
 #include "EEMemory.h"
 
 #include "Cache.h"
@@ -536,11 +537,16 @@ namespace EEMemory
 		return true;
 	}
 
-	FetchPage TranslateFetchPage(u32 vaddr)
+	EEMmu::TranslationResult ProbeFetchTranslation(u32 vaddr)
+	{
+		return EEMmu::TranslateAddress(GetCurrentContext(), vaddr, EEMmu::AccessType::Fetch);
+	}
+
+	FetchPage TranslateFetchPage(u32 vaddr, bool cancel_on_fault)
 	{
 		FetchPage page;
 		page.virtual_page = vaddr & ~vtlb_private::VTLB_PAGE_MASK;
-		page.translation = Translate(vaddr, EEMmu::AccessType::Fetch, vaddr, false, false);
+		page.translation = Translate(vaddr, EEMmu::AccessType::Fetch, vaddr, false, false, !cancel_on_fault);
 		if (page.translation.fault != EEMmu::Fault::None)
 			return page;
 		if (HandlePhysicalBusError(vaddr, page.translation, EEMmu::AccessType::Fetch, false))
@@ -680,9 +686,19 @@ namespace EEMemory
 		return s_recompiler_jit_cache_translation_cache.data();
 	}
 
-	u32 GetRecompilerJitTranslationContextKey()
+	u32 g_recompilerJitContextKeys[2] = {};
+
+	void UpdateRecompilerJitContextKeys()
 	{
-		return (cpuRegs.CP0.n.Status.val & 0x1e) |
+		g_recompilerJitContextKeys[0] = GetRecompilerJitTranslationContextKey(false);
+		g_recompilerJitContextKeys[1] = GetRecompilerJitTranslationContextKey(true);
+	}
+
+	u32 GetRecompilerJitTranslationContextKey(bool high_segment)
+	{
+		const u32 status_key = EEMmu::TranslationStatusKey(cpuRegs.CP0.n.Status.val);
+		const u32 mode_key = high_segment ? (status_key | 0x80) : (status_key & (1U << 2));
+		return mode_key |
 		       ((cpuRegs.CP0.n.Config & 0x7) << 8) |
 		       ((cpuRegs.CP0.n.EntryHi & 0xff) << 16);
 	}
@@ -732,9 +748,20 @@ namespace EEMemory
 		const u32 virtual_page = vaddr >> vtlb_private::VTLB_PAGE_BITS;
 		RecompilerJitTranslationCacheEntry* const cache = GetRecompilerJitTranslationCacheBase(access_type);
 		RecompilerJitTranslationCacheEntry& entry = cache[virtual_page & (RECOMPILER_TRANSLATION_CACHE_SIZE - 1)];
+		if (FullTLBStats::g_enabled)
+		{
+			// The JIT compares the entry's key with the key of the block's compile time, so a
+			// "context" miss here means the running context differs from the shared entry's.
+			if (entry.virtual_page != virtual_page)
+				FullTLBStats::Add(FullTLBStats::TranslationMissPage);
+			else if (entry.context_key != GetRecompilerJitTranslationContextKey(vaddr >= 0x80000000))
+				FullTLBStats::Add(FullTLBStats::TranslationMissContext);
+			else
+				FullTLBStats::Add(FullTLBStats::TranslationMissGeneration);
+		}
 		entry.host_page = host_page;
 		entry.translation = packed_translation;
-		entry.context_key = GetRecompilerJitTranslationContextKey();
+		entry.context_key = GetRecompilerJitTranslationContextKey(vaddr >= 0x80000000);
 		entry.tlb_entry_index = translation.matched_tlb_index >= 0 ?
 		                            static_cast<u32>(translation.matched_tlb_index) :
 		                            RECOMPILER_TRANSLATION_NO_TLB_ENTRY;

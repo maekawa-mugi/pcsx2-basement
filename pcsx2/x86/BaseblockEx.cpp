@@ -64,5 +64,13 @@ void BaseBlocks::Link(u32 pc, s32* jumpptr)
 		*jumpptr = (s32)(targetblock->fnptr - (sptr)(jumpptr + 1));
 	else
 		*jumpptr = (s32)(recompiler - (sptr)(jumpptr + 1));
-	links.insert(std::pair<u32, uptr>(pc, (uptr)jumpptr));
+	const uptr site = reinterpret_cast<uptr>(jumpptr);
+	auto [existing, inserted] = link_sites.emplace(site, pc);
+	if (!inserted)
+	{
+		// The same patch site linked again: drop the old target's entry first.
+		EraseLink(existing->second, site);
+		existing->second = pc;
+	}
+	links.insert(std::pair<u32, uptr>(pc, site));
 }

@@ -17,6 +17,7 @@
 */
 
 #include "Common.h"
+#include "FullTLBStats.h"
 #include "vtlb.h"
 #include "COP0.h"
 #include "Cache.h"
@@ -66,6 +67,7 @@ struct LoadstoreBackpatchInfo
 	u32 guest_pc;
 	u32 gpr_bitmask;
 	u32 fpr_bitmask;
+	uptr slow_path;
 	u8 code_size;
 	u8 address_register;
 	u8 data_register;
@@ -1083,6 +1085,22 @@ static void vtlb_CreateFastmemMapping(u32 vaddr, u32 mainmem_offset, const PageP
 	s_fastmem_physical_mapping.emplace(mainmem_offset, vaddr);
 }
 
+static void vtlb_CreateFullTLBKsegFastmemMappings()
+{
+	// Keep this deliberately separate from the legacy virtual VTLB map. Full TLB
+	// only gets permanent aliases for direct-segment RAM at this stage.
+	for (u32 paddr = 0; paddr < Ps2MemSize::ExposedRam; paddr += VTLB_PAGE_SIZE)
+	{
+		u32 mainmem_offset, mainmem_size;
+		PageProtectionMode mode;
+		if (!vtlb_GetMainMemoryOffset(paddr, &mainmem_offset, &mainmem_size, &mode))
+			continue;
+
+		vtlb_CreateFastmemMapping(0x80000000u + paddr, mainmem_offset, mode);
+		vtlb_CreateFastmemMapping(0xa0000000u + paddr, mainmem_offset, mode);
+	}
+}
+
 static void vtlb_RemoveFastmemMapping(u32 vaddr)
 {
 	const u32 page = vaddr / VTLB_PAGE_SIZE;
@@ -1179,7 +1197,7 @@ bool vtlb_GetGuestAddress(uptr host_addr, u32* guest_addr)
 
 void vtlb_UpdateFastmemProtection(u32 paddr, u32 size, PageProtectionMode prot)
 {
-	if (!CHECK_FASTMEM)
+	if (!CHECK_FASTMEM && !EmuConfig.Cpu.IsFullTLBKsegFastmemEnabled())
 		return;
 
 	pxAssert((paddr & VTLB_PAGE_MASK) == 0);
@@ -1211,10 +1229,14 @@ void vtlb_UpdateFastmemProtection(u32 paddr, u32 size, PageProtectionMode prot)
 void vtlb_ClearLoadStoreInfo()
 {
 	s_fastmem_backpatch_info.clear();
-	s_fastmem_faulting_pcs.clear();
+
+	// A Full TLB JIT reset is routine (recClear resets the whole cache), so keep the faulting PCs
+	// or every reset would re-emit the speculative access that is known to fault.
+	if (!EmuConfig.Cpu.IsFullTLBKsegFastmemEnabled())
+		s_fastmem_faulting_pcs.clear();
 }
 
-void vtlb_AddLoadStoreInfo(uptr code_address, u32 code_size, u32 guest_pc, u32 gpr_bitmask, u32 fpr_bitmask, u8 address_register, u8 data_register, u8 size_in_bits, bool is_signed, bool is_load, bool is_fpr)
+void vtlb_AddLoadStoreInfo(uptr code_address, u32 code_size, u32 guest_pc, u32 gpr_bitmask, u32 fpr_bitmask, u8 address_register, u8 data_register, u8 size_in_bits, bool is_signed, bool is_load, bool is_fpr, uptr slow_path)
 {
 	pxAssert(code_size < std::numeric_limits<u8>::max());
 
@@ -1222,7 +1244,9 @@ void vtlb_AddLoadStoreInfo(uptr code_address, u32 code_size, u32 guest_pc, u32 g
 	if (iter != s_fastmem_backpatch_info.end())
 		s_fastmem_backpatch_info.erase(iter);
 
-	LoadstoreBackpatchInfo info{guest_pc, gpr_bitmask, fpr_bitmask, static_cast<u8>(code_size), address_register, data_register, size_in_bits, is_signed, is_load, is_fpr};
+	LoadstoreBackpatchInfo info{guest_pc, gpr_bitmask, fpr_bitmask, slow_path,
+		static_cast<u8>(code_size), address_register, data_register, size_in_bits,
+		is_signed, is_load, is_fpr};
 	s_fastmem_backpatch_info.emplace(code_address, info);
 }
 
@@ -1239,12 +1263,24 @@ bool vtlb_BackpatchLoadStore(uptr code_address, uptr fault_address)
 
 	const LoadstoreBackpatchInfo& info = iter->second;
 	const u32 guest_addr = static_cast<u32>(fault_address - fastmem_start);
-	vtlb_DynBackpatchLoadStore(code_address, info.code_size, info.guest_pc, guest_addr,
-		info.gpr_bitmask, info.fpr_bitmask, info.address_register, info.data_register,
-		info.size_in_bits, info.is_signed, info.is_load, info.is_fpr);
+	FullTLBStats::Add(info.slow_path != 0 ? FullTLBStats::FastmemFaultsSlowpath : FullTLBStats::FastmemFaults);
+	if (info.slow_path != 0)
+	{
+		vtlb_DynPatchLoadStore(code_address, info.code_size, info.slow_path);
+	}
+	else
+	{
+		vtlb_DynBackpatchLoadStore(code_address, info.code_size, info.guest_pc, guest_addr,
+			info.gpr_bitmask, info.fpr_bitmask, info.address_register, info.data_register,
+			info.size_in_bits, info.is_signed, info.is_load, info.is_fpr);
+	}
 
-	// queue block for recompilation later
-	Cpu->Clear(info.guest_pc, 1);
+	// queue block for recompilation later. Full TLB speculative reads were patched to jump to
+	// a complete architectural slow path above, so the block stays valid. Clearing it would call
+	// recResetEE() in Full TLB mode, wipe the JIT cache and re-emit the same speculative access,
+	// faulting forever (needs proper testing).
+	if (info.slow_path == 0)
+		Cpu->Clear(info.guest_pc, 1);
 
 	// and store the pc in the faulting list, so that we don't emit another fastmem loadstore
 	s_fastmem_faulting_pcs.insert(info.guest_pc);
@@ -1393,6 +1429,9 @@ void vtlb_Reset()
 	vtlb_RemoveFastmemMappings();
 	for (int i = 0; i < 48; i++)
 		UnmapTLB(tlb[i], i);
+
+	if (EmuConfig.Cpu.IsFullTLBKsegFastmemEnabled())
+		vtlb_CreateFullTLBKsegFastmemMappings();
 }
 
 void vtlb_Shutdown()
@@ -1409,6 +1448,12 @@ void vtlb_ResetFastmem()
 	vtlb_RemoveFastmemMappings();
 	s_fastmem_backpatch_info.clear();
 	s_fastmem_faulting_pcs.clear();
+
+	if (EmuConfig.Cpu.IsFullTLBKsegFastmemEnabled())
+	{
+		vtlb_CreateFullTLBKsegFastmemMappings();
+		return;
+	}
 
 	if (!CHECK_FASTMEM || !CHECK_EEREC || !vtlbdata.vmap)
 		return;
@@ -1492,6 +1537,7 @@ void vtlb_Core_Free()
 
 	vtlb_RemoveFastmemMappings();
 	vtlb_ClearLoadStoreInfo();
+	s_fastmem_faulting_pcs.clear();
 
 	vtlbdata.fastmem_base = 0;
 	decltype(s_fastmem_physical_mapping)().swap(s_fastmem_physical_mapping);
@@ -1614,27 +1660,40 @@ PageFaultHandler::HandlerResult PageFaultHandler::HandlePageFault(void* exceptio
 	pxAssert(eeMem);
 
 	u32 vaddr;
-	if (CHECK_FASTMEM && vtlb_GetGuestAddress(reinterpret_cast<uptr>(fault_address), &vaddr))
+	if ((CHECK_FASTMEM || EmuConfig.Cpu.IsFullTLBKsegFastmemEnabled()) &&
+		vtlb_GetGuestAddress(reinterpret_cast<uptr>(fault_address), &vaddr))
 	{
 		// this was inside the fastmem area. check if it's a code page
 		// fprintf(stderr, "Fault on fastmem %p vaddr %08X\n", info.addr, vaddr);
 
-		uptr ptr = (uptr)PSM(vaddr);
-		uptr offset = (ptr - (uptr)eeMem->Main);
-		if (ptr && m_PageProtectInfo[offset >> __pageshift].Mode == ProtMode_Write)
+		// In Full TLB mode only KSEG RAM aliases are host-mapped at this stage.
+		// An unmapped low virtual address may numerically resemble a protected RAM
+		// page, but its architectural TLB mapping can point somewhere else entirely.
+		// Only classify a fault as an SMC write when the fault came from an alias
+		// which we actually installed.
+		const bool full_tlb_kseg_fastmem = EmuConfig.Cpu.IsFullTLBKsegFastmemEnabled();
+		const u32 direct_paddr = vaddr & 0x1fffffff;
+		const bool mapped_direct_ram = !full_tlb_kseg_fastmem ||
+			(vaddr >= 0x80000000 && vaddr < 0xc0000000 && direct_paddr < Ps2MemSize::ExposedRam);
+
+		if (is_write && mapped_direct_ram)
 		{
-			// fprintf(stderr, "Not backpatching code write at %08X\n", vaddr);
-			mmap_ClearCpuBlock(offset);
-			return HandlerResult::ContinueExecution;
+			const uptr ptr = reinterpret_cast<uptr>(PSM(vaddr));
+			const uptr offset = ptr ? (ptr - reinterpret_cast<uptr>(eeMem->Main)) : 0;
+			if (ptr && offset < Ps2MemSize::ExposedRam &&
+				m_PageProtectInfo[offset >> __pageshift].Mode == ProtMode_Write)
+			{
+				// fprintf(stderr, "Not backpatching code write at %08X\n", vaddr);
+				mmap_ClearCpuBlock(static_cast<uint>(offset));
+				return HandlerResult::ContinueExecution;
+			}
 		}
-		else
-		{
-			// fprintf(stderr, "Trying backpatching vaddr %08X\n", vaddr);
-			return vtlb_BackpatchLoadStore(reinterpret_cast<uptr>(exception_pc),
-					   reinterpret_cast<uptr>(fault_address)) ?
-			           HandlerResult::ContinueExecution :
-			           HandlerResult::ExecuteNextHandler;
-		}
+
+		// fprintf(stderr, "Trying backpatching vaddr %08X\n", vaddr);
+		return vtlb_BackpatchLoadStore(reinterpret_cast<uptr>(exception_pc),
+				   reinterpret_cast<uptr>(fault_address)) ?
+		           HandlerResult::ContinueExecution :
+		           HandlerResult::ExecuteNextHandler;
 	}
 	else
 	{

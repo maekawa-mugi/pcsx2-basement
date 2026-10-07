@@ -37,7 +37,11 @@ namespace EEMemory
 
 	u32 Fetch32(u32 vaddr);
 	bool TryFetch32(u32 vaddr, u32* value);
-	FetchPage TranslateFetchPage(u32 vaddr);
+	// cancel_on_fault=false raises a TLB/address fault like a recompiler data access: the
+	// exception is taken, but the caller returns instead of unwinding out of the JIT.
+	FetchPage TranslateFetchPage(u32 vaddr, bool cancel_on_fault = true);
+	// Side-effect free fetch translation in the current context (no trace, no exception).
+	EEMmu::TranslationResult ProbeFetchTranslation(u32 vaddr);
 	u32 Fetch32(const FetchPage& page, u32 vaddr);
 
 	u8 Read8(u32 vaddr);
@@ -61,7 +65,14 @@ namespace EEMemory
 	const u8* GetRecompilerAccessFaultAddress();
 	void ClearRecompilerAccessFault();
 	RecompilerJitTranslationCacheEntry* GetRecompilerJitTranslationCacheBase(EEMmu::AccessType access_type);
-	u32 GetRecompilerJitTranslationContextKey();
+	// kuseg translation does not depend on the operating mode (only on ERL), so user code and
+	// kernel code touching the same user page share one cache entry. Mapped segments above
+	// 0x80000000 keep the mode and a marker bit so they never match a kuseg key.
+	u32 GetRecompilerJitTranslationContextKey(bool high_segment);
+	// Keys of the context the current Full TLB block runs in: [0] kuseg, [1] mapped high
+	// segments. Every block entry stores them; Status/EntryHi/Config writes end the block.
+	extern u32 g_recompilerJitContextKeys[2];
+	void UpdateRecompilerJitContextKeys();
 	u64 ResolveRecompilerJitTranslation(u32 vaddr, u32 access_type);
 	void RaiseRecompilerAddressError(u32 vaddr, u32 access_type);
 	u32* GetFullTLBDiagnosticReadVAddrAddress();

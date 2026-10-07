@@ -10,6 +10,7 @@
 
 #include <array>
 #include <cstring>
+#include <random>
 
 namespace
 {
@@ -206,7 +207,7 @@ TEST(EERecompilerMemory, JitTranslationResolverPublishesTaggedPhysicalPage)
 	EXPECT_EQ(entry.virtual_page, virtual_page);
 	EXPECT_EQ(entry.tlb_entry_index, 0U);
 	EXPECT_EQ(entry.translation_generation, EEMmu::GetTLBEntryGeneration(0));
-	EXPECT_EQ(entry.context_key, EEMemory::GetRecompilerJitTranslationContextKey());
+	EXPECT_EQ(entry.context_key, EEMemory::GetRecompilerJitTranslationContextKey(false));
 	EXPECT_EQ(entry.translation, packed);
 }
 
@@ -221,6 +222,53 @@ TEST(EERecompilerMemory, JitStoreResolverStopsAtModifiedFault)
 		0U);
 	EXPECT_EQ(*EEMemory::GetRecompilerAccessFaultAddress(), 1U);
 	EXPECT_EQ(cpuRegs.CP0.n.Cause & EXC_CODE__MASK, EXC_CODE_Mod);
+}
+
+TEST(EETLBTranslator, FastLookupMatchesLinearScan)
+{
+	LiveEEStateGuard guard;
+	constexpr std::array<u32, 7> page_masks = {0x000, 0x003, 0x00f, 0x03f, 0x0ff, 0x3ff, 0xfff};
+	std::mt19937 rng(12345);
+	auto random = [&rng](u32 limit) { return static_cast<u32>(rng() % limit); };
+
+	EEMmu::EnableFastTLBLookup(true);
+	for (int round = 0; round < 200; round++)
+	{
+		std::array<tlbs, EEMmu::TLB_ENTRY_COUNT> copy;
+		for (size_t i = 0; i < EEMmu::TLB_ENTRY_COUNT; i++)
+		{
+			// Few distinct bases and ASIDs so that overlaps and multiple matches occur.
+			const u32 base = (random(8) << 24) | (random(16) << 13);
+			const u32 mask = random(4) == 0 ? page_masks[random(page_masks.size())] : 0;
+			tlb[i] = MakeEntry(base, random(0x200) << 12, random(0x200) << 12, mask,
+				static_cast<u8>(random(4)), static_cast<u8>(2 + random(2)), random(4) != 0, random(2) != 0,
+				random(4) == 0);
+			if (random(16) == 0)
+				tlb[i].EntryLo0.S = 1;
+			copy[i] = tlb[i];
+			EEMmu::InvalidateTLBEntry(i);
+		}
+
+		for (int probe = 0; probe < 200; probe++)
+		{
+			const u32 vaddr = random(2) ? (copy[random(EEMmu::TLB_ENTRY_COUNT)].EntryHi.VPN2 << 13) + random(0x4000)
+			                            : static_cast<u32>(rng());
+			const u32 status = random(2) ? 0 : STATUS_USER;
+			const u8 asid = static_cast<u8>(random(4));
+			const auto access = random(2) ? EEMmu::AccessType::Load : EEMmu::AccessType::Store;
+			const EEMmu::TranslationContext live = {status, 3, asid, tlb, EEMmu::TLB_ENTRY_COUNT};
+			const EEMmu::TranslationResult fast = EEMmu::TranslateAddress(live, vaddr, access);
+			const EEMmu::TranslationResult slow = EEMmu::TranslateAddress(MakeContext(copy, status, 3, asid), vaddr, access);
+			ASSERT_EQ(fast.fault, slow.fault) << std::hex << vaddr;
+			ASSERT_EQ(fast.target, slow.target) << std::hex << vaddr;
+			ASSERT_EQ(fast.paddr, slow.paddr) << std::hex << vaddr;
+			ASSERT_EQ(fast.scratch_offset, slow.scratch_offset) << std::hex << vaddr;
+			ASSERT_EQ(fast.cache_mode, slow.cache_mode) << std::hex << vaddr;
+			ASSERT_EQ(fast.matched_tlb_index, slow.matched_tlb_index) << std::hex << vaddr;
+			ASSERT_EQ(fast.warnings, slow.warnings) << std::hex << vaddr;
+		}
+	}
+	EEMmu::EnableFastTLBLookup(false);
 }
 
 TEST(EETLBTranslator, TranslatesAllSupportedPageSizesAndBoundaries)

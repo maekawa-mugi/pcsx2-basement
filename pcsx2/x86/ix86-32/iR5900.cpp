@@ -5,6 +5,7 @@
 #include "CDVD/CDVD.h"
 #include "DebugTools/Breakpoints.h"
 #include "EEMemory.h"
+#include "FullTLBStats.h"
 #include "Elfheader.h"
 #include "GS.h"
 #include "Host.h"
@@ -22,10 +23,28 @@
 #include "common/FastJmp.h"
 #include "common/HeapArray.h"
 #include "common/Perf.h"
+#include "common/Timer.h"
 
+#include <algorithm>
 #include <array>
+#include <deque>
 #include <memory>
 #include <unordered_map>
+#include <vector>
+
+#include "fmt/format.h"
+
+#ifdef _WIN32
+#include "common/RedtapeWindows.h"
+#include <DbgHelp.h>
+#include <timeapi.h>
+#include <atomic>
+#include <cstring>
+#include <mutex>
+#include <thread>
+#pragma comment(lib, "dbghelp.lib")
+#pragma comment(lib, "winmm.lib")
+#endif
 
 // Only for MOVQ workaround.
 #include "common/emitter/internal.h"
@@ -425,6 +444,12 @@ static void recEventTest()
 {
 	_cpuEventTest_Shared();
 
+	if (FullTLBStats::g_enabled)
+	{
+		FullTLBStats::Add(FullTLBStats::EventTests);
+		FullTLBStats::MaybeReport();
+	}
+
 	if (eeRecExitRequested)
 	{
 		eeRecExitRequested = false;
@@ -507,7 +532,7 @@ static const void* _DynGen_EnterRecompiledCode()
 		xLoadFarAddr(RTEXTPTR, ptr);
 #endif
 
-	if (CHECK_FASTMEM)
+	if (CHECK_FASTMEM || EmuConfig.Cpu.IsFullTLBKsegFastmemEnabled())
 		xMOV(RFASTMEMBASE, ptrNative[&vtlb_private::vtlbdata.fastmem_base]);
 
 	xJMP(DispatcherReg);
@@ -675,10 +700,52 @@ alignas(16) static u16 manual_page[Ps2MemSize::TotalRam >> 12];
 alignas(16) static u8 manual_counter[Ps2MemSize::TotalRam >> 12];
 
 ////////////////////////////////////////////////////
+namespace
+{
+	// Runtime state for a Full TLB block-entry guard. The JIT compares the raw context first;
+	// the helpers below decide on a mismatch whether the block is still valid (needs proper
+	// testing with broader Linux workloads).
+	struct FullTLBFetchGuard;
+
+	// The JIT compares the raw context with the last context this block was validated in, and
+	// publishes that context's translation keys. The helper revalidates on a mismatch and
+	// updates these fields, so a block shared by two processes costs one helper call per
+	// switch instead of a recompile.
+	struct FullTLBContextGuard
+	{
+		u32 raw_status; // Status & 0x1e last validated
+		u32 config_key; // fixed: compile-time decisions depend on it
+		u32 asid; // EntryHi ASID last validated
+		u32 translation_keys[2]; // published to EEMemory::g_recompilerJitContextKeys
+		u32 status_key; // fixed: EEMmu::TranslationStatusKey() at compile time
+		FullTLBFetchGuard* fetch_guards[2]; // TLB-translated fetch pages
+	};
+
+	struct FullTLBFetchGuard
+	{
+		const u32* generation_address;
+		u32 generation;
+		u32 virtual_page;
+		u32 physical_page;
+		EEMmu::Target target;
+		u8 cache_mode;
+	};
+
+	static_assert(offsetof(FullTLBFetchGuard, generation_address) == 0, "the JIT loads it through [rax]");
+
+	// Pointers into these are baked into JIT code, so they live until the next JIT reset.
+	std::deque<FullTLBContextGuard> s_full_tlb_context_guards;
+	std::deque<FullTLBFetchGuard> s_full_tlb_fetch_guards;
+	FullTLBContextGuard* s_full_tlb_current_context_guard = nullptr;
+} // namespace
+
+static u8* s_ee_rec_dispatchers_end = nullptr;
+
 static void recResetRaw()
 {
 	if (!EmuConfig.Cpu.EnableExperimentalEETLB)
 		Console.WriteLn(Color_StrongBlack, "EE/iR5900 Recompiler Reset");
+	FullTLBStats::Add(FullTLBStats::JitResets);
 
 	if (CHECK_EXTRAMEM != extraRam)
 	{
@@ -694,6 +761,11 @@ static void recResetRaw()
 	vtlb_DynGenDispatchers();
 	R5900::Dynarec::OpcodeImpl::COP1::GenerateSoftFloatKernels();
 	recPtr = xGetPtr();
+	s_ee_rec_dispatchers_end = recPtr;
+
+	s_full_tlb_context_guards.clear();
+	s_full_tlb_fetch_guards.clear();
+	s_full_tlb_current_context_guard = nullptr;
 
 	if (EmuConfig.Cpu.EnableExperimentalEETLB)
 	{
@@ -785,6 +857,11 @@ static void recSafeExitExecution()
 	}
 }
 
+namespace
+{
+	void FullTLBRegisterEEThread();
+} // namespace
+
 static void recResetEE()
 {
 	if (eeCpuExecuting)
@@ -822,6 +899,7 @@ static void recExecute()
 	// but will return the longjmp 2nd parameter (here 1)
 	if (!fastjmp_set(&m_SetJmp_StateCheck))
 	{
+		FullTLBRegisterEEThread();
 		eeCpuExecuting = true;
 		((void (*)())EnterRecompiledCode)();
 
@@ -868,6 +946,7 @@ void recClear(u32 addr, u32 size)
 	{
 		// Full TLB blocks are keyed by virtual address and can have multiple aliases.
 		// The first correctness version invalidates all aliases instead of maintaining a reverse map.
+		FullTLBStats::Add(FullTLBStats::RecClears);
 		recResetEE();
 		return;
 	}
@@ -1516,6 +1595,40 @@ void recFinishFullTLBAccessContext()
 {
 	xMOV(ptr32[&cpuRegs.branch], 0);
 	recEmitFullTLBAccessFaultExit();
+}
+
+u32 recGetFullTLBScaledBlockCycles()
+{
+	return scaleblockcycles();
+}
+
+void recEmitFullTLBAccessFaultExitForThunk(u32 stack_size, u32 scaled_cycles)
+{
+	pxAssert(EmuConfig.Cpu.EnableExperimentalEETLB);
+
+	_x86regs saved_x86regs[iREGCNT_GPR];
+	_xmmregs saved_xmmregs[iREGCNT_XMM];
+	std::memcpy(saved_x86regs, x86regs, sizeof(saved_x86regs));
+	std::memcpy(saved_xmmregs, xmmregs, sizeof(saved_xmmregs));
+	GPR_reg64 saved_const_regs[32];
+	std::memcpy(saved_const_regs, g_cpuConstRegs, sizeof(saved_const_regs));
+	const u32 saved_has_const = g_cpuHasConstReg;
+	const u32 saved_flushed_const = g_cpuFlushedConstReg;
+
+	xCMP(ptr8[EEMemory::GetRecompilerAccessFaultAddress()], 0);
+	xForwardJZ32 no_fault;
+	_eeFlushAllDirty();
+	if (stack_size != 0)
+		xADD(rsp, stack_size);
+	xADD(ptr64[&cpuRegs.cycle], scaled_cycles);
+	xJMP(DispatcherReg);
+
+	std::memcpy(x86regs, saved_x86regs, sizeof(saved_x86regs));
+	std::memcpy(xmmregs, saved_xmmregs, sizeof(saved_xmmregs));
+	std::memcpy(g_cpuConstRegs, saved_const_regs, sizeof(saved_const_regs));
+	g_cpuHasConstReg = saved_has_const;
+	g_cpuFlushedConstReg = saved_flushed_const;
+	no_fault.SetTarget();
 }
 
 u32 scaleblockcycles_clear()
@@ -2211,6 +2324,8 @@ void dyna_block_discard(u32 start, u32 sz)
 	eeRecPerfLog.Write(Color_StrongGray, "Clearing Manual Block @ 0x%08X  [size=%d]", start, sz * 4);
 	if (EmuConfig.Cpu.EnableExperimentalEETLB)
 	{
+		if (FullTLBStats::g_enabled)
+			FullTLBStats::RecordDiscard(start);
 		const int index = recBlocks.Index(start);
 		BASEBLOCKEX* block = recBlocks[index];
 		if (block && block->startpc == start)
@@ -2233,6 +2348,92 @@ void dyna_page_reset(u32 start, u32 sz)
 	mmap_MarkCountedRamPage(start);
 }
 
+
+static u32 recFullTLBRevalidateFetchGuard(FullTLBFetchGuard* guard);
+
+// Returns 1 when the block may run in the current context, 2 when one of its fetch pages
+// is not in the TLB (take the fetch exception), 0 to discard. The folded Status must still
+// select the compile-time translation mode. The ASID only matters for fetch pages that go
+// through the TLB; those are translated again, so processes sharing a physical text page
+// (fork, the same binary, global kernel module mappings) share the block. Data accesses
+// compare the translation cache with the keys published here.
+static u32 recFullTLBContextGuard(FullTLBContextGuard* guard)
+{
+	u32 reason;
+	const u32 asid = cpuRegs.CP0.n.EntryHi & 0xff;
+	if ((cpuRegs.CP0.n.Config & 0x7) != guard->config_key)
+		reason = FullTLBStats::ReasonConfig;
+	else if (EEMmu::TranslationStatusKey(cpuRegs.CP0.n.Status.val) != guard->status_key)
+		reason = FullTLBStats::ReasonStatus;
+	else
+	{
+		if (asid != guard->asid)
+		{
+			for (FullTLBFetchGuard* fetch_guard : guard->fetch_guards)
+			{
+				if (!fetch_guard)
+					continue;
+				const u32 result = recFullTLBRevalidateFetchGuard(fetch_guard);
+				if (result != 1)
+				{
+					if (result == 0)
+						FullTLBStats::g_last_discard_reason = FullTLBStats::ReasonAsid;
+					return result;
+				}
+			}
+		}
+
+		guard->raw_status = cpuRegs.CP0.n.Status.val & 0x1e;
+		guard->asid = asid;
+		guard->translation_keys[0] = EEMemory::GetRecompilerJitTranslationContextKey(false);
+		guard->translation_keys[1] = EEMemory::GetRecompilerJitTranslationContextKey(true);
+		EEMemory::UpdateRecompilerJitContextKeys();
+		FullTLBStats::Add(FullTLBStats::ContextContinued);
+		return 1;
+	}
+
+	FullTLBStats::g_last_discard_reason = reason;
+	return 0;
+}
+
+// A TLBWR/TLBWI replaced the entry this fetch page was translated through. Linux refills
+// the TLB constantly, and the same mapping often comes back in another slot, so translate
+// again and keep the block when the page still maps to the same physical page.
+static u32 recFullTLBFetchGuard(FullTLBFetchGuard* guard)
+{
+	return recFullTLBRevalidateFetchGuard(guard);
+}
+
+static u32 recFullTLBRevalidateFetchGuard(FullTLBFetchGuard* guard)
+{
+	const EEMmu::TranslationResult translation = EEMemory::ProbeFetchTranslation(guard->virtual_page);
+	if (translation.fault == EEMmu::Fault::Refill || translation.fault == EEMmu::Fault::Invalid)
+	{
+		// The page fell out of the TLB. Keep the block: JITCompile raises the fetch exception
+		// without compiling, and after the refill this guard revalidates the new entry.
+		FullTLBStats::Add(FullTLBStats::TlbFetchMiss);
+		return 2;
+	}
+	const u32 physical_page = translation.target == EEMmu::Target::Scratchpad ? translation.scratch_offset : translation.paddr;
+	if (translation.fault != EEMmu::Fault::None || translation.matched_tlb_index < 0 ||
+		translation.target != guard->target || translation.cache_mode != guard->cache_mode ||
+		physical_page != guard->physical_page)
+	{
+		FullTLBStats::g_last_discard_reason = FullTLBStats::ReasonTlbGeneration;
+		return 0;
+	}
+
+	guard->generation_address = EEMmu::GetTLBEntryGenerationAddress(static_cast<size_t>(translation.matched_tlb_index));
+	guard->generation = *guard->generation_address;
+	FullTLBStats::Add(FullTLBStats::TlbRevalidated);
+	return 1;
+}
+
+static void recFinishFullTLBBlockGuard()
+{
+	s_full_tlb_current_context_guard = nullptr;
+}
+
 static void memory_protect_recompiled_code(u32 startpc, u32 size)
 {
 	if (EmuConfig.Cpu.EnableExperimentalEETLB)
@@ -2250,6 +2451,11 @@ static void memory_protect_recompiled_code(u32 startpc, u32 size)
 		const u32 status_key = cpuRegs.CP0.n.Status.val & 0x1e;
 		const u32 config_key = cpuRegs.CP0.n.Config & 0x7;
 		const u32 asid_key = cpuRegs.CP0.n.EntryHi & 0xff;
+		FullTLBContextGuard* const context_guard = &s_full_tlb_context_guards.emplace_back(FullTLBContextGuard{
+			status_key, config_key, asid_key,
+			{EEMemory::GetRecompilerJitTranslationContextKey(false), EEMemory::GetRecompilerJitTranslationContextKey(true)},
+			EEMmu::TranslationStatusKey(cpuRegs.CP0.n.Status.val), {nullptr, nullptr}});
+		s_full_tlb_current_context_guard = context_guard;
 		const u32 first_virtual_page = startpc & ~vtlb_private::VTLB_PAGE_MASK;
 		const u32 last_address = startpc + (size - 1) * sizeof(u32);
 		const u32 last_virtual_page = last_address & ~vtlb_private::VTLB_PAGE_MASK;
@@ -2292,27 +2498,42 @@ static void memory_protect_recompiled_code(u32 startpc, u32 size)
 		// Avoid a runtime TLB lookup at every block entry. Each translated fetch page watches
 		// only the TLB entry which supplied it, so unrelated TLBWI/TLBWR operations leave this
 		// block alive. The context key still catches privilege, ASID, and direct-segment changes.
+		xLoadFarAddr(arg2reg, context_guard);
 		xMOV(eax, ptr32[&cpuRegs.CP0.n.Status.val]);
 		xAND(eax, 0x1e);
-		xCMP(eax, status_key);
+		xCMP(eax, ptr32[arg2reg + static_cast<sptr>(offsetof(FullTLBContextGuard, raw_status))]);
 		xForwardJNE8 mapping_changed_status;
 		xMOV(eax, ptr32[&cpuRegs.CP0.n.Config]);
 		xAND(eax, 0x7);
-		xCMP(eax, config_key);
+		xCMP(eax, ptr32[arg2reg + static_cast<sptr>(offsetof(FullTLBContextGuard, config_key))]);
 		xForwardJNE8 mapping_changed_config;
 		xMOV(eax, ptr32[&cpuRegs.CP0.n.EntryHi]);
 		xAND(eax, 0xff);
-		xCMP(eax, asid_key);
+		xCMP(eax, ptr32[arg2reg + static_cast<sptr>(offsetof(FullTLBContextGuard, asid))]);
 		xForwardJNE8 mapping_changed_asid;
-		xForwardJump8 mapping_context_matches;
+		// Same context as the last validation: publish its translation keys for data accesses.
+		xMOV(eax, ptr32[arg2reg + static_cast<sptr>(offsetof(FullTLBContextGuard, translation_keys))]);
+		xMOV(ptr32[&EEMemory::g_recompilerJitContextKeys[0]], eax);
+		xMOV(eax, ptr32[arg2reg + static_cast<sptr>(offsetof(FullTLBContextGuard, translation_keys) + 4)]);
+		xMOV(ptr32[&EEMemory::g_recompilerJitContextKeys[1]], eax);
+		xForwardJump32 mapping_context_matches;
 
 		mapping_changed_status.SetTarget();
 		mapping_changed_config.SetTarget();
 		mapping_changed_asid.SetTarget();
+		xMOV(arg1reg, arg2reg);
+		xFastCall(reinterpret_cast<const void*>(recFullTLBContextGuard));
+		xCMP(eax, 1);
+		xForwardJE32 context_still_valid;
+		xForwardJA32 context_fetch_missing;
 		xMOV(arg1regd, startpc);
 		xMOV(arg2regd, size);
 		xJMP(DispatchBlockDiscard);
+		context_fetch_missing.SetTarget();
+		xMOV(ptr32[&cpuRegs.pc], startpc);
+		xJMP(JITCompile);
 		mapping_context_matches.SetTarget();
+		context_still_valid.SetTarget();
 
 		for (u32 i = 0; i < protected_page_count; i++)
 		{
@@ -2320,12 +2541,31 @@ static void memory_protect_recompiled_code(u32 startpc, u32 size)
 			if (!page.translation_generation_address)
 				continue;
 
-			xCMP(ptr32[page.translation_generation_address], page.translation_generation);
-			xForwardJE8 mapping_entry_unchanged;
+			const bool scratchpad = page.fetch.translation.target == EEMmu::Target::Scratchpad;
+			FullTLBFetchGuard* const fetch_guard = &s_full_tlb_fetch_guards.emplace_back(FullTLBFetchGuard{
+				page.translation_generation_address, page.translation_generation, page.fetch.virtual_page,
+				scratchpad ? page.fetch.translation.scratch_offset : page.fetch.translation.paddr,
+				page.fetch.translation.target, page.fetch.translation.cache_mode});
+			context_guard->fetch_guards[i] = fetch_guard;
+
+			xLoadFarAddr(rax, fetch_guard);
+			xMOV(arg1reg, ptrNative[rax]);
+			xMOV(arg1regd, ptr32[arg1reg]);
+			xCMP(arg1regd, ptr32[rax + static_cast<sptr>(offsetof(FullTLBFetchGuard, generation))]);
+			xForwardJE32 mapping_entry_unchanged;
+			xMOV(arg1reg, rax);
+			xFastCall(reinterpret_cast<const void*>(recFullTLBFetchGuard));
+			xCMP(eax, 1);
+			xForwardJE32 mapping_entry_revalidated;
+			xForwardJA32 mapping_entry_missing;
 			xMOV(arg1regd, startpc);
 			xMOV(arg2regd, size);
 			xJMP(DispatchBlockDiscard);
+			mapping_entry_missing.SetTarget();
+			xMOV(ptr32[&cpuRegs.pc], startpc);
+			xJMP(JITCompile);
 			mapping_entry_unchanged.SetTarget();
+			mapping_entry_revalidated.SetTarget();
 		}
 
 		// All Full TLB EE writes advance a physical-page generation. DMA and external writers
@@ -2334,6 +2574,8 @@ static void memory_protect_recompiled_code(u32 startpc, u32 size)
 		{
 			xCMP(ptr32[protected_pages[i].write_generation_address], protected_pages[i].write_generation);
 			xForwardJE8 page_unchanged;
+			if (FullTLBStats::g_enabled)
+				xMOV(ptr32[&FullTLBStats::g_last_discard_reason], FullTLBStats::ReasonWriteGeneration);
 			xMOV(arg1regd, startpc);
 			xMOV(arg2regd, size);
 			xJMP(DispatchBlockDiscard);
@@ -2509,10 +2751,315 @@ static bool recSkipTimeoutLoop(s32 reg, bool is_timeout_loop)
 	return true;
 }
 
+namespace
+{
+	struct FullTLBCompileScope
+	{
+		Common::Timer::Value start = 0;
+		const u8* start_ptr = nullptr;
+
+		FullTLBCompileScope(u32 startpc)
+		{
+			if (!FullTLBStats::g_enabled)
+				return;
+			start = Common::Timer::GetCurrentValue();
+			start_ptr = recPtr;
+			FullTLBStats::Add(FullTLBStats::Recompiles);
+			if (startpc >= 0x80000000)
+				FullTLBStats::Add(FullTLBStats::RecompilesKernel);
+		}
+
+		~FullTLBCompileScope()
+		{
+			if (!FullTLBStats::g_enabled)
+				return;
+			FullTLBStats::g_compile_ticks += Common::Timer::GetCurrentValue() - start;
+			if (recPtr > start_ptr)
+				FullTLBStats::Add(FullTLBStats::RecompileBytes, static_cast<u32>(recPtr - start_ptr));
+		}
+	};
+
+	struct FullTLBDiscardSite
+	{
+		u32 count;
+		u32 reasons[FullTLBStats::DiscardContent + 1];
+	};
+
+	std::unordered_map<u32, FullTLBDiscardSite> s_full_tlb_discard_sites;
+	Common::Timer::Value s_full_tlb_stats_last_report = 0;
+	u64 s_full_tlb_stats_last_cycle = 0;
+
+#ifdef _WIN32
+	// EE thread sampler for the Full TLB stats. The sampler suspends the EE thread, so it must
+	// not allocate or take locks while the thread is stopped (the EE may hold the heap lock).
+	struct FullTLBSample
+	{
+		u64 rip;
+		u32 guest_pc;
+	};
+
+	static constexpr u32 FULL_TLB_MAX_SAMPLES = 16384;
+	std::mutex s_full_tlb_sample_lock;
+	FullTLBSample s_full_tlb_samples[FULL_TLB_MAX_SAMPLES];
+	u32 s_full_tlb_sample_count = 0;
+	std::atomic<HANDLE> s_full_tlb_ee_thread{nullptr};
+	DWORD s_full_tlb_ee_thread_id = 0;
+	bool s_full_tlb_sampler_started = false;
+
+	void FullTLBSamplerThread()
+	{
+		timeBeginPeriod(1);
+		for (;;)
+		{
+			Sleep(1);
+			const HANDLE thread = s_full_tlb_ee_thread.load();
+			if (!thread)
+				continue;
+
+			if (SuspendThread(thread) == static_cast<DWORD>(-1))
+				continue;
+			CONTEXT context = {};
+			context.ContextFlags = CONTEXT_CONTROL;
+			const BOOL got_context = GetThreadContext(thread, &context);
+			const u32 guest_pc = cpuRegs.pc;
+			ResumeThread(thread);
+			if (!got_context)
+				continue;
+
+			std::unique_lock lock(s_full_tlb_sample_lock);
+			if (s_full_tlb_sample_count < FULL_TLB_MAX_SAMPLES)
+				s_full_tlb_samples[s_full_tlb_sample_count++] = {context.Rip, guest_pc};
+		}
+	}
+
+	void FullTLBRegisterEEThread()
+	{
+		if (!FullTLBStats::g_enabled)
+			return;
+
+		const DWORD id = GetCurrentThreadId();
+		if (id != s_full_tlb_ee_thread_id)
+		{
+			const HANDLE handle = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, id);
+			// The sampler may still be using the old handle; leak it rather than race.
+			s_full_tlb_ee_thread.store(handle);
+			s_full_tlb_ee_thread_id = id;
+		}
+
+		if (!s_full_tlb_sampler_started)
+		{
+			s_full_tlb_sampler_started = true;
+			std::thread(FullTLBSamplerThread).detach();
+		}
+	}
+
+	std::string FullTLBHostSymbol(u64 rip)
+	{
+		static bool initialized = false;
+		if (!initialized)
+		{
+			initialized = true;
+			SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+			SymInitialize(GetCurrentProcess(), nullptr, TRUE);
+		}
+
+		alignas(SYMBOL_INFO) char buffer[sizeof(SYMBOL_INFO) + 256];
+		SYMBOL_INFO* symbol = reinterpret_cast<SYMBOL_INFO*>(buffer);
+		symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+		symbol->MaxNameLen = 255;
+		DWORD64 displacement = 0;
+		if (SymFromAddr(GetCurrentProcess(), rip, &displacement, symbol))
+			return symbol->Name;
+
+		HMODULE module = nullptr;
+		char module_name[MAX_PATH] = {};
+		if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+				reinterpret_cast<LPCSTR>(rip), &module) &&
+			GetModuleFileNameA(module, module_name, MAX_PATH))
+		{
+			const char* base = std::strrchr(module_name, '\\');
+			return fmt::format("{}!?", base ? base + 1 : module_name);
+		}
+		return "?";
+	}
+
+	void FullTLBReportSamples()
+	{
+		std::vector<FullTLBSample> samples;
+		{
+			std::unique_lock lock(s_full_tlb_sample_lock);
+			samples.assign(s_full_tlb_samples, s_full_tlb_samples + s_full_tlb_sample_count);
+			s_full_tlb_sample_count = 0;
+		}
+		if (samples.empty())
+			return;
+
+		const u64 ee_begin = reinterpret_cast<u64>(SysMemory::GetEERec());
+		const u64 ee_end = reinterpret_cast<u64>(SysMemory::GetEERecEnd());
+		const u64 iop_begin = reinterpret_cast<u64>(SysMemory::GetIOPRec());
+		const u64 iop_end = reinterpret_cast<u64>(SysMemory::GetIOPRecEnd());
+		const u64 vu0_begin = reinterpret_cast<u64>(SysMemory::GetVU0Rec());
+		const u64 vu0_end = reinterpret_cast<u64>(SysMemory::GetVU0RecEnd());
+		const u64 vu1_begin = reinterpret_cast<u64>(SysMemory::GetVU1Rec());
+		const u64 vu1_end = reinterpret_cast<u64>(SysMemory::GetVU1RecEnd());
+
+		// Map EE JIT samples to blocks. recBlocks is EE-thread state, and this runs on the EE thread.
+		std::vector<std::pair<u64, const BASEBLOCKEX*>> blocks;
+		for (int i = 0;; i++)
+		{
+			const BASEBLOCKEX* block = recBlocks[i];
+			if (!block)
+				break;
+			blocks.emplace_back(block->fnptr, block);
+		}
+		std::sort(blocks.begin(), blocks.end(),
+			[](const auto& a, const auto& b) { return a.first < b.first; });
+
+		std::unordered_map<std::string, u32> buckets;
+		std::unordered_map<u64, std::string> symbol_cache;
+		u32 jit_kernel = 0, jit_user = 0, ee_jit = 0;
+		for (const FullTLBSample& sample : samples)
+		{
+			std::string key;
+			if (sample.rip >= ee_begin && sample.rip < ee_end)
+			{
+				ee_jit++;
+				if (sample.guest_pc >= 0x80000000)
+					jit_kernel++;
+				else
+					jit_user++;
+
+				auto it = std::upper_bound(blocks.begin(), blocks.end(), sample.rip,
+					[](u64 rip, const auto& b) { return rip < b.first; });
+				if (it != blocks.begin() && sample.rip < std::prev(it)->first + std::prev(it)->second->x86size)
+				{
+					const BASEBLOCKEX* block = std::prev(it)->second;
+					const u32 offset = static_cast<u32>(sample.rip - block->fnptr);
+					key = fmt::format("EEJIT blk {:08x} (+{:x}/{:x})", block->startpc, offset & ~0x3fu, block->x86size);
+				}
+				else if (sample.rip < reinterpret_cast<u64>(s_ee_rec_dispatchers_end))
+				{
+					key = "EEJIT dispatchers/kernels";
+				}
+				else
+				{
+					key = "EEJIT other (thunk/discarded)";
+				}
+			}
+			else if (sample.rip >= iop_begin && sample.rip < iop_end)
+				key = "IOP JIT";
+			else if (sample.rip >= vu0_begin && sample.rip < vu0_end)
+				key = "VU0 JIT";
+			else if (sample.rip >= vu1_begin && sample.rip < vu1_end)
+				key = "VU1 JIT";
+			else
+			{
+				auto it = symbol_cache.find(sample.rip);
+				if (it == symbol_cache.end())
+					it = symbol_cache.emplace(sample.rip, FullTLBHostSymbol(sample.rip)).first;
+				key = it->second;
+			}
+			buckets[key]++;
+		}
+
+		std::vector<std::pair<std::string, u32>> sorted(buckets.begin(), buckets.end());
+		std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+		const double total = static_cast<double>(samples.size());
+		Console.WriteLn("[FullTLBStats]   samples=%zu eejit=%.1f%% (guest kernel %u user %u)", samples.size(),
+			ee_jit * 100.0 / total, jit_kernel, jit_user);
+		const size_t top = std::min<size_t>(sorted.size(), 20);
+		for (size_t i = 0; i < top; i++)
+			Console.WriteLn("[FullTLBStats]     %5.1f%% %s", sorted[i].second * 100.0 / total, sorted[i].first.c_str());
+	}
+#else
+	void FullTLBRegisterEEThread() {}
+	void FullTLBReportSamples() {}
+#endif
+} // namespace
+
+void FullTLBStats::RecordDiscard(u32 startpc)
+{
+	const u32 reason = g_last_discard_reason <= DiscardContent ? g_last_discard_reason : DiscardContent;
+	g_last_discard_reason = ReasonContent;
+	g_counters[reason]++;
+	g_counters[startpc >= 0x80000000 ? DiscardKernel : DiscardUser]++;
+	FullTLBDiscardSite& site = s_full_tlb_discard_sites[startpc];
+	site.count++;
+	site.reasons[reason]++;
+}
+
+void FullTLBStats::MaybeReport()
+{
+	const Common::Timer::Value now = Common::Timer::GetCurrentValue();
+	if (s_full_tlb_stats_last_report == 0)
+	{
+		s_full_tlb_stats_last_report = now;
+		return;
+	}
+
+	const double elapsed = Common::Timer::ConvertValueToSeconds(now - s_full_tlb_stats_last_report);
+	if (elapsed < 1.0)
+		return;
+	s_full_tlb_stats_last_report = now;
+
+	const u32* c = g_counters;
+	const double ee_speed = static_cast<double>(cpuRegs.cycle - s_full_tlb_stats_last_cycle) * 100.0 / (PS2CLK * elapsed);
+	s_full_tlb_stats_last_cycle = cpuRegs.cycle;
+	Console.WriteLn("[FullTLBStats] EE speed=%.1f%% of real time", ee_speed);
+	const double compile_pct = Common::Timer::ConvertValueToSeconds(g_compile_ticks) * 100.0 / elapsed;
+	Console.WriteLn("[FullTLBStats] %.2fs compile=%.1f%% recompiles=%u (kernel %u) bytes=%u | "
+					"discards status=%u config=%u asid=%u tlbgen=%u writegen=%u content=%u (kernel %u user %u) | "
+					"jit_resets=%u recClear=%u | fastmem_faults=%u (slowpath %u) | "
+					"xlat_miss page=%u context=%u gen=%u | events=%u | continued=%u tlb_revalidated=%u tlb_fetch_miss=%u",
+		elapsed, compile_pct, c[Recompiles], c[RecompilesKernel], c[RecompileBytes],
+		c[DiscardStatus], c[DiscardConfig], c[DiscardAsid], c[DiscardTlbGeneration], c[DiscardWriteGeneration],
+		c[DiscardContent], c[DiscardKernel], c[DiscardUser],
+		c[JitResets], c[RecClears], c[FastmemFaults], c[FastmemFaultsSlowpath],
+		c[TranslationMissPage], c[TranslationMissContext], c[TranslationMissGeneration], c[EventTests],
+		c[ContextContinued], c[TlbRevalidated], c[TlbFetchMiss]);
+
+	static constexpr const char* exc_names[32] = {"Int", "Mod", "TLBL", "TLBS", "AdEL", "AdES", "IBE", "DBE",
+		"Sys", "Bp", "RI", "CpU", "Ov", "Tr", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24",
+		"25", "26", "27", "28", "29", "30", "31"};
+	std::string exc_line;
+	for (u32 i = 0; i < 32; i++)
+	{
+		if (g_exceptions[i])
+			exc_line += fmt::format(" {}={}", exc_names[i], g_exceptions[i]);
+	}
+	if (!exc_line.empty())
+		Console.WriteLn("[FullTLBStats]   exceptions:%s", exc_line.c_str());
+
+	if (!s_full_tlb_discard_sites.empty())
+	{
+		std::vector<std::pair<u32, FullTLBDiscardSite>> sites(s_full_tlb_discard_sites.begin(), s_full_tlb_discard_sites.end());
+		const size_t top = std::min<size_t>(sites.size(), 8);
+		std::partial_sort(sites.begin(), sites.begin() + top, sites.end(),
+			[](const auto& a, const auto& b) { return a.second.count > b.second.count; });
+		std::string line;
+		for (size_t i = 0; i < top; i++)
+		{
+			const FullTLBDiscardSite& site = sites[i].second;
+			line += fmt::format(" {:08x}x{}(st{}/cf{}/as{}/tg{}/wg{}/ct{})", sites[i].first, site.count,
+				site.reasons[DiscardStatus], site.reasons[DiscardConfig], site.reasons[DiscardAsid],
+				site.reasons[DiscardTlbGeneration], site.reasons[DiscardWriteGeneration], site.reasons[DiscardContent]);
+		}
+		Console.WriteLn("[FullTLBStats]   top discards (%zu sites):%s", sites.size(), line.c_str());
+		s_full_tlb_discard_sites.clear();
+	}
+
+	FullTLBReportSamples();
+
+	std::fill(std::begin(g_counters), std::end(g_counters), 0u);
+	std::fill(std::begin(g_exceptions), std::end(g_exceptions), 0u);
+	g_compile_ticks = 0;
+}
+
 static void recRecompile(const u32 startpc)
 {
 	u32 i = 0;
 	u32 willbranch3 = 0;
+	const FullTLBCompileScope full_tlb_compile_scope(startpc);
 
 	pxAssert(startpc);
 
@@ -2537,7 +3084,10 @@ static void recRecompile(const u32 startpc)
 		// Otherwise the compiled pointer is written into recLutUnmapped and aliases
 		// every virtual address with the same 64KB offset (needs proper testing).
 		recMapFullTLBPage(startpc);
-		s_rec_fetch_page = EEMemory::TranslateFetchPage(startpc);
+		s_full_tlb_current_context_guard = nullptr;
+		// A TLB miss here used to unwind out of the JIT through CancelInstruction(), and every
+		// unwind went through the Qt event loop. JITCompile dispatches to the vector instead.
+		s_rec_fetch_page = EEMemory::TranslateFetchPage(startpc, false);
 		// A miss raised while JITCompile is resolving the block start must enter the
 		// guest exception vector without publishing a block compiled from paddr 0.
 		if (s_rec_fetch_page.translation.fault != EEMmu::Fault::None)
@@ -2622,6 +3172,7 @@ static void recRecompile(const u32 startpc)
 
 	_initX86regs();
 	_initXMMregs();
+	vtlb_BeginFullTLBFastmemBlock();
 
 #ifdef TRACE_BLOCKS
 	xFastCall((void*)PreBlockCheck, pc);
@@ -3116,7 +3667,16 @@ StartRecomp:
 
 	pxAssert(xGetPtr() < SysMemory::GetEERecEnd());
 
-	s_pCurBlockEx->x86size = static_cast<u32>(xGetPtr() - recPtr);
+	// Slow paths are unreachable from normal block fallthrough because every block
+	// has already emitted its terminal dispatch above. Keep them out of the block's
+	// profiling size, but advance recPtr past them so the next block cannot overwrite
+	// them.
+	const u8* block_code_end = xGetPtr();
+	vtlb_EndFullTLBFastmemBlock();
+	pxAssert(xGetPtr() < SysMemory::GetEERecEnd());
+
+	s_pCurBlockEx->x86size = static_cast<u32>(block_code_end - recPtr);
+	recFinishFullTLBBlockGuard();
 
 #if 0
 	// Example: Dump both x86/EE code

@@ -122,6 +122,21 @@ namespace EEMmu
 		return (status & STATUS_EXL_ERL) != 0 || (status & STATUS_KSU_MASK) == 0;
 	}
 
+	// The Status bits that affect address translation, folded so that EXL/ERL and KSU values
+	// which select the same operating mode compare equal: KSU-shaped mode bits plus ERL.
+	// Reserved KSU=3 translates as kernel, matching TranslateAddress().
+	constexpr u32 TranslationStatusKey(u32 status)
+	{
+		constexpr u32 STATUS_EXL = 1U << 1;
+		constexpr u32 STATUS_ERL = 1U << 2;
+		constexpr u32 STATUS_KSU_MASK = 3U << 3;
+		const u32 erl = status & STATUS_ERL;
+		if ((status & (STATUS_EXL | STATUS_ERL)) != 0)
+			return erl;
+		const u32 ksu = status & STATUS_KSU_MASK;
+		return ksu == STATUS_KSU_MASK ? 0 : ksu;
+	}
+
 	constexpr bool IsUserMode(u32 status)
 	{
 		constexpr u32 STATUS_EXL_ERL = (1U << 1) | (1U << 2);
@@ -131,6 +146,10 @@ namespace EEMmu
 
 	/// Translates one EE virtual access without reading or modifying global CPU state.
 	TranslationResult TranslateAddress(const TranslationContext& context, u32 vaddr, AccessType access_type);
+
+	// Lets TranslateAddress match the live tlb[] array through a precomputed table. Every write
+	// to tlb[] must then be followed by InvalidateTLBEntry()/InvalidateTranslations().
+	void EnableFastTLBLookup(bool enable);
 
 	/// Builds precise COP0 exception state without reading or modifying global CPU state.
 	ExceptionResult BuildException(const ExceptionRegisters& registers, const ExceptionRequest& request);

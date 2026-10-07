@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Common.h"
+#include "FullTLBStats.h"
 #include "EEMemory.h"
 #include "EEMmu.h"
 
@@ -78,6 +79,7 @@ void cpuReset()
 		cpuRegs.CP0.n.Random = 47;
 		cpuRegs.CP0.n.Wired = 0;
 		EEMmu::InvalidateTranslations();
+		EEMmu::EnableFastTLBLookup(true);
 	}
 
 	cpuRegs.nextEventCycle = cpuRegs.cycle + 4;
@@ -119,6 +121,7 @@ void cpuEESynchronousException(u32 cause_code, u32 fault_pc, bool branch_delay)
 	const u32 trace_sp = cpuRegs.GPR.n.sp.UL[0];
 	const u32 trace_ra = cpuRegs.GPR.n.ra.UL[0];
 
+	FullTLBStats::AddException(cause_code >> 2);
 	const EEMmu::ExceptionResult result =
 		EEMmu::BuildSynchronousException(registers, cause_code, fault_pc, branch_delay);
 	cpuRegs.CP0.n.Status.val = result.registers.status;
@@ -160,6 +163,7 @@ __ri void cpuException(u32 code, u32 bd)
 	bool errLevel2, checkStatus;
 	u32 offset = 0;
 
+	FullTLBStats::AddException((code & 0x7c) >> 2);
 	cpuRegs.branch = 0; // Tells the interpreter that an exception occurred during a branch.
 	cpuRegs.CP0.n.Cause = code & 0xffff;
 
@@ -252,6 +256,7 @@ bool cpuEETlbException(
 	if (!result.taken)
 		return false;
 
+	FullTLBStats::AddException(result.registers.cause >> 2);
 	cpuRegs.CP0.n.Status.val = result.registers.status;
 	cpuRegs.CP0.n.Cause = result.registers.cause;
 	cpuRegs.CP0.n.EPC = result.registers.epc;

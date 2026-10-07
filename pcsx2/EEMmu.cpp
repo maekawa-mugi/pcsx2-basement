@@ -5,6 +5,11 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
+
+#if defined(_M_X64) || defined(__x86_64__)
+#include <emmintrin.h>
+#endif
 
 namespace EEMmu
 {
@@ -72,6 +77,80 @@ namespace EEMmu
 	static bool MatchesScratchpadEntry(const tlbs& entry, u32 vaddr)
 	{
 		return ((vaddr ^ GetEntryVirtualBase(entry)) & ~0x3fffU) == 0;
+	}
+
+	// Match table for the live tlb[] array: entry i matches vaddr when
+	// (vaddr & vaddr_mask[i]) == vaddr_base[i] and ((asid ^ asid_value[i]) & asid_mask[i]) == 0.
+	// Rebuilt lazily for entries flagged by InvalidateTLBEntry()/InvalidateTranslations().
+	static bool s_fast_lookup_enabled = false;
+	static constexpr u64 ALL_TLB_ENTRIES = (1ULL << TLB_ENTRY_COUNT) - 1;
+	static u64 s_fast_lookup_dirty = ALL_TLB_ENTRIES;
+	alignas(16) static u32 s_fast_vaddr_mask[TLB_ENTRY_COUNT];
+	alignas(16) static u32 s_fast_vaddr_base[TLB_ENTRY_COUNT];
+	alignas(16) static u32 s_fast_asid_mask[TLB_ENTRY_COUNT];
+	alignas(16) static u32 s_fast_asid_value[TLB_ENTRY_COUNT];
+
+	static void RebuildFastLookupEntry(size_t index, const tlbs& entry)
+	{
+		if (entry.isSPR() && IsValidScratchpadEntry(entry))
+		{
+			s_fast_vaddr_mask[index] = ~0x3fffU;
+			s_fast_vaddr_base[index] = GetEntryVirtualBase(entry) & ~0x3fffU;
+		}
+		else
+		{
+			const u32 comparison_mask = ENTRY_VPN2_MASK & ~(entry.Mask() & 0xfff);
+			s_fast_vaddr_mask[index] = comparison_mask << 13;
+			s_fast_vaddr_base[index] = (entry.EntryHi.VPN2 & comparison_mask) << 13;
+		}
+		s_fast_asid_mask[index] = entry.isGlobal() ? 0 : 0xff;
+		s_fast_asid_value[index] = entry.EntryHi.ASID;
+	}
+
+	// Bit i set when tlb entry i matches; same predicate as the MatchesASID/Matches*Entry loop.
+	static u64 FastLookupMatches(const tlbs* entries, u32 vaddr, u8 asid)
+	{
+		if (s_fast_lookup_dirty)
+		{
+			for (u64 dirty = s_fast_lookup_dirty; dirty; dirty &= dirty - 1)
+			{
+				const size_t index = static_cast<size_t>(std::countr_zero(dirty));
+				RebuildFastLookupEntry(index, entries[index]);
+			}
+			s_fast_lookup_dirty = 0;
+		}
+
+		u64 matches = 0;
+#if defined(_M_X64) || defined(__x86_64__)
+		const __m128i v_vaddr = _mm_set1_epi32(static_cast<int>(vaddr));
+		const __m128i v_asid = _mm_set1_epi32(asid);
+		const __m128i zero = _mm_setzero_si128();
+		for (size_t i = 0; i < TLB_ENTRY_COUNT; i += 4)
+		{
+			const __m128i mask = _mm_load_si128(reinterpret_cast<const __m128i*>(&s_fast_vaddr_mask[i]));
+			const __m128i base = _mm_load_si128(reinterpret_cast<const __m128i*>(&s_fast_vaddr_base[i]));
+			const __m128i amask = _mm_load_si128(reinterpret_cast<const __m128i*>(&s_fast_asid_mask[i]));
+			const __m128i avalue = _mm_load_si128(reinterpret_cast<const __m128i*>(&s_fast_asid_value[i]));
+			const __m128i vaddr_hit = _mm_cmpeq_epi32(_mm_and_si128(v_vaddr, mask), base);
+			const __m128i asid_hit = _mm_cmpeq_epi32(_mm_and_si128(_mm_xor_si128(v_asid, avalue), amask), zero);
+			const int bits = _mm_movemask_ps(_mm_castsi128_ps(_mm_and_si128(vaddr_hit, asid_hit)));
+			matches |= static_cast<u64>(bits) << i;
+		}
+#else
+		for (size_t i = 0; i < TLB_ENTRY_COUNT; i++)
+		{
+			const bool hit = (vaddr & s_fast_vaddr_mask[i]) == s_fast_vaddr_base[i] &&
+			                 ((asid ^ s_fast_asid_value[i]) & s_fast_asid_mask[i]) == 0;
+			matches |= static_cast<u64>(hit) << i;
+		}
+#endif
+		return matches;
+	}
+
+	void EnableFastTLBLookup(bool enable)
+	{
+		s_fast_lookup_enabled = enable;
+		s_fast_lookup_dirty = ALL_TLB_ENTRIES;
 	}
 
 	static TranslationResult MakeDirectResult(u32 paddr, u8 cache_mode, Warning warnings)
@@ -151,7 +230,24 @@ namespace EEMmu
 		const tlbs* matched_entry = nullptr;
 		bool matched_scratchpad = false;
 		const size_t entry_count = context.tlb_entries ? std::min(context.tlb_entry_count, TLB_ENTRY_COUNT) : 0;
-		for (size_t i = 0; i < entry_count; i++)
+		if (s_fast_lookup_enabled && context.tlb_entries == tlb && entry_count == TLB_ENTRY_COUNT)
+		{
+			const u64 matches = FastLookupMatches(context.tlb_entries, vaddr, context.asid);
+			if (matches)
+			{
+				const tlbs& entry = context.tlb_entries[std::countr_zero(matches)];
+				matched_entry = &entry;
+				matched_scratchpad = entry.isSPR() && IsValidScratchpadEntry(entry);
+				// Multiple matching entries are architecturally undefined; lowest index wins.
+				if (matches & (matches - 1))
+					warnings |= Warning::MultipleMatch;
+				if (!IsValidPageMask(entry.Mask()))
+					warnings |= Warning::InvalidPageMask;
+				if (entry.isSPR() && !matched_scratchpad)
+					warnings |= Warning::InvalidScratchpad;
+			}
+		}
+		else for (size_t i = 0; i < entry_count; i++)
 		{
 			const tlbs& entry = context.tlb_entries[i];
 			if (!MatchesASID(entry, context.asid))
@@ -428,12 +524,14 @@ namespace EEMmu
 
 	void InvalidateTLBEntry(size_t index)
 	{
+		s_fast_lookup_dirty |= 1ULL << index;
 		AdvanceGeneration(s_tlb_entry_generations[index]);
 		AdvanceGeneration(s_translation_generation);
 	}
 
 	void InvalidateTranslations()
 	{
+		s_fast_lookup_dirty = ALL_TLB_ENTRIES;
 		for (u32& generation : s_tlb_entry_generations)
 			AdvanceGeneration(generation);
 		AdvanceGeneration(s_translation_generation);

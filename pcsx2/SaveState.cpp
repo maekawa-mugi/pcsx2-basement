@@ -8,6 +8,7 @@
 #include "Cache.h"
 #include "Config.h"
 #include "Counters.h"
+#include "EEMmu.h"
 #include "DebugTools/Breakpoints.h"
 #include "DebugTools/SymbolImporter.h"
 #include "Elfheader.h"
@@ -68,7 +69,13 @@ static void PostLoadPrep()
 {
 	resetCache();
 //	WriteCP0Status(cpuRegs.CP0.n.Status.val);
-	if (!EmuConfig.Cpu.EnableExperimentalEETLB)
+	if (EmuConfig.Cpu.EnableExperimentalEETLB)
+	{
+		// tlb[] was replaced wholesale: drop every cached translation and block guard
+		// generation built from the old entries (needs proper testing).
+		EEMmu::InvalidateTranslations();
+	}
+	else
 	{
 		for (int i = 0; i < 48; i++)
 		{

@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstring>
+#include <iterator>
 #include <map>
 
 #include "common/Assertions.h"
@@ -145,6 +146,9 @@ protected:
 
 	// switch to a hash map later?
 	std::multimap<u32, uptr> links;
+	// Reverse index of `links`: patch site (jumpptr) -> target pc. Lets Remove() find the
+	// outgoing links of the discarded code without walking every link in the JIT.
+	std::map<uptr, u32> link_sites;
 	uptr recompiler;
 	BaseBlockArray blocks;
 
@@ -213,7 +217,29 @@ public:
 			}
 		} while (idx++ < last);
 
-		// TODO: remove links from this block?
+		// Erase outgoing links this block range itself created -- entries in
+		// `links` whose jumpptr (the patch site) falls inside the code we're
+		// discarding here. Without this, BaseBlocks::New() can later find a
+		// stale entry filed under some completely unrelated target PC and
+		// blindly patch through that jumpptr once this code-cache memory has
+		// been handed out again to a different, currently-live block --
+		// silently corrupting its machine code. Upstream TODO since 2009
+		// (c483f17331); hit hard by kload's execve() into /minish, which
+		// discards and immediately recompiles heavily over the same
+		// code-cache addresses.
+		// Look the sites up by address instead of walking every link: Full TLB discards
+		// blocks thousands of times per second (needs proper testing).
+		for (int j = first; j <= last; j++)
+		{
+			const uptr fn = blocks[j].fnptr;
+			const uptr fn_end = fn + blocks[j].x86size;
+			for (auto site = link_sites.lower_bound(fn); site != link_sites.end() && site->first < fn_end;)
+			{
+				EraseLink(site->second, site->first);
+				site = link_sites.erase(site);
+			}
+		}
+
 		blocks.erase(first, last + 1);
 	}
 
@@ -223,6 +249,21 @@ public:
 	{
 		blocks.clear();
 		links.clear();
+		link_sites.clear();
+	}
+
+private:
+	void EraseLink(u32 pc, uptr jumpptr)
+	{
+		std::pair<linkiter_t, linkiter_t> range = links.equal_range(pc);
+		for (linkiter_t i = range.first; i != range.second; ++i)
+		{
+			if (i->second == jumpptr)
+			{
+				links.erase(i);
+				return;
+			}
+		}
 	}
 };
 
