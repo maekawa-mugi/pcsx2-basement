@@ -631,7 +631,7 @@ bool GSRunner::ParseCommandLineArgs(int argc, char* argv[], VMBootParameters& pa
 				}
 				
 				Console.WriteLn(fmt::format("Setting number of software threads to {}", swthreads));
-				s_settings_interface.SetIntValue("EmuCore/GS", "SWExtraThreads", swthreads);
+				s_settings_interface.SetIntValue("EmuCore/GS", "extrathreads", swthreads);
 				continue;
 			}
 			else if (CHECK_ARG_PARAM("-renderhacks"))
