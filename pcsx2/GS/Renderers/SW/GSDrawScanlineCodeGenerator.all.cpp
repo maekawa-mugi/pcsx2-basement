@@ -255,6 +255,15 @@ void GSDrawScanlineCodeGenerator::alltrue(const XYm& test)
 	je("step", Xbyak::CodeGenerator::T_NEAR);
 }
 
+#if USING_YMM
+void GSDrawScanlineCodeGenerator::alltrueK()
+{
+	// All 8 lanes rejected: kortestb sets CF when (k | k) == 0xff.
+	actual.kortestb(Xbyak::Opmask(2), Xbyak::Opmask(2));
+	actual.jc("step", Xbyak::CodeGenerator::T_NEAR);
+}
+#endif
+
 void GSDrawScanlineCodeGenerator::blend(const XYm& a, const XYm& b, const XYm& mask)
 {
 	if (hasAVX512)
@@ -725,6 +734,11 @@ void GSDrawScanlineCodeGenerator::Init()
 			por(_test, xym0);
 			shl(a1.cvt32(), 5); // * sizeof(m_test[0])
 		}
+
+#if USING_YMM
+		if (useKMask())
+			actual.vpmovd2m(Xbyak::Opmask(2), _test);
+#endif
 	}
 	else
 	{
@@ -1111,6 +1125,8 @@ void GSDrawScanlineCodeGenerator::Step()
 		neg(eax);               // eax = -steps
 		cmovs(eax, t2.cvt32()); // if (eax < 0) eax = 0;
 		pmovsxbd(_test, ptr[rax + _m_const + offsetof(GSScanlineConstantData256B, m_test[0])]);
+		if (useKMask())
+			actual.vpmovd2m(Xbyak::Opmask(2), _test);
 #endif
 	}
 }
@@ -1231,12 +1247,28 @@ void GSDrawScanlineCodeGenerator::TestZ(const XYm& temp1, const XYm& temp2)
 		{
 			case ZTST_GEQUAL:
 				// test |= zso < zdo; // ~(zso >= zdo)
+#if USING_YMM
+				if (useKMask())
+				{
+					actual.vpcmpgtd(Xbyak::Opmask(5), temp2, xym0);
+					actual.korb(Xbyak::Opmask(2), Xbyak::Opmask(2), Xbyak::Opmask(5));
+					break;
+				}
+#endif
 				pcmpgtd(temp2, xym0);
 				por(_test, temp2);
 				break;
 
 			case ZTST_GREATER: // TODO: tidus hair and chocobo wings only appear fully when this is tested as ZTST_GEQUAL
 				// test |= zso <= zdo; // ~(zso > zdo)
+#if USING_YMM
+				if (useKMask())
+				{
+					actual.vpcmpd(Xbyak::Opmask(5), xym0, temp2, 2); // LE
+					actual.korb(Xbyak::Opmask(2), Xbyak::Opmask(2), Xbyak::Opmask(5));
+					break;
+				}
+#endif
 				pcmpgtd(xym0, temp2);
 				if (hasAVX512)
 				{
@@ -1252,6 +1284,13 @@ void GSDrawScanlineCodeGenerator::TestZ(const XYm& temp1, const XYm& temp2)
 				break;
 		}
 
+#if USING_YMM
+		if (useKMask())
+		{
+			alltrueK();
+			return;
+		}
+#endif
 		alltrue(_test);
 	}
 }
@@ -2403,6 +2442,15 @@ void GSDrawScanlineCodeGenerator::TestAlpha()
 	{
 		case AFAIL_KEEP:
 			// test |= t;
+#if USING_YMM
+			if (useKMask())
+			{
+				actual.vpmovd2m(Xbyak::Opmask(5), xym1);
+				actual.korb(Xbyak::Opmask(2), Xbyak::Opmask(2), Xbyak::Opmask(5));
+				alltrueK();
+				break;
+			}
+#endif
 			por(_test, xym1);
 			alltrue(_test);
 			break;
@@ -2562,6 +2610,28 @@ void GSDrawScanlineCodeGenerator::TestDestAlpha()
 
 	// test |= ((fd [<< 16]) ^ m_local.gd->datm).sra32(31);
 
+#if USING_YMM
+	if (useKMask())
+	{
+		// The sign bit of each dword is the reject bit; datm inverts it.
+		const Xbyak::Opmask kt(5);
+		if (m_sel.fpsm == 2)
+		{
+			THREEARG(pslld, xym1, _fd, 16);
+			actual.vpmovd2m(kt, xym1);
+		}
+		else
+		{
+			actual.vpmovd2m(kt, _fd);
+		}
+		if (m_sel.datm)
+			actual.knotb(kt, kt);
+		actual.korb(Xbyak::Opmask(2), Xbyak::Opmask(2), kt);
+		alltrueK();
+		return;
+	}
+#endif
+
 	if (m_sel.datm)
 	{
 		if (m_sel.fpsm == 2)
@@ -2623,6 +2693,50 @@ void GSDrawScanlineCodeGenerator::WriteMask()
 
 	// fm |= test;
 	// zm |= test;
+
+#if USING_YMM
+	if (useKMask())
+	{
+		const Xbyak::Opmask kt(2), kf(3), kz(4);
+
+		// Merge-masked all-ones into the rejected lanes (VPTERNLOGD imm 0xff).
+		if (m_sel.fwrite)
+			actual.vpternlogd(_fm | kt, _fm, _fm, 0xff);
+		if (m_sel.zwrite)
+			actual.vpternlogd(_zm | kt, _zm, _zm, 0xff);
+
+		// Pixel written when its fm/zm is not all ones.
+		pcmpeqd(xym1, xym1);
+		if (m_sel.fwrite)
+			actual.vpcmpd(kf, _fm, xym1, 4); // NE
+		if (m_sel.zwrite)
+			actual.vpcmpd(kz, _zm, xym1, 4);
+
+		// 16-bit formats still use the GPR pair-mask scalar path.
+		if (!((m_sel.fwrite && m_sel.fpsm >= 2) || (m_sel.zwrite && m_sel.zpsm >= 2)))
+			return;
+
+		if (m_sel.fwrite && m_sel.zwrite)
+		{
+			THREEARG(pcmpeqd, xym0, xym1, _zm);
+			pcmpeqd(xym1, _fm);
+			packssdw(xym1, xym0);
+		}
+		else if (m_sel.fwrite)
+		{
+			pcmpeqd(xym1, _fm);
+			packssdw(xym1, xym1);
+		}
+		else
+		{
+			pcmpeqd(xym1, _zm);
+			packssdw(xym1, xym1);
+		}
+		pmovmskb(edx, xym1);
+		not_(edx);
+		return;
+	}
+#endif
 
 	if (m_sel.fwrite)
 	{
@@ -2695,7 +2809,10 @@ void GSDrawScanlineCodeGenerator::WriteZBuf()
 #if USING_XMM
 	WritePixel(xym1, t2, dh, fast, m_sel.zpsm, 1);
 #else
-	WritePixel(xym1, t2, edx, fast, m_sel.zpsm, 1);
+	if (useKMask() && m_sel.zpsm < 2)
+		WritePixelK(xym1, t2, Xbyak::Opmask(4), m_sel.zpsm);
+	else
+		WritePixel(xym1, t2, edx, fast, m_sel.zpsm, 1);
 #endif
 }
 
@@ -3099,7 +3216,10 @@ void GSDrawScanlineCodeGenerator::WriteFrame()
 #if USING_XMM
 	WritePixel(xym5, rbx, dl, fast, m_sel.fpsm, 0);
 #else
-	WritePixel(xym5, rbx, edx, fast, m_sel.fpsm, 0);
+	if (useKMask() && m_sel.fpsm < 2)
+		WritePixelK(xym5, rbx, Xbyak::Opmask(3), m_sel.fpsm);
+	else
+		WritePixel(xym5, rbx, edx, fast, m_sel.fpsm, 0);
 #endif
 }
 
@@ -3120,6 +3240,23 @@ void GSDrawScanlineCodeGenerator::ReadPixel(const XYm& dst, const XYm& tmp, cons
 	vinserti128(dst, dst, tmpXmm, 1);
 #endif
 }
+
+#if USING_YMM
+void GSDrawScanlineCodeGenerator::WritePixelK(const XYm& src_, const AddressReg& addr, const Xbyak::Opmask& kpix, int psm)
+{
+	// Pixel mask (one bit per pixel) -> per-pixel dword mask -> moved to the same dword slots as the data
+	// -> byte mask limited to the bytes actually written (24-bit pixels skip the top byte). Needs proper testing.
+	RegExp base = _m_local__gd__vm + addr * 2;
+	const Xbyak::Zmm data(src_.getIdx()), maskv(31), index(30);
+	const Xbyak::Opmask k(1);
+	actual.vpmovm2d(Xbyak::Ymm(31), kpix);
+	actual.vmovdqa64(index, ptr[_m_const + offsetof(GSScanlineConstantData256B, m_wp_dwords)]);
+	actual.vpermd(maskv, index, maskv);
+	actual.vptestmb(k, maskv, ptr[_m_const + offsetof(GSScanlineConstantData256B, m_wp_bmask) + psm * 64]);
+	actual.vpermd(data, index, data);
+	actual.vmovdqu8(ptr[base] | k, data);
+}
+#endif
 
 #if USING_XMM
 void GSDrawScanlineCodeGenerator::WritePixel(const XYm& src_, const AddressReg& addr, const Reg8& mask, bool fast, int psm, int fz)

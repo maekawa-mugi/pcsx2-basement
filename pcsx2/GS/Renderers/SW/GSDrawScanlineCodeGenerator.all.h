@@ -107,6 +107,13 @@ private:
 	void mix16(const XYm& a, const XYm& b, const XYm& temp);
 	void clamp16(const XYm& a, const XYm& temp);
 	void alltrue(const XYm& test);
+#if DRAW_SCANLINE_USING_YMM
+	/// AVX-512 mask-register path (GS15): the reject mask lives in a k register instead of _test.
+	/// Needs proper testing; only used when hasAVX512 && !notest.
+	bool useKMask() const { return hasAVX512 && !m_sel.notest; }
+	void alltrueK();
+	void WritePixelK(const XYm& src_, const AddressReg& addr, const Xbyak::Opmask& kpix, int psm);
+#endif
 	void blend(const XYm& a, const XYm& b, const XYm& mask);
 	void blendr(const XYm& b, const XYm& a, const XYm& mask);
 	void blend8(const XYm& a, const XYm& b);

@@ -275,6 +275,9 @@ struct alignas(64) GSScanlineConstantData256B
 	// bytes not written: other dwords, and the top byte of 24-bit pixels.
 	alignas(64) u8 m_wp_bytes[2][2][64] = {};
 	alignas(64) u32 m_wp_dwords[16] = {};
+	// GS15: bytes written by one 32-bit (psm 0) / 24-bit (psm 1) store after m_wp_dwords has moved the
+	// per-pixel mask dwords into place; selected with VPTESTMB.
+	alignas(64) u8 m_wp_bmask[2][64] = {};
 	// PSHUFB controls (identical in both 128-bit lanes). m_rgba_shuf orders PACKUSWB(c0, c1)
 	// (R0 B0 R1 B1 .. | G0 A0 G1 A1 ..) as RGBA pixels; m_clamp16_shuf zero-extends the low 8 bytes to words.
 	alignas(32) u8 m_rgba_shuf[32] = {};
@@ -362,6 +365,11 @@ struct alignas(64) GSScanlineConstantData256B
 		}
 		for (int d = 0; d < 16; d++)
 			m_wp_dwords[d] = (d % 4) < 2 ? (d / 4) * 2 + (d % 4) : 0;
+		for (int psm = 0; psm < 2; psm++)
+		{
+			for (int j = 0; j < 64; j++)
+				m_wp_bmask[psm][j] = ((j / 4) % 4) < 2 && !(psm == 1 && (j % 4) == 3) ? 0xff : 0x00;
+		}
 	}
 };
 
