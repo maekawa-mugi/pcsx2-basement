@@ -5,6 +5,7 @@
 
 #include "GS/MultiISA.h"
 #include "common/Assertions.h"
+#include "common/emitter/x86types.h"
 
 // Xbyak pulls in windows.h, and breaks everything.
 #ifdef _WIN32
@@ -48,6 +49,8 @@ public:
 	using RipType = Xbyak::RegRip;
 
 	const bool hasAVX, hasAVX2, hasFMA;
+	// EVEX forms on the existing YMM0-15 allocation (Ice Lake tier, see x86types.h).
+	const bool hasAVX512;
 
 	const Xmm xmm0{0}, xmm1{1}, xmm2{2}, xmm3{3}, xmm4{4}, xmm5{5}, xmm6{6}, xmm7{7}, xmm8{8}, xmm9{9}, xmm10{10}, xmm11{11}, xmm12{12}, xmm13{13}, xmm14{14}, xmm15{15};
 	const Ymm ymm0{0}, ymm1{1}, ymm2{2}, ymm3{3}, ymm4{4}, ymm5{5}, ymm6{6}, ymm7{7}, ymm8{8}, ymm9{9}, ymm10{10}, ymm11{11}, ymm12{12}, ymm13{13}, ymm14{14}, ymm15{15};
@@ -64,7 +67,14 @@ public:
 		, hasAVX(g_cpu.vectorISA >= ProcessorFeatures::VectorISA::AVX)
 		, hasAVX2(g_cpu.vectorISA >= ProcessorFeatures::VectorISA::AVX2)
 		, hasFMA(g_cpu.hasFMA)
+		, hasAVX512(hasAVX2 && x86Emitter::avx512.HasCore())
 	{
+	}
+
+	void vpternlogd(const Xmm& a, const Xmm& b, const Operand& c, u8 imm)
+	{
+		pxAssert(hasAVX512);
+		actual.vpternlogd(a, b, c, imm);
 	}
 
 	size_t GetSize() const { return actual.getSize(); }

@@ -1,5 +1,6 @@
 add_pcsx2_test(core_test
 	ee_config_tests.cpp
+	ee_xmm_allocator_tests.cpp
 	ee_physical_memory_tests.cpp
 	ee_synthetic_mmu_tests.cpp
 	ee_tlb_tests.cpp
@@ -21,14 +22,23 @@ target_link_libraries(core_test PUBLIC
 
 if(DISABLE_ADVANCE_SIMD AND ARCH_X86)
 	if(WIN32)
+		set(compile_options_avx512 /arch:AVX512)
+		if(USE_CLANG_CL)
+			list(APPEND compile_options_avx512 -mavx512vbmi -mavx512vbmi2 -mavx512vnni -mavx512bitalg
+				-mavx512vpopcntdq -mvpclmulqdq -mgfni)
+		endif()
 		set(compile_options_avx2 /arch:AVX2)
 		set(compile_options_avx  /arch:AVX)
 	elseif(USE_GCC)
 		# GCC can't inline into multi-isa functions if we use march and mtune, but can if we use feature flags
+		set(compile_options_avx512 -msse4.1 -mavx -mavx2 -mbmi -mbmi2 -mfma -mavx512f -mavx512vl -mavx512bw
+			-mavx512dq -mavx512cd -mavx512vbmi -mavx512vbmi2 -mavx512vnni -mavx512bitalg -mavx512vpopcntdq
+			-mvpclmulqdq -mgfni)
 		set(compile_options_avx2 -msse4.1 -mavx -mavx2 -mbmi -mbmi2 -mfma)
 		set(compile_options_avx  -msse4.1 -mavx)
 		set(compile_options_sse4 -msse4.1)
 	else()
+		set(compile_options_avx512 -march=icelake-client -mtune=icelake-client)
 		set(compile_options_avx2 -march=haswell -mtune=haswell)
 		set(compile_options_avx  -march=sandybridge -mtune=sandybridge)
 		set(compile_options_sse4 -msse4.1 -mtune=nehalem)
@@ -38,6 +48,9 @@ if(DISABLE_ADVANCE_SIMD AND ARCH_X86)
 	# gtest constructor still generates AVX code, and that's a global object which gets constructed
 	# at binary load time. So, for now, only compile SSE4 if running on ARM64.
 	if (NOT APPLE OR "${CMAKE_HOST_SYSTEM_PROCESSOR}" STREQUAL "x86_64")
+		# No avx512 here: its gtest registrations are global constructors compiled for Ice Lake,
+		# so the binary would die at load on other CPUs. The native build on an Ice Lake host
+		# covers the AVX-512 paths.
 		set(isa_list "sse4" "avx" "avx2")
 	else()
 		set(isa_list "sse4")

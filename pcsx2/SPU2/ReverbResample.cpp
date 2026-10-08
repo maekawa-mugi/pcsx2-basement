@@ -190,15 +190,14 @@ StereoOut32 __forceinline ReverbUpsample_avx(V_Core& core)
 	lacc = lacc.adds16(lacc.ba());
 	racc = racc.adds16(racc.ba());
 
-	lacc = lacc.hadds16(lacc);
-	lacc = lacc.hadds16(lacc);
-	lacc = lacc.hadds16(lacc);
+	// Same saturating pair order as reducing each channel alone, but L and R share the hadds:
+	// the first one packs {L pairs, R pairs}, the next two reduce both channels at once.
+	// Needs proper testing against the old per-channel reduction on saturating input.
+	auto acc = lacc.hadds16(racc);
+	acc = acc.hadds16(acc);
+	acc = acc.hadds16(acc);
 
-	racc = racc.hadds16(racc);
-	racc = racc.hadds16(racc);
-	racc = racc.hadds16(racc);
-
-	return {lacc.I16[0], racc.I16[0]};
+	return {acc.I16[0], acc.I16[1]};
 }
 #endif
 

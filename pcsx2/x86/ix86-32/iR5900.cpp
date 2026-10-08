@@ -15,6 +15,7 @@
 #include "R5900OpcodeTables.h"
 #include "VMManager.h"
 #include "vtlb.h"
+#include "x86/AVX512Profile.h"
 #include "x86/BaseblockEx.h"
 #include "x86/iR5900.h"
 #include "x86/iR5900Analysis.h"
@@ -1445,10 +1446,13 @@ void iFlushCall(int flushtype)
 		}
 	}
 
-	for (u32 i = 0; i < iREGCNT_XMM; i++)
+	for (u32 i = 0; i < iREGCNT_XMM_EVEX; i++)
 	{
 		if (!xmmregs[i].inuse)
 			continue;
+
+		pxAssertRel(i < iREGCNT_XMM || xmmregs[i].type != XMMTYPE_TEMP,
+			"Consume high temporaries before a flushing call; use _eeCallWithHighXMM for preserving calls");
 
 		if (xRegisterSSE::IsCallerSaved(i) ||
 			(flushtype & FLUSH_FREE_XMM) ||
@@ -1555,7 +1559,7 @@ void recEmitFullTLBAccessFaultExit()
 	// compile-time allocator state before continuing to generate the success path.
 	// This needs proper testing with faults in swapped and nested delay slots.
 	_x86regs saved_x86regs[iREGCNT_GPR];
-	_xmmregs saved_xmmregs[iREGCNT_XMM];
+	_xmmregs saved_xmmregs[iREGCNT_XMM_EVEX];
 	std::memcpy(saved_x86regs, x86regs, sizeof(saved_x86regs));
 	std::memcpy(saved_xmmregs, xmmregs, sizeof(saved_xmmregs));
 	const u32 saved_has_const = g_cpuHasConstReg;
@@ -1607,7 +1611,7 @@ void recEmitFullTLBAccessFaultExitForThunk(u32 stack_size, u32 scaled_cycles)
 	pxAssert(EmuConfig.Cpu.EnableExperimentalEETLB);
 
 	_x86regs saved_x86regs[iREGCNT_GPR];
-	_xmmregs saved_xmmregs[iREGCNT_XMM];
+	_xmmregs saved_xmmregs[iREGCNT_XMM_EVEX];
 	std::memcpy(saved_x86regs, x86regs, sizeof(saved_x86regs));
 	std::memcpy(saved_xmmregs, xmmregs, sizeof(saved_xmmregs));
 	GPR_reg64 saved_const_regs[32];
@@ -1976,6 +1980,9 @@ bool encodeMemcheck()
 	return true;
 }
 
+// Counter of the block being compiled when the AVX-512 planning profile is on.
+static AVX512Profile::EEBlock* s_profile_block = nullptr;
+
 void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 {
 	if (EmuConfig.EnablePatches)
@@ -2048,7 +2055,7 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 			}
 		}
 
-		for (u32 i = 0; i < iREGCNT_XMM; ++i)
+		for (u32 i = 0; i < iREGCNT_XMM_EVEX; ++i)
 		{
 			if (xmmregs[i].inuse)
 			{
@@ -2068,6 +2075,8 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 	}
 
 	const OPCODE& opcode = GetCurrentInstruction();
+	if (s_profile_block)
+		AVX512Profile::CountOp(s_profile_block->counter, 'E', opcode.Name);
 
 	//pxAssert( !(g_pCurInstInfo->info & EEINSTINFO_NOREC) );
 	//Console.Warning("opcode name = %s, it's cycles = %d\n",opcode.Name,opcode.cycles);
@@ -3174,6 +3183,16 @@ static void recRecompile(const u32 startpc)
 	_initXMMregs();
 	vtlb_BeginFullTLBFastmemBlock();
 
+	// Opt-in AVX-512 planning profile; emits nothing unless enabled.
+	AVX512Profile::EEBlock* const profile_block = AVX512Profile::NewEEBlock(HWADDR(startpc));
+	EEXMMAllocatorStats profile_stats;
+	if (profile_block)
+	{
+		xADD(ptr64[AVX512Profile::Counter(profile_block->counter)], 1);
+		g_eeXMMAllocatorStats = &profile_stats;
+	}
+	s_profile_block = profile_block;
+
 #ifdef TRACE_BLOCKS
 	xFastCall((void*)PreBlockCheck, pc);
 #endif
@@ -3687,6 +3706,18 @@ StartRecomp:
 	Perf::ee.RegisterPC((void*)s_pCurBlockEx->fnptr, s_pCurBlockEx->x86size, s_pCurBlockEx->startpc);
 
 	recPtr = xGetPtr();
+
+	s_profile_block = nullptr;
+	if (profile_block)
+	{
+		g_eeXMMAllocatorStats = nullptr;
+		profile_block->reloads = profile_stats.guest_reloads;
+		profile_block->writebacks = profile_stats.guest_writebacks;
+		profile_block->evictions = profile_stats.evictions;
+		profile_block->temporaries = profile_stats.temporaries;
+		profile_block->high_temporaries = profile_stats.high_temporaries;
+		profile_block->helper_spills = profile_stats.helper_stack_spills;
+	}
 
 	pxAssert((g_cpuHasConstReg & g_cpuFlushedConstReg) == g_cpuHasConstReg);
 

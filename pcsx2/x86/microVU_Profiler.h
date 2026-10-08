@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "AVX512Profile.h"
+
 enum microOpcode
 {
 	// Upper Instructions
@@ -136,8 +138,16 @@ struct microProfiler
 #else
 struct microProfiler
 {
-	__fi void Reset(int _index) {}
-	__fi void EmitOp(microOpcode op) {}
+	// Opt-in AVX-512 planning profile: block being compiled in micro mode, or nullptr.
+	AVX512Profile::VUBlock* block = nullptr;
+	int index = 0;
+	__fi void Reset(int _index) { block = nullptr; index = _index; }
+	__fi void EmitOp(microOpcode op) { Count(microOpcodeName[op]); }
+	__fi void Count(const char* name)
+	{
+		if (block)
+			AVX512Profile::CountOp(block->counter, static_cast<char>('0' + index), name);
+	}
 	__fi void Print() {}
 };
 #endif

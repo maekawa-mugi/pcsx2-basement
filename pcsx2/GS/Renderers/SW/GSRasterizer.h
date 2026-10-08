@@ -30,7 +30,6 @@ public:
 	int index_count;
 	u64 frame;
 	u64 start;
-	int pixels;
 	int counter;
 	u8 scanmsk_value;
 
@@ -51,7 +50,6 @@ public:
 		, index_count(0)
 		, frame(0)
 		, start(0)
-		, pixels(0)
 		, scanmsk_value(0)
 	{
 		counter = s_counter++;

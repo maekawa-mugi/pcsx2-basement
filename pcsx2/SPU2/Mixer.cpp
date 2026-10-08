@@ -8,6 +8,9 @@
 #include "SPU2/interpolate_table.h"
 
 #include "common/Assertions.h"
+#ifdef _M_X86
+#include <smmintrin.h>
+#endif
 
 // LOOP/END sets the ENDX bit and sets NAX to LSA, and the voice is muted if LOOP is not set
 // LOOP seems to only have any effect on the block with LOOP/END set, where it prevents muting the voice
@@ -289,6 +292,20 @@ static __forceinline s32 GetVoiceValues(V_Core& thiscore, uint voiceidx)
 	V_Voice& vc(thiscore.Voices[voiceidx]);
 
 	int phase = (vc.SP & 0x0ff0) >> 4;
+#ifdef _M_X86
+	// Four contiguous taps (29 of 32 ring positions): one 16-byte load, per-tap (t * d) >> 15 kept as in the scalar
+	// code, then a horizontal sum. Needs proper testing against the scalar path.
+	const u32 pos = static_cast<u32>(vc.DecPosRead) & 31;
+	if (pos <= 28)
+	{
+		const __m128i d = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&vc.DecodeFifo[pos]));
+		const __m128i t = _mm_cvtepi16_epi32(_mm_loadl_epi64(reinterpret_cast<const __m128i*>(interpTable[phase].data())));
+		__m128i p = _mm_srai_epi32(_mm_mullo_epi32(d, t), 15);
+		p = _mm_add_epi32(p, _mm_shuffle_epi32(p, 0x4e));
+		p = _mm_add_epi32(p, _mm_shuffle_epi32(p, 0xb1));
+		return _mm_cvtsi128_si32(p);
+	}
+#endif
 	s32 out = 0;
 	out += (interpTable[phase][0] * vc.DecodeFifo[(vc.DecPosRead + 0) % 32]) >> 15;
 	out += (interpTable[phase][1] * vc.DecodeFifo[(vc.DecPosRead + 1) % 32]) >> 15;

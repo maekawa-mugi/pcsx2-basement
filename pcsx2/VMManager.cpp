@@ -31,6 +31,7 @@
 #include "PerformanceMetrics.h"
 #include "R3000A.h"
 #include "R5900.h"
+#include "R5900OpcodeTables.h"
 #include "Recording/InputRecording.h"
 #include "Recording/InputRecordingControls.h"
 #include "SIO/Memcard/MemoryCardFile.h"
@@ -80,6 +81,10 @@
 
 #ifdef __APPLE__
 #include "common/Darwin/DarwinMisc.h"
+#endif
+
+#ifdef _M_X86
+#include "x86/AVX512Profile.h"
 #endif
 
 namespace VMManager
@@ -407,7 +412,21 @@ bool VMManager::Internal::CPUThreadInitialize()
 
 #ifdef _M_X86
 	x86Emitter::use_avx = g_cpu.vectorISA >= ProcessorFeatures::VectorISA::AVX;
+
+	x86Emitter::avx512.f = cpuinfo_has_x86_avx512f();
+	x86Emitter::avx512.cd = cpuinfo_has_x86_avx512cd();
+	x86Emitter::avx512.vl = cpuinfo_has_x86_avx512vl();
+	x86Emitter::avx512.dq = cpuinfo_has_x86_avx512dq();
+	x86Emitter::avx512.bw = cpuinfo_has_x86_avx512bw();
+	x86Emitter::avx512.vbmi = cpuinfo_has_x86_avx512vbmi();
+	x86Emitter::avx512.vbmi2 = cpuinfo_has_x86_avx512vbmi2();
+	x86Emitter::avx512.vpopcntdq = cpuinfo_has_x86_avx512vpopcntdq();
+	x86Emitter::avx512.bitalg = cpuinfo_has_x86_avx512bitalg();
+	x86Emitter::avx512.vnni = cpuinfo_has_x86_avx512vnni();
+	x86Emitter::avx512.vpclmulqdq = cpuinfo_has_x86_vpclmulqdq();
+	x86Emitter::avx512.vp2intersect = cpuinfo_has_x86_avx512vp2intersect();
 #endif
+	R5900::OpcodeTables::InitializeInterpreterISA();
 
 	LogCPUCapabilities();
 
@@ -1706,6 +1725,11 @@ void VMManager::Shutdown(bool save_resume_state)
 		vu1Thread.WaitVU();
 	MTGS::WaitGS();
 
+#ifdef _M_X86
+	// Opt-in AVX-512 planning profile (no-op unless PCSX2_AVX512_PROFILE is set).
+	AVX512Profile::Dump();
+#endif
+
 	if (!GSDumpReplayer::IsReplayingDump() && save_resume_state)
 	{
 		std::string resume_file_name(GetCurrentSaveStateFileName(-1));
@@ -2677,8 +2701,30 @@ void VMManager::LogCPUCapabilities()
 		extensions += "AVX ";
 	if (g_cpu.vectorISA >= ProcessorFeatures::VectorISA::AVX2)
 		extensions += "AVX2 ";
-	if (g_cpu.vectorISA >= ProcessorFeatures::VectorISA::AVX512F)
+	if (x86Emitter::avx512.f)
 		extensions += "AVX512F ";
+	if (x86Emitter::avx512.cd)
+		extensions += "AVX512CD ";
+	if (x86Emitter::avx512.vl)
+		extensions += "AVX512VL ";
+	if (x86Emitter::avx512.dq)
+		extensions += "AVX512DQ ";
+	if (x86Emitter::avx512.bw)
+		extensions += "AVX512BW ";
+	if (x86Emitter::avx512.vbmi)
+		extensions += "AVX512VBMI ";
+	if (x86Emitter::avx512.vbmi2)
+		extensions += "AVX512VBMI2 ";
+	if (x86Emitter::avx512.vpopcntdq)
+		extensions += "AVX512VPOPCNTDQ ";
+	if (x86Emitter::avx512.bitalg)
+		extensions += "AVX512BITALG ";
+	if (x86Emitter::avx512.vnni)
+		extensions += "AVX512VNNI ";
+	if (x86Emitter::avx512.vpclmulqdq)
+		extensions += "VPCLMULQDQ ";
+	if (x86Emitter::avx512.vp2intersect)
+		extensions += "AVX512VP2INTERSECT ";
 #ifdef ARCH_ARM64
 	if (cpuinfo_has_arm_neon())
 		extensions += "NEON ";

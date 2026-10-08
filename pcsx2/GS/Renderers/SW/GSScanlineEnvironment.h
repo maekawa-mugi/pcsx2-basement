@@ -268,14 +268,88 @@ struct alignas(64) GSScanlineConstantData256B
 		8.0f, -7.0f, -6.0f, -5.0f, -4.0f, -3.0f, -2.0f, -1.0f,
 		0.0f,  1.0f,  2.0f,  3.0f,  4.0f,  5.0f,  6.0f,  7.0f,
 	};
+	// AVX-512 masked WritePixel. The 8 pixels of a 32-bit write sit at dwords 0,1,4,5,8,9,12,13
+	// of a 64-byte span. m_wp_dwords moves them there; m_wp_bytes[fz][psm] maps each byte of
+	// the span to the fzm mask bit (from VPMOVM2B) of its pixel, or to byte 63 (always 0) for
+	// bytes not written: other dwords, and the top byte of 24-bit pixels.
+	alignas(64) u8 m_wp_bytes[2][2][64] = {};
+	alignas(64) u32 m_wp_dwords[16] = {};
+	// PSHUFB controls (identical in both 128-bit lanes). m_rgba_shuf orders PACKUSWB(c0, c1)
+	// (R0 B0 R1 B1 .. | G0 A0 G1 A1 ..) as RGBA pixels; m_clamp16_shuf zero-extends the low 8 bytes to words.
+	alignas(32) u8 m_rgba_shuf[32] = {};
+	alignas(32) u8 m_clamp16_shuf[32] = {};
+	// 0x00ff in every word (colclamp-less RGBA masking, low-byte split).
+	alignas(32) u16 m_word_lo_mask[16] = {};
+	// VBMI VPMULTISHIFTQB controls for the 5551 <-> 8888 conversions (same windows as MMI PEXT5/PPAC5).
+	// m_c5_expand_ctrl: RGBA5551 per dword -> bytes [R<<3, G<<3, B<<3, A<<7]; the rb/ga masks
+	// are applied after the 16-bit split ([R,0,B,0] / [G,0,A,0]).
+	// m_c5_pack_ctrl: bytes [R,G,B,A] per dword -> [R>>3, G>>3, B>>3, A>>7], then the
+	// mask / PMADDUBSW {1,32} / PMADDWD {1,1024} constants pack them into 5551.
+	alignas(32) u8 m_c5_expand_ctrl[32] = {};
+	alignas(32) u8 m_c5_pack_ctrl[32] = {};
+	alignas(32) u32 m_c5_rb_mask[8] = {};
+	alignas(32) u32 m_c5_ga_mask[8] = {};
+	alignas(32) u32 m_c5_pack_mask[8] = {};
+	alignas(32) u16 m_c5_pack_w8[16] = {};
+	alignas(32) u32 m_c5_pack_w16[8] = {};
 
 	constexpr GSScanlineConstantData256B()
 	{
 		using namespace GSScanlineConstantData;
+		{
+			const u8 expand[8] = {61, 2, 7, 8, 29, 34, 39, 40};
+			const u8 pack[8] = {3, 11, 19, 31, 35, 43, 51, 63};
+			for (int i = 0; i < 32; i++)
+			{
+				m_c5_expand_ctrl[i] = expand[i % 8];
+				m_c5_pack_ctrl[i] = pack[i % 8];
+			}
+			for (int i = 0; i < 8; i++)
+			{
+				m_c5_rb_mask[i] = 0x00f800f8;
+				m_c5_ga_mask[i] = 0x008000f8;
+				m_c5_pack_mask[i] = 0x011f1f1f;
+				m_c5_pack_w16[i] = 0x04000001;
+			}
+			for (int i = 0; i < 16; i++)
+				m_c5_pack_w8[i] = 0x2001;
+		}
+		for (size_t i = 0; i < std::size(m_word_lo_mask); i++)
+			m_word_lo_mask[i] = 0x00ff;
+		for (int lane = 0; lane < 2; lane++)
+		{
+			for (int i = 0; i < 4; i++)
+			{
+				m_rgba_shuf[lane * 16 + i * 4 + 0] = static_cast<u8>(2 * i);
+				m_rgba_shuf[lane * 16 + i * 4 + 1] = static_cast<u8>(8 + 2 * i);
+				m_rgba_shuf[lane * 16 + i * 4 + 2] = static_cast<u8>(2 * i + 1);
+				m_rgba_shuf[lane * 16 + i * 4 + 3] = static_cast<u8>(9 + 2 * i);
+			}
+			for (int i = 0; i < 8; i++)
+			{
+				m_clamp16_shuf[lane * 16 + i * 2] = static_cast<u8>(i);
+				m_clamp16_shuf[lane * 16 + i * 2 + 1] = 0x80;
+			}
+		}
 		for (size_t n = 0; n < std::size(log2_coef); ++n)
 		{
 			m_log2_coef[n] = log2_coef[n];
 		}
+		for (int fz = 0; fz < 2; fz++)
+		{
+			for (int psm = 0; psm < 2; psm++)
+			{
+				for (int j = 0; j < 64; j++)
+				{
+					const int d = j / 4;
+					const int pixel = (d / 4) * 2 + (d % 4);
+					const bool written = (d % 4) < 2 && !(psm == 1 && (j % 4) == 3);
+					m_wp_bytes[fz][psm][j] = written ? static_cast<u8>((pixel < 4 ? 2 * pixel : 16 + 2 * (pixel - 4)) + 8 * fz) : 63;
+				}
+			}
+		}
+		for (int d = 0; d < 16; d++)
+			m_wp_dwords[d] = (d % 4) < 2 ? (d / 4) * 2 + (d % 4) : 0;
 	}
 };
 
@@ -299,10 +373,13 @@ struct alignas(64) GSScanlineConstantData128B
 		{ -3.0f , -2.0f , -1.0f , 0.0f},
 	};
 	alignas(16) float m_log2_coef[4][4] = {};
+	alignas(16) u16 m_word_lo_mask[8] = {};
 
 	constexpr GSScanlineConstantData128B()
 	{
 		using namespace GSScanlineConstantData;
+		for (size_t i = 0; i < std::size(m_word_lo_mask); i++)
+			m_word_lo_mask[i] = 0x00ff;
 		for (size_t n = 0; n < std::size(log2_coef); ++n)
 		{
 			for (size_t i = 0; i < 4; ++i)

@@ -73,6 +73,8 @@ namespace x86Emitter
 	extern const xImpl_Group8 xBTC;
 
 	extern const xImpl_BitScan xBSF, xBSR;
+	// LZCNT r32, r32 (F3 0F BD). Only emit when cpuinfo_has_x86_lzcnt(); without it the encoding runs as BSR.
+	extern void xLZCNT(const xRegister32& to, const xRegister32& from);
 
 	extern const xImpl_JmpCall xJMP;
 	extern const xImpl_JmpCall xCALL;
@@ -109,6 +111,7 @@ namespace x86Emitter
 	// ------------------------------------------------------------------------
 	// BMI extra instruction requires BMI1/BMI2
 	extern const xImplBMI_RVM xMULX, xPDEP, xPEXT, xANDN_S; // Warning xANDN is already used by SSE
+	extern const xImplBMI_RVM xSHLX, xSARX, xSHRX; // xSHLX(dst, count, src): count in VEX.vvvv, src may be memory
 
 	//////////////////////////////////////////////////////////////////////////////////////////
 	// Miscellaneous Instructions
@@ -603,6 +606,78 @@ namespace x86Emitter
 	extern const xImplSimd_Shift xPSRL;
 	extern void xVPSLLVD(const xRegisterSSE& dst, const xRegisterSSE& src, const xRegisterSSE& counts);
 	extern void xVPSRLVD(const xRegisterSSE& dst, const xRegisterSSE& src, const xRegisterSSE& counts);
+	extern void xVPLZCNTD(const xRegisterSSE& dst, const xRegisterSSE& src);
+	extern void xVPSRAQImm(const xRegisterSSE& dst, const xRegisterSSE& src, u8 imm8);
+	extern void xVPSRAVD(const xRegisterSSE& dst, const xRegisterSSE& src, const xRegisterSSE& counts);
+	extern void xVPMULTISHIFTQB(const xRegisterSSE& dst, const xRegisterSSE& ctrl, const xRegisterSSE& data);
+	extern void xVPBROADCASTD(const xRegisterSSE& dst, const xRegister32& src);
+	extern void xVPBROADCASTB(const xRegisterSSE& dst, const xRegister32& src);
+	extern void xVPERMI2B(const xRegisterSSE& dst, const xRegisterSSE& table0, const xRegisterSSE& table1);
+	extern void xVPMOVSXDQY(const xRegisterSSE& dst, const xRegisterSSE& src);
+	extern void xVPMOVSXWDY(const xRegisterSSE& dst, const xRegisterSSE& src);
+	extern void xVPMULLDY(const xRegisterSSE& dst, const xRegisterSSE& src1, const xRegisterSSE& src2);
+	extern void xVPSHUFDY(const xRegisterSSE& dst, const xRegisterSSE& src, u8 imm8);
+	extern void xVPSUBDY(const xRegisterSSE& dst, const xRegisterSSE& src1, const xRegisterSSE& src2);
+	extern void xVPTERNLOGDY(const xRegisterSSE& dst, const xRegisterSSE& src1, const xIndirectVoid& src2, u8 imm8);
+	extern void xVPERMQY(const xRegisterSSE& dst, const xRegisterSSE& src, u8 imm8);
+	extern void xVexPMOVSXWDY(const xRegisterSSE& dst, const xRegisterSSE& src);
+	extern void xVexPMULLDY(const xRegisterSSE& dst, const xRegisterSSE& src1, const xRegisterSSE& src2);
+	extern void xVexPERMQY(const xRegisterSSE& dst, const xRegisterSSE& src, u8 imm8);
+	extern void xVexEXTRACTI128Y(const xRegisterSSE& dst, const xRegisterSSE& src, u8 lane);
+	extern void xVexINSERTI128Y(const xRegisterSSE& dst, const xRegisterSSE& src1, const xRegisterSSE& src2, u8 lane);
+	extern void xVexPSHUFDY(const xRegisterSSE& dst, const xRegisterSSE& src, u8 imm8);
+	extern void xVexPSUBDY(const xRegisterSSE& dst, const xRegisterSSE& src1, const xRegisterSSE& src2);
+	extern void xVexPCMPEQDY(const xRegisterSSE& dst, const xRegisterSSE& src1, const xRegisterSSE& src2);
+	extern void xVexPXORY(const xRegisterSSE& dst, const xRegisterSSE& src1, const xRegisterSSE& src2);
+	extern void xVexPBLENDDY(const xRegisterSSE& dst, const xRegisterSSE& src1, const xRegisterSSE& src2, u8 imm8);
+	extern void xVEXTRACTI128Y(const xRegisterSSE& dst, const xRegisterSSE& src, u8 lane);
+	extern void xVPADDQY(const xRegisterSSE& dst, const xRegisterSSE& src1, const xRegisterSSE& src2);
+	extern void xVPSUBQY(const xRegisterSSE& dst, const xRegisterSSE& src1, const xRegisterSSE& src2);
+	extern void xVPMOVSQD(const xRegisterSSE& dst, const xRegisterSSE& src, bool src256);
+	extern void xVPMOVWB(const xRegisterSSE& dst, const xRegisterSSE& src, bool src256 = false);
+	extern void xVPMOVDW(const xRegisterSSE& dst, const xRegisterSSE& src, bool src256 = false);
+	extern void xVPMOVQD(const xRegisterSSE& dst, const xRegisterSSE& src, bool src256 = false);
+	extern void xVPTERNLOGD(const xRegisterSSE& dst, const xRegisterSSE& src1, const xRegisterSSE& src2, u8 imm8,
+		const xRegisterK& mask = k0, bool zeroing = false);
+	extern void xVPTERNLOGD(const xRegisterSSE& dst, const xRegisterSSE& src1, const xIndirectVoid& src2, u8 imm8);
+	extern void xVPTERNLOGQ(const xRegisterSSE& dst, const xRegisterSSE& src1, const xRegisterSSE& src2, u8 imm8,
+		const xRegisterK& mask = k0, bool zeroing = false);
+	extern void xVPCMPD(const xRegisterK& dst, const xRegisterSSE& src1, const xRegisterSSE& src2, u8 imm8,
+		const xRegisterK& writemask = k0);
+	extern void xVPCMPD(const xRegisterK& dst, const xRegisterSSE& src1, const xIndirectVoid& src2, u8 imm8,
+		const xRegisterK& writemask = k0);
+	extern void xVPCMPQ(const xRegisterK& dst, const xRegisterSSE& src1, const xRegisterSSE& src2, u8 imm8);
+	extern void xVFPCLASSPS(const xRegisterK& dst, const xRegisterSSE& src, u8 imm8,
+		const xRegisterK& writemask = k0);
+	extern void xVPBLENDMD(const xRegisterSSE& dst, const xRegisterSSE& src1, const xRegisterSSE& src2,
+		const xRegisterK& mask);
+	extern void xVPTESTMD(const xRegisterK& dst, const xRegisterSSE& src1, const xRegisterSSE& src2,
+		const xRegisterK& writemask = k0);
+	extern void xVPTESTMD(const xRegisterK& dst, const xRegisterSSE& src1, const xIndirectVoid& src2,
+		const xRegisterK& writemask = k0);
+	extern void xVPMOVD2M(const xRegisterK& dst, const xRegisterSSE& src);
+	extern void xVPSHUFD(const xRegisterSSE& dst, const xRegisterSSE& src, u8 imm8);
+	extern void xVINSERTPS(const xRegisterSSE& dst, const xRegisterSSE& src1, const xRegisterSSE& src2, u8 imm8);
+	extern void xVMOVD(const xRegisterSSE& dst, const xRegister32& src);
+	extern void xVMOVD(const xRegister32& dst, const xRegisterSSE& src);
+	extern void xVSQRTSS(const xRegisterSSE& dst, const xRegisterSSE& src1, const xRegisterSSE& src2);
+	extern void xVMOVDQA32(const xRegisterSSE& dst, const xRegisterSSE& src);
+	extern void xVMOVDQA32(const xRegisterSSE& dst, const xIndirectVoid& src);
+	extern void xVMOVDQA32(const xIndirectVoid& dst, const xRegisterSSE& src);
+	extern void xVPSLLDImm(const xRegisterSSE& dst, const xRegisterSSE& src, u8 imm8);
+	extern void xVPSRADImm(const xRegisterSSE& dst, const xRegisterSSE& src, u8 imm8);
+	extern void xVPXORD(const xRegisterSSE& dst, const xRegisterSSE& src1, const xRegisterSSE& src2);
+	extern void xVPADDD(const xRegisterSSE& dst, const xRegisterSSE& src1, const xRegisterSSE& src2);
+	extern void xKMOVD(const xRegisterK& dst, const xRegister32& src);
+	extern void xKMOVD(const xRegister32& dst, const xRegisterK& src);
+	extern void xKMOVW(const xRegisterK& dst, const xRegister32& src);
+	extern void xKMOVW(const xRegister32& dst, const xRegisterK& src);
+	extern void xKORW(const xRegisterK& dst, const xRegisterK& src1, const xRegisterK& src2);
+	extern void xKANDW(const xRegisterK& dst, const xRegisterK& src1, const xRegisterK& src2);
+	extern void xKXORW(const xRegisterK& dst, const xRegisterK& src1, const xRegisterK& src2);
+	extern void xKANDNW(const xRegisterK& dst, const xRegisterK& src1, const xRegisterK& src2);
+	extern void xKTESTW(const xRegisterK& lhs, const xRegisterK& rhs);
+	extern void xKORTESTW(const xRegisterK& lhs, const xRegisterK& rhs);
 	extern const xImplSimd_ShiftWithoutQ xPSRA;
 	extern const xImplSimd_AddSub xPADD;
 	extern const xImplSimd_AddSub xPSUB;

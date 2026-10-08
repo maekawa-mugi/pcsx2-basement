@@ -6,6 +6,7 @@
 #if defined(_WIN32)
 #include "GS/Renderers/OpenGL/GLContextWGL.h"
 #else // Linux
+#include "GS/Renderers/OpenGL/GLContextEGL.h"
 #ifdef X11_API
 #include "GS/Renderers/OpenGL/GLContextEGLX11.h"
 #endif
@@ -45,6 +46,10 @@ std::unique_ptr<GLContext> GLContext::Create(const WindowInfo& wi, Error* error)
 #if defined(_WIN32)
 	context = GLContextWGL::Create(wi, vlist, error);
 #else // Linux
+	// Headless gsrunner (-surfaceless) benchmarks; X11/Wayland never pass this type.
+	if (wi.type == WindowInfo::Type::Surfaceless)
+		context = GLContextEGL::Create(wi, vlist, error);
+
 #if defined(X11_API)
 	if (wi.type == WindowInfo::Type::X11)
 		context = GLContextEGLX11::Create(wi, vlist, error);

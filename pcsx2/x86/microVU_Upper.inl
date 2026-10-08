@@ -87,8 +87,24 @@ static void mVUupdateFlags(mV, const xmm& reg, const xmm& regT1in = xEmptyReg, c
 	//SysPrintf("Status = %d; Mac = %d\n", sFLAG.doFlag, mFLAG.doFlag);
 	if (!sFLAG.doFlag && !mFLAG.doFlag)
 		return;
+#ifndef mVUprofileProg
+	mVU.profiler.Count(sFLAG.doFlag ? (mFLAG.doFlag ? "~flags_sm" : "~flags_s") : "~flags_m");
+#endif
 
-	const xmm& regT1 = regT1b ? mVU.regAlloc->allocReg() : regT1in;
+	// AVX-512: classify zero/sign lanes into k1/k2 instead of CMPEQPS into a vector
+	// temporary, which saves an allocation (and possible VF eviction) per flag update.
+	// The legacy overflow check still needs the vector temporary. Needs proper testing.
+	// SoftFloat keeps k1-k5 as its own scratch, so it stays on the legacy sequence.
+	// PCSX2_AVX512_NO_KFLAGS=1 keeps the legacy sequence for A/B testing.
+	static const bool kFlagsDisabled = [] {
+		const char* env = std::getenv("PCSX2_AVX512_NO_KFLAGS");
+		return env && env[0] == '1';
+	}();
+	const bool useK = x86Emitter::avx512.HasCore() && !kFlagsDisabled && !CHECK_VU_SOFT(mVU.index) &&
+		!(sFLAG.doFlag && CHECK_VUOVERFLOWHACK);
+	if (useK)
+		regT1b = false;
+	const xmm regT1 = useK ? xEmptyReg : (regT1b ? mVU.regAlloc->allocReg() : regT1in);
 
 	xmm regT2 = reg;
 	if ((mFLAG.doFlag && !(_XYZW_SS && modXYZW)))
@@ -113,18 +129,45 @@ static void mVUupdateFlags(mV, const xmm& reg, const xmm& regT1in = xEmptyReg, c
 
 	//-------------------------Check for Signed flags------------------------------
 
-	xMOVMSKPS(mReg,  regT2); // Move the Sign Bits of the t2reg
-	xXOR.PS  (regT1, regT1); // Clear regT1
-	xCMPEQ.PS(regT1, regT2); // Set all F's if each vector is zero
-	xMOVMSKPS(gprT2, regT1); // Used for Zero Flag Calculation
+	if (useK)
+	{
+		// CMPEQPS against zero honours MXCSR.DAZ, so denormals count as zero when it is set.
+		const FPControlRegister fpcr = isCOP2 ? EmuConfig.Cpu.FPUFPCR :
+			(mVU.index ? EmuConfig.Cpu.VU1FPCR : EmuConfig.Cpu.VU0FPCR);
+		const u8 zeroClass = 0x06 | (fpcr.GetDenormalsAreZero() ? 0x20 : 0x00); // +0, -0 (, denormal)
+		xVFPCLASSPS(k1, regT2, zeroClass);
+		// Sign bits via MOVMSKPS (1 instruction vs VPMOVD2M+KMOVW); needs a legacy-encodable register.
+		if (regT2.IsEVEXHigh())
+		{
+			xVPMOVD2M(k2, regT2);
+			xKMOVW(mReg, k2);
+		}
+		else
+			xMOVMSKPS(mReg, regT2);
+		xKMOVW(gprT2, k1);
+		xSHL(mReg, 4);
+		xOR(mReg, gprT2);
+		// MOVMSKPS / VFPCLASSPS only produce 4 lanes, so the mask is a no-op for full XYZW.
+		if (AND_XYZW != 0xf)
+			xAND(mReg, AND_XYZW | (AND_XYZW << 4)); // Sign bits in 4-7, zero bits in 0-3
+	}
+	else
+	{
+		xMOVMSKPS(mReg,  regT2); // Move the Sign Bits of the t2reg
+		xXOR.PS  (regT1, regT1); // Clear regT1
+		xCMPEQ.PS(regT1, regT2); // Set all F's if each vector is zero
+		xMOVMSKPS(gprT2, regT1); // Used for Zero Flag Calculation
 
-	xAND(mReg, AND_XYZW); // Grab "Is Signed" bits from the previous calculation
-	xSHL(mReg, 4);
+		if (AND_XYZW != 0xf) // full XYZW: MOVMSKPS already yields exactly 4 bits
+			xAND(mReg, AND_XYZW); // Grab "Is Signed" bits from the previous calculation
+		xSHL(mReg, 4);
 
-	//-------------------------Check for Zero flags------------------------------
+		//-------------------------Check for Zero flags------------------------------
 
-	xAND(gprT2, AND_XYZW); // Grab "Is Zero" bits from the previous calculation
-	xOR(mReg, gprT2);
+		if (AND_XYZW != 0xf)
+			xAND(gprT2, AND_XYZW); // Grab "Is Zero" bits from the previous calculation
+		xOR(mReg, gprT2);
+	}
 
 	//-------------------------Overflow Flags-----------------------------------
 	// Legacy fallback for paths which do not have software result classification.
@@ -134,7 +177,10 @@ static void mVUupdateFlags(mV, const xmm& reg, const xmm& regT1in = xEmptyReg, c
 		xAND.PS(regT1, regT2, ptr128[&sse4_compvals[1][0]]); // Remove sign flags (we don't care)
 		xCMPNLT.PS(regT1, ptr128[&sse4_compvals[0][0]]); // Compare if T1 == FLT_MAX
 		xMOVMSKPS(gprT2, regT1); // Grab sign bits  for equal results
-		xAND(gprT2, AND_XYZW); // Grab "Is FLT_MAX" bits from the previous calculation
+		if (AND_XYZW != 0xf)
+			xAND(gprT2, AND_XYZW); // Grab "Is FLT_MAX" bits from the previous calculation
+		else
+			xTEST(gprT2, gprT2); // AND set the flags for the jump below; keep that without the mask
 		xForwardJump32 oJMP(Jcc_Zero);
 
 		xOR(sReg, 0x820000);
@@ -712,17 +758,29 @@ mVUop(mVU_CLIP)
 	{
 		const xmm& Fs = mVU.regAlloc->allocReg(_Fs_, 0, 0xf);
 		const xmm& Ft = mVU.regAlloc->allocReg(_Ft_, 0, 0x1);
+		// AVX-512: zero denormal lanes with VPTESTMD (memory operand) + a zeroing mask (2 instructions, no second
+		// temporary). SoftFloat keeps k1-k5 as scratch, so it stays on the legacy sequence.
+		// Needs proper testing.
+		const bool useK = x86Emitter::avx512.HasCore() && !CHECK_VU_SOFT(mVU.index);
 		const xmm& t1 = mVU.regAlloc->allocReg();
-		const xmm& t2 = mVU.regAlloc->allocReg();
+		const xmm& t2 = useK ? xEmptyReg : mVU.regAlloc->allocReg();
 
 		mVUunpack_xyzw(Ft, Ft, 0);
 		mVUallocCFLAGa(mVU, gprT1, cFLAG.lastWrite);
 		xSHL(gprT1, 6);
 
+		if (useK)
+		{
+			xVPTESTMD(k1, Fs, ptr128[mVUglob.exponent]); // exponent != 0
+			xVPTERNLOGD(t1, Fs, Fs, 0xcc, k1, true); // Fs where normal, else 0
+		}
+		else
+		{
 		xPAND    (t1, Fs, ptr128[mVUglob.exponent]);
 		xPXOR    (t2, t2);
 		xPCMP.EQD(t1, t2); // Denormal check
 		xPANDN   (t1, Fs); // If denormal, set to zero, which can't be greater than any nonnegative denormal in Ft
+		}
 		xPAND    (Ft, ptr128[mVUglob.absclip]);
 
 		xPXOR    (Fs, t1, ptr128[mVUglob.signbit]); // Negate
@@ -740,7 +798,8 @@ mVUop(mVU_CLIP)
 		mVU.regAlloc->clearNeeded(Fs);
 		mVU.regAlloc->clearNeeded(Ft);
 		mVU.regAlloc->clearNeeded(t1);
-		mVU.regAlloc->clearNeeded(t2);
+		if (!useK)
+			mVU.regAlloc->clearNeeded(t2);
 		mVU.profiler.EmitOp(opCLIP);
 	}
 	pass3

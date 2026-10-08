@@ -434,6 +434,8 @@ namespace R5900
 	const OPCODE& GetInstruction(u32 op);
 	namespace OpcodeTables
 	{
+		// Called before CPU worker threads start, after runtime feature detection.
+		void InitializeInterpreterISA();
 		using ::R5900::OPCODE;
 
 		extern const OPCODE tbl_Standard[64];

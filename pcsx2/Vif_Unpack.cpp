@@ -6,6 +6,11 @@
 #include "Vif_Dma.h"
 #include "Vif_Dynarec.h"
 #include "MTVU.h"
+#ifdef _M_X86
+#include "common/emitter/x86types.h"
+#include "x86/InterpreterAVX512.h"
+#include <cpuinfo.h>
+#endif
 
 enum UnpackOffset {
 	OFFSET_X = 0,
@@ -479,6 +484,70 @@ __ri void _nVifUnpackLoop(const u8* data)
 
 	pxAssume(vif.cl == 0);
 	//pxAssume (vifRegs.cycle.wl > 0);
+
+#ifdef _M_X86
+	if constexpr (!doMode && !isFill)
+	{
+		const u32 format = upkNum & 0xf;
+		// AVX-512 batches 4 vectors (all of V4-32/16/8/5); AVX2 batches 2 and leaves V4-5 to the generic path.
+		// Needs proper testing on VIF-heavy titles.
+		const bool use_avx512 = format >= 0xc && x86Emitter::avx512.HasCore() && vifRegs.num >= 4;
+		const bool use_avx2 = !use_avx512 && format >= 0xc && format <= 0xe && vifRegs.num >= 2 && cpuinfo_has_x86_avx2();
+		if (!(vif.cmd & 0x10) && (use_avx512 || use_avx2) &&
+			vifRegs.cycle.cl == vifRegs.cycle.wl && !(vif.tag.addr & 15))
+		{
+			// Batch only complete, contiguous V4 vectors. Split at the VU memory
+			// boundary so wrapped writes retain the interpreter's exact footprint.
+			constexpr u32 memory_size = idx == 0 ? 0x1000 : 0x4000;
+			while (vifRegs.num)
+			{
+				const u32 offset = vif.tag.addr & (memory_size - 1);
+				const u32 count = std::min<u32>(vifRegs.num, (memory_size - offset) / 16);
+				if (use_avx512)
+					InterpreterAVX512::UnpackV4(getVUptr(idx, vif.tag.addr), data, count, format, usn != 0);
+				else
+					InterpreterAVX2::UnpackV4(getVUptr(idx, vif.tag.addr), data, count, format, usn != 0);
+				vif.tag.addr += count * 16;
+				vifRegs.num -= count;
+				vif.cl = (vif.cl + count) % std::max<u32>(1, vifRegs.cycle.wl);
+				data += count * vSize;
+			}
+			return;
+		}
+
+		// S / V2 / V3 on AVX2+ (also on AVX-512 CPUs). The generic S and V2 code leans on a work register
+		// loaded at cl == 0, so those only batch whole cycles from cl == 0 with wl <= 4 / 2; V3 is
+		// stateless. Anything left over (or ineligible) continues in the generic loop below.
+		// Needs proper testing on VIF-heavy titles.
+		const bool sv_format = format <= 2 || (format >= 4 && format <= 6) || (format >= 8 && format <= 10);
+		if (sv_format && !(vif.cmd & 0x10) && vifRegs.num >= 2 && vifRegs.cycle.cl == vifRegs.cycle.wl &&
+			!(vif.tag.addr & 15) && cpuinfo_has_x86_avx2())
+		{
+			const u32 wl = std::max<u32>(1, vifRegs.cycle.wl);
+			const bool is_v3 = format >= 8;
+			if (vif.cl < wl && (is_v3 || (vif.cl == 0 && wl <= (format < 4 ? 4u : 2u))))
+			{
+				constexpr u32 memory_size = idx == 0 ? 0x1000 : 0x4000;
+				while (vifRegs.num)
+				{
+					const u32 offset = vif.tag.addr & (memory_size - 1);
+					u32 count = std::min<u32>(vifRegs.num, (memory_size - offset) / 16);
+					if (!is_v3)
+						count -= count % wl;
+					if (!count)
+						break;
+					InterpreterAVX2::UnpackSV(getVUptr(idx, vif.tag.addr), data, count, format, usn != 0, vif.cl, wl);
+					vif.tag.addr += count * 16;
+					vifRegs.num -= count;
+					vif.cl = (vif.cl + count) % wl;
+					data += count * vSize;
+				}
+				if (!vifRegs.num)
+					return;
+			}
+		}
+	}
+#endif
 
 	do
 	{

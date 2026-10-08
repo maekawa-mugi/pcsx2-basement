@@ -91,8 +91,18 @@ static void recSetBranchL(int ltz)
 
 	if (regsxmm >= 0)
 	{
-		xMOVMSKPS(eax, xRegisterSSE(regsxmm));
-		xTEST(al, 2);
+		// bit 63 of the low qword lives in the sign of dword 1. PTEST sets ZF when it is clear (non-negative),
+		// the same polarity as the old MOVMSKPS+TEST, without crossing into a GPR. Needs proper testing.
+		alignas(16) static const u32 s_signHiDword[4] = {0, 0x80000000u, 0, 0};
+		if (!xRegisterSSE(regsxmm).IsEVEXHigh())
+		{
+			xPTEST(xRegisterSSE(regsxmm), ptr128[s_signHiDword]);
+		}
+		else
+		{
+			xMOVMSKPS(eax, xRegisterSSE(regsxmm));
+			xTEST(al, 2);
+		}
 
 		if (ltz)
 			j32Ptr[0] = JZ32(0);

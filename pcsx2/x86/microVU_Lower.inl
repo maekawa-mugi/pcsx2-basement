@@ -197,12 +197,16 @@ static mVUSoftDivCapTailPatch mVUGenerateLowerDivSoftExactKernel(microVU& mVU)
 	constexpr int stack_size = saved_rsi + 8;
 	mVUSoftDivCapTailPatch cap_tail;
 
+	const bool use_avx512_cache_hit_fast = x86Emitter::avx512.HasCore();
 	mVU.softDivExact = xGetAlignedCallTarget();
-	xSUB(rsp, stack_size);
-	xMOV(ptr32[rsp + fs_raw], eax);
-	xMOV(ptr32[rsp + ft_raw], edx);
-	xMOV(ptr64[rsp + saved_rbp], rbp);
-	xMOV(ptr64[rsp + saved_rsi], rsi);
+	if (!use_avx512_cache_hit_fast)
+	{
+		xSUB(rsp, stack_size);
+		xMOV(ptr32[rsp + fs_raw], eax);
+		xMOV(ptr32[rsp + ft_raw], edx);
+		xMOV(ptr64[rsp + saved_rbp], rbp);
+		xMOV(ptr64[rsp + saved_rsi], rsi);
+	}
 	mVUemitLowerSoftBinaryCacheIndex(ecx, eax, edx);
 	mVUemitLowerSoftCacheAddress(mVU.softDivCache.get());
 	xCMP(ptr32[r11 + offsetof(microVUSoftLowerCacheEntry, valid)], 0);
@@ -213,10 +217,26 @@ static mVUSoftDivCapTailPatch mVUGenerateLowerDivSoftExactKernel(microVU& mVU)
 	xForwardJNE32 division_cache_miss_b;
 	xMOV(eax, ptr32[r11 + offsetof(microVUSoftLowerCacheEntry, result)]);
 	xMOV(edx, ptr32[r11 + offsetof(microVUSoftLowerCacheEntry, exception)]);
-	xForwardJump32 division_cache_result_ready;
+	std::optional<xForwardJump32> division_cache_result_ready;
+	if (use_avx512_cache_hit_fast)
+	{
+		xRET();
+	}
+	else
+	{
+		division_cache_result_ready.emplace();
+	}
 	division_cache_miss_invalid.SetTarget();
 	division_cache_miss_a.SetTarget();
 	division_cache_miss_b.SetTarget();
+	if (use_avx512_cache_hit_fast)
+	{
+		xSUB(rsp, stack_size);
+		xMOV(ptr32[rsp + fs_raw], eax);
+		xMOV(ptr32[rsp + ft_raw], edx);
+		xMOV(ptr64[rsp + saved_rbp], rbp);
+		xMOV(ptr64[rsp + saved_rsi], rsi);
+	}
 
 	xMOV(eax, ptr32[rsp + fs_raw]);
 	xAND(eax, 0x7f800000);
@@ -353,7 +373,8 @@ static mVUSoftDivCapTailPatch mVUGenerateLowerDivSoftExactKernel(microVU& mVU)
 	xMOV(edx, ptr32[rsp + exception]);
 	xMOV(ptr32[r11 + offsetof(microVUSoftLowerCacheEntry, exception)], edx);
 	xMOV(ptr32[r11 + offsetof(microVUSoftLowerCacheEntry, valid)], 1);
-	division_cache_result_ready.SetTarget();
+	if (division_cache_result_ready.has_value())
+		division_cache_result_ready->SetTarget();
 	xMOV(rbp, ptr64[rsp + saved_rbp]);
 	xMOV(rsi, ptr64[rsp + saved_rsi]);
 	xADD(rsp, stack_size);
@@ -404,12 +425,16 @@ static void mVUGenerateLowerSqrtSoftExactKernel(microVU& mVU)
 	constexpr int saved_rsi = saved_rbp + 8;
 	constexpr int saved_rdi = saved_rsi + 8;
 	constexpr int saved_xmm = saved_rdi + 8;
-	constexpr int stack_size = saved_xmm + 16 + 8;
 
+	const bool use_avx512_cache_hit_fast = x86Emitter::avx512.HasCore();
+	const int stack_size = use_avx512_cache_hit_fast ? saved_xmm : saved_xmm + 16 + 8;
 	mVU.softSqrtExact = xGetAlignedCallTarget();
-	xSUB(rsp, stack_size);
-	xMOVAPS(ptr128[rsp + saved_xmm], xmm0);
-	xMOV(ptr32[rsp + ft_raw], eax);
+	if (!use_avx512_cache_hit_fast)
+	{
+		xSUB(rsp, stack_size);
+		xMOVAPS(ptr128[rsp + saved_xmm], xmm0);
+		xMOV(ptr32[rsp + ft_raw], eax);
+	}
 	mVUemitLowerSoftUnaryCacheIndex(ecx, eax);
 	mVUemitLowerSoftCacheAddress(mVU.softSqrtCache.get());
 	xCMP(ptr32[r11 + offsetof(microVUSoftUnaryCacheEntry, valid)], 0);
@@ -418,9 +443,22 @@ static void mVUGenerateLowerSqrtSoftExactKernel(microVU& mVU)
 	xForwardJNE32 sqrt_cache_miss_key;
 	xMOV(eax, ptr32[r11 + offsetof(microVUSoftUnaryCacheEntry, result)]);
 	xMOV(edx, ptr32[r11 + offsetof(microVUSoftUnaryCacheEntry, exception)]);
-	xForwardJump32 sqrt_cache_result_ready;
+	std::optional<xForwardJump32> sqrt_cache_result_ready;
+	if (use_avx512_cache_hit_fast)
+	{
+		xRET();
+	}
+	else
+	{
+		sqrt_cache_result_ready.emplace();
+	}
 	sqrt_cache_miss_invalid.SetTarget();
 	sqrt_cache_miss_key.SetTarget();
+	if (use_avx512_cache_hit_fast)
+	{
+		xSUB(rsp, stack_size);
+		xMOV(ptr32[rsp + ft_raw], eax);
+	}
 	xXOR(edx, edx);
 	xTEST(eax, 0x80000000);
 	xForwardJZ8 sqrt_status_ready;
@@ -437,15 +475,30 @@ static void mVUGenerateLowerSqrtSoftExactKernel(microVU& mVU)
 	xAND(edx, 0x7f800000);
 	xCMP(edx, 0x7f800000);
 	xForwardJZ32 sqrt_extended_input;
-	xMOVDZX(xmm0, ptr32[rsp + ft_raw]);
-	xPAND(xmm0, ptr128[mVUglob.absclip]);
+	if (use_avx512_cache_hit_fast)
+	{
+		xMOV(eax, ptr32[rsp + ft_raw]);
+		xAND(eax, 0x7fffffff);
+		xVMOVD(xmm16, eax);
+	}
+	else
+	{
+		xMOVDZX(xmm0, ptr32[rsp + ft_raw]);
+		xPAND(xmm0, ptr128[mVUglob.absclip]);
+	}
 	const bool switch_mxcsr = mVUupperSoftNeedsTruncateMxcsr(mVU);
 	if (switch_mxcsr)
 		xLDMXCSR(ptr32[&s_vu_soft_truncate_mxcsr]);
-	xSQRT.SS(xmm0, xmm0);
+	if (use_avx512_cache_hit_fast)
+		xVSQRTSS(xmm16, xmm16, xmm16);
+	else
+		xSQRT.SS(xmm0, xmm0);
 	if (switch_mxcsr)
 		xLDMXCSR(ptr32[mVU.index == 0 ? &EmuConfig.Cpu.VU0FPCR.bitmask : &EmuConfig.Cpu.VU1FPCR.bitmask]);
-	xMOVD(r9d, xmm0);
+	if (use_avx512_cache_hit_fast)
+		xVMOVD(r9d, xmm16);
+	else
+		xMOVD(r9d, xmm0);
 	xTEST(ptr32[rsp + ft_raw], 0x7fffff);
 	xForwardJZ32 sqrt_correction_ready;
 	// SQRTSS with chop rounding supplies floor(sqrt(radicand)). Hardware never
@@ -561,8 +614,10 @@ static void mVUGenerateLowerSqrtSoftExactKernel(microVU& mVU)
 	xMOV(edx, ptr32[rsp + exception]);
 	xMOV(ptr32[r11 + offsetof(microVUSoftUnaryCacheEntry, exception)], edx);
 	xMOV(ptr32[r11 + offsetof(microVUSoftUnaryCacheEntry, valid)], 1);
-	sqrt_cache_result_ready.SetTarget();
-	xMOVAPS(xmm0, ptr128[rsp + saved_xmm]);
+	if (sqrt_cache_result_ready.has_value())
+		sqrt_cache_result_ready->SetTarget();
+	if (!use_avx512_cache_hit_fast)
+		xMOVAPS(xmm0, ptr128[rsp + saved_xmm]);
 	xADD(rsp, stack_size);
 	xRET();
 }
@@ -581,16 +636,22 @@ static void mVUGenerateLowerRsqrtSoftExactKernel(microVU& mVU)
 	constexpr int saved_rbp = result_exp + 4;
 	constexpr int saved_rsi = saved_rbp + 8;
 	constexpr int saved_xmm = (saved_rsi + 8 + 15) & ~15;
-	constexpr int stack_size = saved_xmm + 16 + 8;
+	const bool use_extended_scratch = x86Emitter::avx512.HasCore();
+	const int stack_size = saved_xmm + (use_extended_scratch ? 8 : 24);
 
-	static_assert((stack_size & 15) == 8);
+	pxAssert((stack_size & 15) == 8);
 	mVU.softRsqrtExact = xGetAlignedCallTarget();
-	xSUB(rsp, stack_size);
-	xMOV(ptr32[rsp + fs_raw], eax);
-	xMOV(ptr32[rsp + ft_raw], edx);
-	xMOV(ptr64[rsp + saved_rbp], rbp);
-	xMOV(ptr64[rsp + saved_rsi], rsi);
-	xMOVAPS(ptr128[rsp + saved_xmm], xmm0);
+	const auto emit_prologue = [&]() {
+		xSUB(rsp, stack_size);
+		xMOV(ptr32[rsp + fs_raw], eax);
+		xMOV(ptr32[rsp + ft_raw], edx);
+		xMOV(ptr64[rsp + saved_rbp], rbp);
+		xMOV(ptr64[rsp + saved_rsi], rsi);
+		if (!use_extended_scratch)
+			xMOVAPS(ptr128[rsp + saved_xmm], xmm0);
+	};
+	if (!use_extended_scratch)
+		emit_prologue();
 
 	mVUemitLowerSoftBinaryCacheIndex(ecx, eax, edx);
 	mVUemitLowerSoftCacheSetAddress(mVU.softRsqrtCache.get());
@@ -602,7 +663,11 @@ static void mVUGenerateLowerRsqrtSoftExactKernel(microVU& mVU)
 	xForwardJNE32 rsqrt_cache_probe_way1_b;
 	xMOV(eax, ptr32[r11 + offsetof(microVUSoftLowerCacheEntry, result)]);
 	xMOV(edx, ptr32[r11 + offsetof(microVUSoftLowerCacheEntry, exception)]);
-	xForwardJump32 rsqrt_finished_way0;
+	std::optional<xForwardJump32> rsqrt_finished_way0;
+	if (use_extended_scratch)
+		xRET();
+	else
+		rsqrt_finished_way0.emplace();
 
 	rsqrt_cache_probe_way1_invalid.SetTarget();
 	rsqrt_cache_probe_way1_a.SetTarget();
@@ -616,11 +681,17 @@ static void mVUGenerateLowerRsqrtSoftExactKernel(microVU& mVU)
 	xForwardJNE32 rsqrt_cache_miss_b;
 	xMOV(eax, ptr32[r11 + offsetof(microVUSoftLowerCacheEntry, result)]);
 	xMOV(edx, ptr32[r11 + offsetof(microVUSoftLowerCacheEntry, exception)]);
-	xForwardJump32 rsqrt_finished;
+	std::optional<xForwardJump32> rsqrt_finished;
+	if (use_extended_scratch)
+		xRET();
+	else
+		rsqrt_finished.emplace();
 
 	rsqrt_cache_miss_invalid.SetTarget();
 	rsqrt_cache_miss_a.SetTarget();
 	rsqrt_cache_miss_b.SetTarget();
+	if (use_extended_scratch)
+		emit_prologue();
 	xMOV(ecx, ptr32[rsp + ft_raw]);
 	xAND(ecx, 0x7f800000);
 	xForwardJZ32 rsqrt_zero_divisor;
@@ -633,15 +704,30 @@ static void mVUGenerateLowerRsqrtSoftExactKernel(microVU& mVU)
 	xForwardJE32 rsqrt_fs_exceptional_side_exit;
 
 	// Start with a chop-mode SQRTSS candidate, then apply the exact PS2 correction.
-	xMOVDZX(xmm0, ptr32[rsp + ft_raw]);
-	xPAND(xmm0, ptr128[mVUglob.absclip]);
+	if (use_extended_scratch)
+	{
+		xMOV(eax, ptr32[rsp + ft_raw]);
+		xAND(eax, 0x7fffffff);
+		xVMOVD(xmm16, eax);
+	}
+	else
+	{
+		xMOVDZX(xmm0, ptr32[rsp + ft_raw]);
+		xPAND(xmm0, ptr128[mVUglob.absclip]);
+	}
 	const bool switch_mxcsr = mVUupperSoftNeedsTruncateMxcsr(mVU);
 	if (switch_mxcsr)
 		xLDMXCSR(ptr32[&s_vu_soft_truncate_mxcsr]);
-	xSQRT.SS(xmm0, xmm0);
+	if (use_extended_scratch)
+		xVSQRTSS(xmm16, xmm16, xmm16);
+	else
+		xSQRT.SS(xmm0, xmm0);
 	if (switch_mxcsr)
 		xLDMXCSR(ptr32[mVU.index == 0 ? &EmuConfig.Cpu.VU0FPCR.bitmask : &EmuConfig.Cpu.VU1FPCR.bitmask]);
-	xMOVD(r9d, xmm0);
+	if (use_extended_scratch)
+		xVMOVD(r9d, xmm16);
+	else
+		xMOVD(r9d, xmm0);
 	xTEST(ptr32[rsp + ft_raw], 0x7fffff);
 	xForwardJZ32 rsqrt_sqrt_correction_ready;
 	xMOV(eax, r9d);
@@ -839,9 +925,12 @@ static void mVUGenerateLowerRsqrtSoftExactKernel(microVU& mVU)
 	xMOV(ptr32[r11 + offsetof(microVUSoftLowerCacheEntry, exception)], edx);
 	xMOV(ptr32[r11 + offsetof(microVUSoftLowerCacheEntry, valid)], r10d);
 
-	rsqrt_finished_way0.SetTarget();
-	rsqrt_finished.SetTarget();
-	xMOVAPS(xmm0, ptr128[rsp + saved_xmm]);
+	if (rsqrt_finished_way0.has_value())
+		rsqrt_finished_way0->SetTarget();
+	if (rsqrt_finished.has_value())
+		rsqrt_finished->SetTarget();
+	if (!use_extended_scratch)
+		xMOVAPS(xmm0, ptr128[rsp + saved_xmm]);
 	xMOV(rbp, ptr64[rsp + saved_rbp]);
 	xMOV(rsi, ptr64[rsp + saved_rsi]);
 	xADD(rsp, stack_size);
@@ -903,24 +992,44 @@ static void mVUemitLowerPSoftExact(microVU& mVU, const void* first_kernel,
 		xCALL(second_kernel);
 	mVU.regAlloc->clearNeeded(fs);
 
-	xPSHUF.D(xmmPQ, xmmPQ, mVUinfo.writeP ? 0x27 : 0xC6);
-	xPINSR.D(xmmPQ, eax, 0);
-	xPSHUF.D(xmmPQ, xmmPQ, mVUinfo.writeP ? 0x27 : 0xC6);
+	// The old shuffle/insert/shuffle swapped lane 0 with lane 3 (P) or 2 (Q), inserted, and swapped back:
+	// equivalent to inserting straight into that lane.
+	xPINSR.D(xmmPQ, eax, mVUinfo.writeP ? 3 : 2);
 }
 
 // Test if Vector is +/- Zero
-static __fi void testZero(const xmm& xmmReg, const xmm& xmmTemp, const x32& gprTemp)
+// ZF = 1 when lane 0 is zero (note: opposite polarity to the old CMPEQSS form, callers use JNZ to skip a
+// non-zero operand). One PTEST against the magnitude mask replaces xor + CMPEQSS + PTEST. With DAZ set the
+// exponent-only mask also counts denormals as zero, like CMPEQSS did. Needs proper testing.
+static __fi void testZero(mV, const xmm& xmmReg, const xmm& xmmTemp)
 {
+	if (!xmmReg.IsEVEXHigh())
+	{
+		alignas(16) static const u32 s_magMask[4] = {0x7fffffff, 0, 0, 0};
+		alignas(16) static const u32 s_expMask[4] = {0x7f800000, 0, 0, 0};
+		const FPControlRegister fpcr = mVU.index ? EmuConfig.Cpu.VU1FPCR : EmuConfig.Cpu.VU0FPCR;
+		xPTEST(xmmReg, ptr128[fpcr.GetDenormalsAreZero() ? s_expMask : s_magMask]);
+		return;
+	}
 	xXOR.PS(xmmTemp, xmmTemp);
-	xCMPEQ.SS(xmmTemp, xmmReg);
+	xCMPNE.SS(xmmTemp, xmmReg);
 	xPTEST(xmmTemp, xmmTemp);
 }
 
 // Test if Vector is Negative (Set Flags and Makes Positive)
 static __fi void testNeg(mV, const xmm& xmmReg, const x32& gprTemp)
 {
-	xMOVMSKPS(gprTemp, xmmReg);
-	xTEST(gprTemp, 1);
+	// A sign-only PTEST replaces MOVMSKPS+TEST and keeps the check out of the GPR file (ZF=1 when positive).
+	if (!xmmReg.IsEVEXHigh())
+	{
+		alignas(16) static const u32 s_signMask[4] = {0x80000000, 0, 0, 0};
+		xPTEST(xmmReg, ptr128[s_signMask]);
+	}
+	else
+	{
+		xMOVMSKPS(gprTemp, xmmReg);
+		xTEST(gprTemp, 1);
+	}
 	xForwardJZ8 skip;
 		xMOV(ptr32[&mVU.divFlag], divI);
 		xAND.PS(xmmReg, ptr128[mVUglob.absclip]);
@@ -948,11 +1057,11 @@ mVUop(mVU_DIV)
 		const xmm& Fs = mVU.regAlloc->allocReg(_Fs_, 0, (1 << (3 - _Fsf_)));
 		const xmm& t1 = mVU.regAlloc->allocReg();
 
-		testZero(Ft, t1, gprT1); // Test if Ft is zero
-		xForwardJZ8 cjmp; // Skip if not zero
+		testZero(mVU, Ft, t1); // Test if Ft is zero
+		xForwardJNZ8 cjmp; // Skip if not zero
 
-			testZero(Fs, t1, gprT1); // Test if Fs is zero
-			xForwardJZ8 ajmp;
+			testZero(mVU, Fs, t1); // Test if Fs is zero
+			xForwardJNZ8 ajmp;
 				xMOV(ptr32[&mVU.divFlag], divI); // Set invalid flag (0/0)
 				xForwardJump8 bjmp;
 			ajmp.SetTarget();
@@ -1046,11 +1155,11 @@ mVUop(mVU_RSQRT)
 		testNeg(mVU, Ft, gprT1); // Check for negative sqrt
 
 		xSQRT.SS(Ft, Ft);
-		testZero(Ft, t1, gprT1); // Test if Ft is zero
-		xForwardJZ8 ajmp; // Skip if not zero
+		testZero(mVU, Ft, t1); // Test if Ft is zero
+		xForwardJNZ8 ajmp; // Skip if not zero
 
-			testZero(Fs, t1, gprT1); // Test if Fs is zero
-			xForwardJZ8 bjmp; // Skip if none are
+			testZero(mVU, Fs, t1); // Test if Fs is zero
+			xForwardJNZ8 bjmp; // Skip if none are
 				xMOV(ptr32[&mVU.divFlag], divI); // Set invalid flag (0/0)
 				xForwardJump8 cjmp;
 			bjmp.SetTarget();
@@ -1090,8 +1199,7 @@ mVUop(mVU_RSQRT)
 	{ \
 		SSE_MULSS(mVU, t2, Fs); \
 		SSE_MULSS(mVU, t2, Fs); \
-		xMOVAPS(t1, t2); \
-		xMUL.SS(t1, ptr32[addr]); \
+		xMUL.SS(t1, t2, ptr32[addr]); \
 		SSE_ADDSS(mVU, PQ, t1); \
 	}
 
@@ -1207,8 +1315,7 @@ mVUop(mVU_EATANxz)
 #define eexpHelper(addr) \
 	{ \
 		SSE_MULSS(mVU, t2, Fs); \
-		xMOVAPS(t1, t2); \
-		xMUL.SS(t1, ptr32[addr]); \
+		xMUL.SS(t1, t2, ptr32[addr]); \
 		SSE_ADDSS(mVU, xmmPQ, t1); \
 	}
 
@@ -1257,11 +1364,18 @@ mVUop(mVU_EEXP)
 	pass3 { mVUlog("EEXP P"); }
 }
 
-// sumXYZ(): PQ.x = x ^ 2 + y ^ 2 + z ^ 2
-static __fi void mVU_sumXYZ(mV, const xmm& PQ, const xmm& Fs)
+// Writes lane 0 of reg into the P instance written by this op (xmmPQ lane 2 or 3), leaving the
+// other lanes untouched. Replaces the PSHUFD flip / scalar op in xmmPQ / flip back sequence.
+// Needs proper testing.
+static __fi void mVU_writeP(mV, const xmm& reg)
+{
+	xINSERTPS(xmmPQ, reg, _MM_MK_INSERTPS_NDX(0, mVUinfo.writeP ? 3 : 2, 0));
+}
+
+// sumXYZ(): Fs.x = x ^ 2 + y ^ 2 + z ^ 2
+static __fi void mVU_sumXYZ(mV, const xmm& Fs)
 {
 	xDP.PS(Fs, Fs, 0x71);
-	xMOVSS(PQ, Fs);
 }
 
 mVUop(mVU_ELENG)
@@ -1278,10 +1392,9 @@ mVUop(mVU_ELENG)
 	pass2
 	{
 		const xmm& Fs = mVU.regAlloc->allocReg(_Fs_, 0, _X_Y_Z_W);
-		xPSHUF.D       (xmmPQ, xmmPQ, mVUinfo.writeP ? 0x27 : 0xC6); // Flip xmmPQ to get Valid P instance
-		mVU_sumXYZ(mVU, xmmPQ, Fs);
-		xSQRT.SS       (xmmPQ, xmmPQ);
-		xPSHUF.D       (xmmPQ, xmmPQ, mVUinfo.writeP ? 0x27 : 0xC6); // Flip back
+		mVU_sumXYZ(mVU, Fs);
+		xSQRT.SS       (Fs, Fs);
+		mVU_writeP(mVU, Fs);
 		mVU.regAlloc->clearNeeded(Fs);
 		mVU.profiler.EmitOp(opELENG);
 	}
@@ -1308,13 +1421,12 @@ mVUop(mVU_ERCPR)
 		else
 		{
 			const xmm& Fs = mVU.regAlloc->allocReg(_Fs_, 0, (1 << (3 - _Fsf_)));
-			xPSHUF.D      (xmmPQ, xmmPQ, mVUinfo.writeP ? 0x27 : 0xC6); // Flip xmmPQ to get Valid P instance
-			xMOVSS        (xmmPQ, Fs);
-			xMOVSSZX      (Fs, ptr32[mVUglob.one]);
-			SSE_DIVSS(mVU, Fs, xmmPQ);
-			xMOVSS        (xmmPQ, Fs);
-			xPSHUF.D      (xmmPQ, xmmPQ, mVUinfo.writeP ? 0x27 : 0xC6); // Flip back
+			const xmm& t1 = mVU.regAlloc->allocReg();
+			xMOVSSZX      (t1, ptr32[mVUglob.one]);
+			SSE_DIVSS(mVU, t1, Fs);
+			mVU_writeP(mVU, t1);
 			mVU.regAlloc->clearNeeded(Fs);
+			mVU.regAlloc->clearNeeded(t1);
 		}
 		mVU.profiler.EmitOp(opERCPR);
 	}
@@ -1335,14 +1447,14 @@ mVUop(mVU_ERLENG)
 	pass2
 	{
 		const xmm& Fs = mVU.regAlloc->allocReg(_Fs_, 0, _X_Y_Z_W);
-		xPSHUF.D       (xmmPQ, xmmPQ, mVUinfo.writeP ? 0x27 : 0xC6); // Flip xmmPQ to get Valid P instance
-		mVU_sumXYZ(mVU, xmmPQ, Fs);
-		xSQRT.SS       (xmmPQ, xmmPQ);
-		xMOVSSZX       (Fs, ptr32[mVUglob.one]);
-		SSE_DIVSS (mVU, Fs, xmmPQ);
-		xMOVSS         (xmmPQ, Fs);
-		xPSHUF.D       (xmmPQ, xmmPQ, mVUinfo.writeP ? 0x27 : 0xC6); // Flip back
+		const xmm& t1 = mVU.regAlloc->allocReg();
+		mVU_sumXYZ(mVU, Fs);
+		xSQRT.SS       (Fs, Fs);
+		xMOVSSZX       (t1, ptr32[mVUglob.one]);
+		SSE_DIVSS (mVU, t1, Fs);
+		mVU_writeP(mVU, t1);
 		mVU.regAlloc->clearNeeded(Fs);
+		mVU.regAlloc->clearNeeded(t1);
 		mVU.profiler.EmitOp(opERLENG);
 	}
 	pass3 { mVUlog("ERLENG P"); }
@@ -1362,13 +1474,13 @@ mVUop(mVU_ERSADD)
 	pass2
 	{
 		const xmm& Fs = mVU.regAlloc->allocReg(_Fs_, 0, _X_Y_Z_W);
-		xPSHUF.D       (xmmPQ, xmmPQ, mVUinfo.writeP ? 0x27 : 0xC6); // Flip xmmPQ to get Valid P instance
-		mVU_sumXYZ(mVU, xmmPQ, Fs);
-		xMOVSSZX       (Fs, ptr32[mVUglob.one]);
-		SSE_DIVSS (mVU, Fs, xmmPQ);
-		xMOVSS         (xmmPQ, Fs);
-		xPSHUF.D       (xmmPQ, xmmPQ, mVUinfo.writeP ? 0x27 : 0xC6); // Flip back
+		const xmm& t1 = mVU.regAlloc->allocReg();
+		mVU_sumXYZ(mVU, Fs);
+		xMOVSSZX       (t1, ptr32[mVUglob.one]);
+		SSE_DIVSS (mVU, t1, Fs);
+		mVU_writeP(mVU, t1);
 		mVU.regAlloc->clearNeeded(Fs);
+		mVU.regAlloc->clearNeeded(t1);
 		mVU.profiler.EmitOp(opERSADD);
 	}
 	pass3 { mVUlog("ERSADD P"); }
@@ -1394,14 +1506,14 @@ mVUop(mVU_ERSQRT)
 		else
 		{
 			const xmm& Fs = mVU.regAlloc->allocReg(_Fs_, 0, (1 << (3 - _Fsf_)));
-			xPSHUF.D      (xmmPQ, xmmPQ, mVUinfo.writeP ? 0x27 : 0xC6); // Flip xmmPQ to get Valid P instance
+			const xmm& t1 = mVU.regAlloc->allocReg();
 			xAND.PS       (Fs, ptr128[mVUglob.absclip]);
-			xSQRT.SS      (xmmPQ, Fs);
-			xMOVSSZX      (Fs, ptr32[mVUglob.one]);
-			SSE_DIVSS(mVU, Fs, xmmPQ);
-			xMOVSS        (xmmPQ, Fs);
-			xPSHUF.D      (xmmPQ, xmmPQ, mVUinfo.writeP ? 0x27 : 0xC6); // Flip back
+			xSQRT.SS      (Fs, Fs);
+			xMOVSSZX      (t1, ptr32[mVUglob.one]);
+			SSE_DIVSS(mVU, t1, Fs);
+			mVU_writeP(mVU, t1);
 			mVU.regAlloc->clearNeeded(Fs);
+			mVU.regAlloc->clearNeeded(t1);
 		}
 		mVU.profiler.EmitOp(opERSQRT);
 	}
@@ -1422,9 +1534,8 @@ mVUop(mVU_ESADD)
 	pass2
 	{
 		const xmm& Fs = mVU.regAlloc->allocReg(_Fs_, 0, _X_Y_Z_W);
-		xPSHUF.D(xmmPQ, xmmPQ, mVUinfo.writeP ? 0x27 : 0xC6); // Flip xmmPQ to get Valid P instance
-		mVU_sumXYZ(mVU, xmmPQ, Fs);
-		xPSHUF.D(xmmPQ, xmmPQ, mVUinfo.writeP ? 0x27 : 0xC6); // Flip back
+		mVU_sumXYZ(mVU, Fs);
+		mVU_writeP(mVU, Fs);
 		mVU.regAlloc->clearNeeded(Fs);
 		mVU.profiler.EmitOp(opESADD);
 	}
@@ -1496,10 +1607,9 @@ mVUop(mVU_ESQRT)
 		else
 		{
 			const xmm& Fs = mVU.regAlloc->allocReg(_Fs_, 0, (1 << (3 - _Fsf_)));
-			xPSHUF.D(xmmPQ, xmmPQ, mVUinfo.writeP ? 0x27 : 0xC6); // Flip xmmPQ to get Valid P instance
 			xAND.PS (Fs, ptr128[mVUglob.absclip]);
-			xSQRT.SS(xmmPQ, Fs);
-			xPSHUF.D(xmmPQ, xmmPQ, mVUinfo.writeP ? 0x27 : 0xC6); // Flip back
+			xSQRT.SS(Fs, Fs);
+			mVU_writeP(mVU, Fs);
 			mVU.regAlloc->clearNeeded(Fs);
 		}
 		mVU.profiler.EmitOp(opESQRT);
@@ -1522,13 +1632,11 @@ mVUop(mVU_ESUM)
 	{
 		const xmm& Fs = mVU.regAlloc->allocReg(_Fs_, 0, _X_Y_Z_W);
 		const xmm& t1 = mVU.regAlloc->allocReg();
-		xPSHUF.D(xmmPQ, xmmPQ, mVUinfo.writeP ? 0x27 : 0xC6); // Flip xmmPQ to get Valid P instance
 		xPSHUF.D(t1, Fs, 0x1b);
 		SSE_ADDPS(mVU, Fs, t1);
 		xPSHUF.D(t1, Fs, 0x01);
 		SSE_ADDSS(mVU, Fs, t1);
-		xMOVSS(xmmPQ, Fs);
-		xPSHUF.D(xmmPQ, xmmPQ, mVUinfo.writeP ? 0x27 : 0xC6); // Flip back
+		mVU_writeP(mVU, Fs);
 		mVU.regAlloc->clearNeeded(Fs);
 		mVU.regAlloc->clearNeeded(t1);
 		mVU.profiler.EmitOp(opESUM);

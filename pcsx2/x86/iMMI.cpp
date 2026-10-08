@@ -5,6 +5,8 @@
 #include "R5900OpcodeTables.h"
 #include "iR5900.h"
 #include "common/BitUtils.h"
+#include "GS/MultiISA.h"
+#include "cpuinfo.h"
 
 using namespace x86Emitter;
 
@@ -14,6 +16,124 @@ namespace R5900 {
 namespace Dynarec {
 namespace OpcodeImpl {
 namespace MMI {
+
+#include "MMIAVX512.inl"
+
+// Fixed halfword permutation applied to both qwords (PSHUFLW/PSHUFHW with the same imm8) as one
+// byte shuffle. imm8 is a template parameter so each use gets its own constant mask.
+template <u8 imm8>
+struct HalfwordShuffleMask
+{
+	alignas(16) u8 bytes[16];
+	constexpr HalfwordShuffleMask() : bytes{}
+	{
+		for (int q = 0; q < 2; q++)
+			for (int i = 0; i < 4; i++)
+			{
+				const int sel = (imm8 >> (i * 2)) & 3;
+				bytes[q * 8 + i * 2] = static_cast<u8>(q * 8 + sel * 2);
+				bytes[q * 8 + i * 2 + 1] = static_cast<u8>(q * 8 + sel * 2 + 1);
+			}
+	}
+};
+
+// AVX: one VPSHUFB with a memory mask (2 -> 1). Non-AVX PSHUFB is destructive on the data
+// operand, so the legacy-SSE form keeps PSHUFLW+PSHUFHW. Needs proper testing.
+template <u8 imm8>
+static void emitHalfwordShuffle(const xRegisterSSE& dst, const xRegisterSSE& src)
+{
+	alignas(16) static constexpr HalfwordShuffleMask<imm8> mask;
+	if (x86Emitter::use_avx)
+	{
+		xPSHUF.B(dst, src, ptr128[mask.bytes]);
+	}
+	else
+	{
+		xPSHUF.LW(dst, src, imm8);
+		xPSHUF.HW(dst, dst, imm8);
+	}
+}
+
+// AVX VPSHUFB masks that gather the even halfwords / even bytes of a source into the low 8 bytes (high 8 zeroed).
+// Used by PPACH/PPACB/PMFHL.LH: one VPSHUFB per source plus an unpack, instead of 5-7 legacy shuffles/shifts.
+// Needs proper testing against the interpreter.
+alignas(16) static constexpr u8 s_packEvenHalfMask[16] = {0, 1, 4, 5, 8, 9, 12, 13, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80};
+alignas(16) static constexpr u8 s_packEvenByteMask[16] = {0, 2, 4, 6, 8, 10, 12, 14, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80};
+
+// dst = {pack(t) | pack(s) << 64}. Rs == 0 form is a single VPSHUFB (pass s = nullptr). tmp must differ from s/t.
+static void emitPackEvenAVX(const xRegisterSSE& dst, const xRegisterSSE* s, const xRegisterSSE& t,
+	const xRegisterSSE& tmp, const u8* mask)
+{
+	if (!s)
+	{
+		xPSHUF.B(dst, t, ptr128[mask]);
+		return;
+	}
+	xPSHUF.B(tmp, *s, ptr128[mask]);
+	xPSHUF.B(dst, t, ptr128[mask]);
+	xPUNPCK.LQDQ(dst, dst, tmp);
+}
+
+// Splits per-qword 64-bit products into LO/HI sign-extended halves. AVX-512: VPSLLQ+VPSRAQ for LO and
+// VPSRAQ for HI (3 instructions, no dword shuffles); otherwise PSHUFD x2 + PMOVSXDQ x2. dst may equal HI.
+static void emitSplitLoHi(int lo, int hi, int dst)
+{
+	if (avx512.HasCore())
+	{
+		xPSLL.Q(xRegisterSSE(lo), xRegisterSSE(dst), 32);
+		xVPSRAQImm(xRegisterSSE(lo), xRegisterSSE(lo), 32);
+		xVPSRAQImm(xRegisterSSE(hi), xRegisterSSE(dst), 32);
+		return;
+	}
+	xPSHUF.D(xRegisterSSE(lo), xRegisterSSE(dst), 0x88);
+	xPSHUF.D(xRegisterSSE(hi), xRegisterSSE(dst), 0xdd);
+	xPMOVSX.DQ(xRegisterSSE(lo), xRegisterSSE(lo));
+	xPMOVSX.DQ(xRegisterSSE(hi), xRegisterSSE(hi));
+}
+
+// AVX-512 halfword multiply core (PMULTH/PMADDH/PMSUBH): sign-extend both inputs to YMM dwords, VPMULLD,
+// then VPERMQ so that lo = {p0,p1,p4,p5} and hi = {p2,p3,p6,p7} (the LO/HI word order). hi is used as a temp
+// and must differ from s/t/lo. Leaves the upper YMM halves of lo dirty. Needs proper testing.
+static void emitHalfwordProductsAVX512(int lo, int hi, int s, int t)
+{
+	xVPMOVSXWDY(xRegisterSSE(lo), xRegisterSSE(s));
+	xVPMOVSXWDY(xRegisterSSE(hi), xRegisterSSE(t));
+	xVPMULLDY(xRegisterSSE(lo), xRegisterSSE(lo), xRegisterSSE(hi));
+	xVPERMQY(xRegisterSSE(lo), xRegisterSSE(lo), 0xd8);
+	xVEXTRACTI128Y(xRegisterSSE(hi), xRegisterSSE(lo), 1);
+}
+
+// AVX2 flavour of the same core (VEX.256, xmm0-15 only): 5 instructions for PMULTH where the SSE4 form needs 6-9, and
+// PMADDH/PMSUBH drop from 11-18 to 7-9. VPMULLD ymm is 2 uops on Intel, so this is an instruction-count win, not
+// a measured speed win. Leaves the upper YMM half of lo dirty. Needs proper testing.
+static void emitHalfwordProductsAVX2(int lo, int hi, int s, int t)
+{
+	xVexPMOVSXWDY(xRegisterSSE(lo), xRegisterSSE(s));
+	xVexPMOVSXWDY(xRegisterSSE(hi), xRegisterSSE(t));
+	xVexPMULLDY(xRegisterSSE(lo), xRegisterSSE(lo), xRegisterSSE(hi));
+	xVexPERMQY(xRegisterSSE(lo), xRegisterSSE(lo), 0xd8);
+	xVexEXTRACTI128Y(xRegisterSSE(hi), xRegisterSSE(lo), 1);
+}
+
+static bool useWideHalfwordMultiply()
+{
+	return avx512.HasCore() || x86Emitter::use_avx;
+}
+
+static void emitHalfwordProducts(int lo, int hi, int s, int t)
+{
+	if (avx512.HasCore())
+		emitHalfwordProductsAVX512(lo, hi, s, t);
+	else
+		emitHalfwordProductsAVX2(lo, hi, s, t);
+}
+
+// Rd = {LO0, HI0, LO2, HI2} (= {p0,p2,p4,p6} before accumulation): SHUFPS then PSHUFD 0xd8.
+static void emitHalfwordRd(int rd, int lo, int hi)
+{
+	xSHUF.PS(xRegisterSSE(rd), xRegisterSSE(lo), xRegisterSSE(hi), 0x88);
+	xPSHUF.D(xRegisterSSE(rd), xRegisterSSE(rd), 0xd8);
+}
 
 #ifndef MMI_RECOMPILE
 
@@ -84,7 +204,35 @@ void recPLZCW()
 		return;
 	}
 
+	if (avx512.HasCore())
+	{
+		EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READD | XMMINFO_WRITED);
+		const int scratch = _allocTempXMMreg(XMMT_INT);
+		// The low-bank kernel needs no second TEMP; a high-bank scratch still needs a low copy register.
+		const bool high_scratch = xRegisterSSE(scratch).IsEVEXHigh();
+		const int ones = high_scratch ? _allocTempXMMreg(XMMT_INT) : scratch;
+		emitPLZCWAVX512(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S),
+			xRegisterSSE(scratch), xRegisterSSE(ones));
+		_freeXMMreg(scratch);
+		if (high_scratch)
+			_freeXMMreg(ones);
+		_clearNeededXMMregs();
+		return;
+	}
+
 	_eeOnWriteReg(_Rd_, 0);
+
+	// Branchless LZCNT form: count(x ^ (x >> 31)) - 1, where LZCNT(0) = 32 gives the same 31 as the BSR path.
+	// Gated on cpuinfo (LZCNT decodes as BSR on old CPUs). Needs proper testing.
+	static const bool s_has_lzcnt = cpuinfo_initialize() && cpuinfo_has_x86_lzcnt();
+	const auto emitCount = [&](u32 word) {
+		xMOV(ecx, eax);
+		xSAR(ecx, 31);
+		xXOR(eax, ecx);
+		xLZCNT(eax, eax);
+		xDEC(eax);
+		xMOV(ptr[&cpuRegs.GPR.r[_Rd_].UL[word]], eax);
+	};
 
 	if ((xmmregs = _checkXMMreg(XMMTYPE_GPRREG, _Rs_, MODE_READ)) >= 0)
 	{
@@ -111,19 +259,28 @@ void recPLZCW()
 
 	// --- first word ---
 
-	xMOV(ecx, 31);
-	xTEST(eax, eax); // TEST sets the sign flag accordingly.
-	u8* label_notSigned = JNS8(0);
-	xNOT(eax);
-	x86SetJ8(label_notSigned);
+	u8* label_notSigned = nullptr;
+	u8* label_Zeroed = nullptr;
+	if (s_has_lzcnt)
+	{
+		emitCount(0);
+	}
+	else
+	{
+		xMOV(ecx, 31);
+		xTEST(eax, eax); // TEST sets the sign flag accordingly.
+		label_notSigned = JNS8(0);
+		xNOT(eax);
+		x86SetJ8(label_notSigned);
 
-	xBSR(eax, eax);
-	u8* label_Zeroed = JZ8(0); // If BSR sets the ZF, eax is "trash"
-	xSUB(ecx, eax);
-	xDEC(ecx); // PS2 doesn't count the first bit
+		xBSR(eax, eax);
+		label_Zeroed = JZ8(0); // If BSR sets the ZF, eax is "trash"
+		xSUB(ecx, eax);
+		xDEC(ecx); // PS2 doesn't count the first bit
 
-	x86SetJ8(label_Zeroed);
-	xMOV(ptr[&cpuRegs.GPR.r[_Rd_].UL[0]], ecx);
+		x86SetJ8(label_Zeroed);
+		xMOV(ptr[&cpuRegs.GPR.r[_Rd_].UL[0]], ecx);
+	}
 
 	// second word
 
@@ -139,6 +296,13 @@ void recPLZCW()
 	else
 	{
 		xMOV(eax, ptr[&cpuRegs.GPR.r[_Rs_].UL[1]]);
+	}
+
+	if (s_has_lzcnt)
+	{
+		emitCount(1);
+		GPR_DEL_CONST(_Rd_);
+		return;
 	}
 
 	xMOV(ecx, 31);
@@ -165,31 +329,54 @@ void recPMFHL()
 
 	EE::Profiler.EmitOp(eeOpcode::PMFHL);
 
-	int info = eeRecompileCodeXMM(XMMINFO_WRITED | XMMINFO_READLO | XMMINFO_READHI);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_WRITED | XMMINFO_READLO | XMMINFO_READHI);
 
 	int t0reg;
 
 	switch (_Sa_)
 	{
 		case 0x00: // LW
-
-			t0reg = _allocTempXMMreg(XMMT_INT);
-			xPSHUF.D(xRegisterSSE(t0reg), xRegisterSSE(EEREC_HI), 0x88);
-			xPSHUF.D(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_LO), 0x88);
-			xPUNPCK.LDQ(xRegisterSSE(EEREC_D), xRegisterSSE(t0reg));
-
-			_freeXMMreg(t0reg);
+			// SHUFPS + PSHUFD straight into Rd. Only Rd == HI without AVX needs a TEMP.
+			if (EEREC_D == EEREC_HI && !x86Emitter::use_avx)
+			{
+				t0reg = _allocTempXMMreg(XMMT_INT);
+				emitPMFHLAVX512(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_LO), xRegisterSSE(EEREC_HI), xRegisterSSE(t0reg), 0);
+				_freeXMMreg(t0reg);
+			}
+			else
+				emitPMFHLAVX512(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_LO), xRegisterSSE(EEREC_HI), xRegisterSSE(EEREC_D), 0);
 			break;
 
 		case 0x01: // UW
-			t0reg = _allocTempXMMreg(XMMT_INT);
-			xPSHUF.D(xRegisterSSE(t0reg), xRegisterSSE(EEREC_HI), 0xdd);
-			xPSHUF.D(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_LO), 0xdd);
-			xPUNPCK.LDQ(xRegisterSSE(EEREC_D), xRegisterSSE(t0reg));
-			_freeXMMreg(t0reg);
+			// SHUFPS + PSHUFD straight into Rd. Only Rd == HI without AVX needs a TEMP.
+			if (EEREC_D == EEREC_HI && !x86Emitter::use_avx)
+			{
+				t0reg = _allocTempXMMreg(XMMT_INT);
+				emitPMFHLAVX512(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_LO), xRegisterSSE(EEREC_HI), xRegisterSSE(t0reg), 1);
+				_freeXMMreg(t0reg);
+			}
+			else
+				emitPMFHLAVX512(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_LO), xRegisterSSE(EEREC_HI), xRegisterSSE(EEREC_D), 1);
 			break;
 
 		case 0x02: // SLW
+			if (avx512.HasCore())
+			{
+				// {LO0,HI0} and {LO2,HI2} as signed qwords, saturate to s32 (VPMOVSQD),
+				// then sign-extend back. Needs proper testing against the interpreter.
+				// Rd can hold the intermediate unless it aliases LO (HI is read first).
+				if (EEREC_D != EEREC_LO)
+				{
+					emitPMFHLSLWAVX512(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_LO), xRegisterSSE(EEREC_HI),
+						xRegisterSSE(EEREC_D));
+					break;
+				}
+				t0reg = _allocTempXMMreg(XMMT_INT);
+				emitPMFHLSLWAVX512(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_LO), xRegisterSSE(EEREC_HI),
+					xRegisterSSE(t0reg));
+				_freeXMMreg(t0reg);
+				break;
+			}
 			// fall to interp
 			_deleteEEreg(_Rd_, 0);
 			iFlushCall(FLUSH_INTERPRETER); // since calling CALLFunc
@@ -197,7 +384,23 @@ void recPMFHL()
 			break;
 
 		case 0x03: // LH
+			if (avx512.HasCore())
+			{
+				t0reg = _allocTempXMMreg(XMMT_INT);
+				emitPMFHLAVX512(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_LO), xRegisterSSE(EEREC_HI), xRegisterSSE(t0reg), 3);
+				_freeXMMreg(t0reg);
+				break;
+			}
 			t0reg = _allocTempXMMreg(XMMT_INT);
+			if (x86Emitter::use_avx)
+			{
+				// {L0,L1,H0,H1,L2,L3,H2,H3}: gather even halfwords of each, then interleave dwords (7 -> 3).
+				xPSHUF.B(xRegisterSSE(t0reg), xRegisterSSE(EEREC_LO), ptr128[s_packEvenHalfMask]);
+				xPSHUF.B(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_HI), ptr128[s_packEvenHalfMask]);
+				xPUNPCK.LDQ(xRegisterSSE(EEREC_D), xRegisterSSE(t0reg), xRegisterSSE(EEREC_D));
+				_freeXMMreg(t0reg);
+				break;
+			}
 			xPSHUF.LW(xRegisterSSE(t0reg), xRegisterSSE(EEREC_HI), 0x88);
 			xPSHUF.LW(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_LO), 0x88);
 			xPSHUF.HW(xRegisterSSE(t0reg), xRegisterSSE(t0reg), 0x88);
@@ -237,7 +440,7 @@ void recPMTHL()
 
 	EE::Profiler.EmitOp(eeOpcode::PMTHL);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READLO | XMMINFO_READHI | XMMINFO_WRITELO | XMMINFO_WRITEHI);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READLO | XMMINFO_READHI | XMMINFO_WRITELO | XMMINFO_WRITEHI);
 
 	xBLEND.PS(xRegisterSSE(EEREC_LO), xRegisterSSE(EEREC_S), 0x5);
 	xSHUF.PS(xRegisterSSE(EEREC_HI), xRegisterSSE(EEREC_S), 0xdd);
@@ -254,7 +457,7 @@ void recPSRLH()
 
 	EE::Profiler.EmitOp(eeOpcode::PSRLH);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
 	if ((_Sa_ & 0xf) == 0)
 	{
 		xMOVDQA(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T));
@@ -274,7 +477,7 @@ void recPSRLW()
 
 	EE::Profiler.EmitOp(eeOpcode::PSRLW);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
 	if (_Sa_ == 0)
 	{
 		xMOVDQA(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T));
@@ -294,7 +497,7 @@ void recPSRAH()
 
 	EE::Profiler.EmitOp(eeOpcode::PSRAH);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
 	if ((_Sa_ & 0xf) == 0)
 	{
 		xMOVDQA(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T));
@@ -314,7 +517,7 @@ void recPSRAW()
 
 	EE::Profiler.EmitOp(eeOpcode::PSRAW);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
 	if (_Sa_ == 0)
 	{
 		xMOVDQA(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T));
@@ -334,7 +537,7 @@ void recPSLLH()
 
 	EE::Profiler.EmitOp(eeOpcode::PSLLH);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
 	if ((_Sa_ & 0xf) == 0)
 	{
 		xMOVDQA(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T));
@@ -354,7 +557,7 @@ void recPSLLW()
 
 	EE::Profiler.EmitOp(eeOpcode::PSLLW);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
 	if (_Sa_ == 0)
 	{
 		xMOVDQA(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T));
@@ -428,7 +631,7 @@ void recPMAXW()
 
 	EE::Profiler.EmitOp(eeOpcode::PMAXW);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
 	if (EEREC_S == EEREC_T)
 		xMOVDQA(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S));
 	else
@@ -444,12 +647,24 @@ void recPPACW()
 
 	EE::Profiler.EmitOp(eeOpcode::PPACW);
 
-	int info = eeRecompileCodeXMM(((_Rs_ != 0) ? XMMINFO_READS : 0) | XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(((_Rs_ != 0) ? XMMINFO_READS : 0) | XMMINFO_READT | XMMINFO_WRITED);
 
 	if (_Rs_ == 0)
 	{
-		xPSHUF.D(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T), 0x88);
-		xPSRL.DQ(xRegisterSSE(EEREC_D), 8);
+		if (avx512.HasCore())
+		{
+			// [T0, T2, 0, 0] is a plain qword->dword truncation.
+			xVPMOVQD(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T));
+		}
+		else
+		{
+			xPSHUF.D(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T), 0x88);
+			xPSRL.DQ(xRegisterSSE(EEREC_D), 8);
+		}
+	}
+	else if (avx512.HasCore())
+	{
+		emitPPACGeneralAVX512(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T), 0);
 	}
 	else
 	{
@@ -483,8 +698,34 @@ void recPPACH()
 
 	EE::Profiler.EmitOp(eeOpcode::PPACH);
 
-	int info = eeRecompileCodeXMM((_Rs_ != 0 ? XMMINFO_READS : 0) | XMMINFO_READT | XMMINFO_WRITED);
-	if (_Rs_ == 0)
+	EERecompileInfo info = eeRecompileCodeXMM((_Rs_ != 0 ? XMMINFO_READS : 0) | XMMINFO_READT | XMMINFO_WRITED);
+	if (avx512.HasCore())
+	{
+		// Even halfwords of each source: dword->word truncation, no shuffle constants.
+		if (_Rs_ == 0)
+		{
+			xVPMOVDW(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T));
+		}
+		else
+		{
+			emitPPACGeneralAVX512(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T), 1);
+		}
+	}
+	else if (x86Emitter::use_avx)
+	{
+		if (_Rs_ == 0)
+		{
+			emitPackEvenAVX(xRegisterSSE(EEREC_D), nullptr, xRegisterSSE(EEREC_T), xRegisterSSE(EEREC_D), s_packEvenHalfMask);
+		}
+		else
+		{
+			const int t0reg = _allocTempXMMreg(XMMT_INT);
+			const xRegisterSSE s(EEREC_S);
+			emitPackEvenAVX(xRegisterSSE(EEREC_D), &s, xRegisterSSE(EEREC_T), xRegisterSSE(t0reg), s_packEvenHalfMask);
+			_freeXMMreg(t0reg);
+		}
+	}
+	else if (_Rs_ == 0)
 	{
 		xPSHUF.LW(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T), 0x88);
 		xPSHUF.HW(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_D), 0x88);
@@ -516,8 +757,34 @@ void recPPACB()
 
 	EE::Profiler.EmitOp(eeOpcode::PPACB);
 
-	int info = eeRecompileCodeXMM((_Rs_ != 0 ? XMMINFO_READS : 0) | XMMINFO_READT | XMMINFO_WRITED);
-	if (_Rs_ == 0)
+	EERecompileInfo info = eeRecompileCodeXMM((_Rs_ != 0 ? XMMINFO_READS : 0) | XMMINFO_READT | XMMINFO_WRITED);
+	if (avx512.HasCore())
+	{
+		// Low byte of each halfword: word->byte truncation (VPMOVWB), no zero temp.
+		if (_Rs_ == 0)
+		{
+			xVPMOVWB(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T));
+		}
+		else
+		{
+			emitPPACGeneralAVX512(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T), 2);
+		}
+	}
+	else if (x86Emitter::use_avx)
+	{
+		if (_Rs_ == 0)
+		{
+			emitPackEvenAVX(xRegisterSSE(EEREC_D), nullptr, xRegisterSSE(EEREC_T), xRegisterSSE(EEREC_D), s_packEvenByteMask);
+		}
+		else
+		{
+			const int t0reg = _allocTempXMMreg(XMMT_INT);
+			const xRegisterSSE s(EEREC_S);
+			emitPackEvenAVX(xRegisterSSE(EEREC_D), &s, xRegisterSSE(EEREC_T), xRegisterSSE(t0reg), s_packEvenByteMask);
+			_freeXMMreg(t0reg);
+		}
+	}
+	else if (_Rs_ == 0)
 	{
 		const int t0reg = _allocTempXMMreg(XMMT_INT);
 
@@ -551,7 +818,17 @@ void recPEXT5()
 
 	EE::Profiler.EmitOp(eeOpcode::PEXT5);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
+	if (avx512.HasCore())
+	{
+		// Rd holds the control constant unless it aliases Rt.
+		const int a0 = EEREC_D != EEREC_T ? EEREC_D : _allocTempXMMreg(XMMT_INT);
+		emitPEXT5AVX512(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T), xRegisterSSE(a0));
+		if (a0 != EEREC_D)
+			_freeXMMreg(a0);
+		_clearNeededXMMregs();
+		return;
+	}
 	int t0reg = _allocTempXMMreg(XMMT_INT);
 	int t1reg = _allocTempXMMreg(XMMT_INT);
 
@@ -584,9 +861,29 @@ void recPPAC5()
 
 	EE::Profiler.EmitOp(eeOpcode::PPAC5);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
+	if (avx512.HasCore())
+	{
+		// Rd holds the control constant unless it aliases Rt. 5 instructions, needs proper testing.
+		const int a0 = EEREC_D != EEREC_T ? EEREC_D : _allocTempXMMreg(XMMT_INT);
+		emitPPAC5AVX512(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T), xRegisterSSE(a0));
+		if (a0 != EEREC_D)
+			_freeXMMreg(a0);
+		_clearNeededXMMregs();
+		return;
+	}
+
 	int t0reg = _allocTempXMMreg(XMMT_INT);
 	int t1reg = _allocTempXMMreg(XMMT_INT);
+
+	if (x86Emitter::use_avx)
+	{
+		emitPPAC5AVX(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T), xRegisterSSE(t0reg), xRegisterSSE(t1reg));
+		_freeXMMreg(t0reg);
+		_freeXMMreg(t1reg);
+		_clearNeededXMMregs();
+		return;
+	}
 
 	xPSLL.D(xRegisterSSE(t0reg), xRegisterSSE(EEREC_T),  8); // for bit 10..14
 	xPSRL.D(xRegisterSSE(t1reg), xRegisterSSE(EEREC_T), 31); // for bit 15
@@ -602,9 +899,14 @@ void recPPAC5()
 
 	xPCMP.EQD(xRegisterSSE(t1reg), xRegisterSSE(t1reg));
 	xPSRL.D(xRegisterSSE(t1reg), 22);
-	xPAND(xRegisterSSE(EEREC_D), xRegisterSSE(t1reg));
-	xPANDN(xRegisterSSE(t1reg), xRegisterSSE(t0reg));
-	xPOR(xRegisterSSE(EEREC_D), xRegisterSSE(t1reg));
+	if (avx512.HasCore())
+		emitMMIBitSelect(xRegisterSSE(EEREC_D), xRegisterSSE(t1reg), xRegisterSSE(t0reg));
+	else
+	{
+		xPAND(xRegisterSSE(EEREC_D), xRegisterSSE(t1reg));
+		xPANDN(xRegisterSSE(t1reg), xRegisterSSE(t0reg));
+		xPOR(xRegisterSSE(EEREC_D), xRegisterSSE(t1reg));
+	}
 
 	_freeXMMreg(t0reg);
 	_freeXMMreg(t1reg);
@@ -619,7 +921,7 @@ void recPMAXH()
 
 	EE::Profiler.EmitOp(eeOpcode::PMAXH);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
 	xPMAX.SW(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T));
 	_clearNeededXMMregs();
 }
@@ -632,7 +934,7 @@ void recPCGTB()
 
 	EE::Profiler.EmitOp(eeOpcode::PCGTB);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
 	ThreeArg(xPCMP.GTB, EEREC_D, EEREC_S, EEREC_T);
 	_clearNeededXMMregs();
 }
@@ -645,22 +947,32 @@ void recPCGTH()
 
 	EE::Profiler.EmitOp(eeOpcode::PCGTH);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
-	ThreeArg(xPCMP.GTW, EEREC_D, EEREC_S, EEREC_T);
+	EERecompileInfo info = eeRecompileCodeXMM((_Rs_ != 0 ? XMMINFO_READS : 0) | XMMINFO_READT | XMMINFO_WRITED);
+	if (_Rs_ == 0)
+	{
+		// 0 > Rt is the sign mask of Rt (needs proper testing)
+		xPSRA.W(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T), 15);
+	}
+	else
+	{
+		ThreeArg(xPCMP.GTW, EEREC_D, EEREC_S, EEREC_T);
+	}
 	_clearNeededXMMregs();
 }
 
 ////////////////////////////////////////////////////
 void recPCGTW()
 {
-	//TODO:optimize RS | RT== 0
 	if (!_Rd_)
 		return;
 
 	EE::Profiler.EmitOp(eeOpcode::PCGTW);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
-	ThreeArg(xPCMP.GTD, EEREC_D, EEREC_S, EEREC_T);
+	EERecompileInfo info = eeRecompileCodeXMM((_Rs_ != 0 ? XMMINFO_READS : 0) | XMMINFO_READT | XMMINFO_WRITED);
+	if (_Rs_ == 0)
+		xPSRA.D(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T), 31);
+	else
+		ThreeArg(xPCMP.GTD, EEREC_D, EEREC_S, EEREC_T);
 	_clearNeededXMMregs();
 }
 
@@ -672,7 +984,7 @@ void recPADDSB()
 
 	EE::Profiler.EmitOp(eeOpcode::PADDSB);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
 	xPADD.SB(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T));
 	_clearNeededXMMregs();
 }
@@ -685,7 +997,7 @@ void recPADDSH()
 
 	EE::Profiler.EmitOp(eeOpcode::PADDSH);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
 	xPADD.SW(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T));
 	_clearNeededXMMregs();
 }
@@ -699,7 +1011,18 @@ void recPADDSW()
 
 	EE::Profiler.EmitOp(eeOpcode::PADDSW);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
+	if (avx512.HasCore())
+	{
+		const int a0 = _allocTempXMMreg(XMMT_INT);
+		const int a1 = _allocTempXMMreg(XMMT_INT);
+		emitPADDSWSubSWAVX512(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T),
+			xRegisterSSE(a0), xRegisterSSE(a1), false);
+		_freeXMMreg(a0);
+		_freeXMMreg(a1);
+		_clearNeededXMMregs();
+		return;
+	}
 	int t0reg = _allocTempXMMreg(XMMT_INT);
 	int t1reg = _allocTempXMMreg(XMMT_INT);
 	int t2reg = _allocTempXMMreg(XMMT_INT);
@@ -740,9 +1063,14 @@ void recPADDSW()
 	xPSRA.D(xRegisterSSE(t2reg), xRegisterSSE(EEREC_D), 31);
 	xPXOR(xRegisterSSE(t1reg), xRegisterSSE(t2reg)); // t2reg = (Rd < 0) ? 0x7fffffff : 0x80000000
 
-	xPAND(xRegisterSSE(EEREC_D), xRegisterSSE(t0reg));
-	xPANDN(xRegisterSSE(t0reg), xRegisterSSE(t1reg));
-	xPOR(xRegisterSSE(EEREC_D), xRegisterSSE(t0reg));
+	if (avx512.HasCore())
+		emitMMIBitSelect(xRegisterSSE(EEREC_D), xRegisterSSE(t0reg), xRegisterSSE(t1reg));
+	else
+	{
+		xPAND(xRegisterSSE(EEREC_D), xRegisterSSE(t0reg));
+		xPANDN(xRegisterSSE(t0reg), xRegisterSSE(t1reg));
+		xPOR(xRegisterSSE(EEREC_D), xRegisterSSE(t0reg));
+	}
 
 	_freeXMMreg(t0reg);
 	_freeXMMreg(t1reg);
@@ -758,7 +1086,7 @@ void recPSUBSB()
 
 	EE::Profiler.EmitOp(eeOpcode::PSUBSB);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
 	ThreeArg(xPSUB.SB, EEREC_D, EEREC_S, EEREC_T);
 	_clearNeededXMMregs();
 }
@@ -771,7 +1099,7 @@ void recPSUBSH()
 
 	EE::Profiler.EmitOp(eeOpcode::PSUBSH);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
 	ThreeArg(xPSUB.SW, EEREC_D, EEREC_S, EEREC_T);
 	_clearNeededXMMregs();
 }
@@ -785,7 +1113,18 @@ void recPSUBSW()
 
 	EE::Profiler.EmitOp(eeOpcode::PSUBSW);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
+	if (avx512.HasCore())
+	{
+		const int a0 = _allocTempXMMreg(XMMT_INT);
+		const int a1 = _allocTempXMMreg(XMMT_INT);
+		emitPADDSWSubSWAVX512(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T),
+			xRegisterSSE(a0), xRegisterSSE(a1), true);
+		_freeXMMreg(a0);
+		_freeXMMreg(a1);
+		_clearNeededXMMregs();
+		return;
+	}
 	int t0reg = _allocTempXMMreg(XMMT_INT);
 	int t1reg = _allocTempXMMreg(XMMT_INT);
 	int t2reg = _allocTempXMMreg(XMMT_INT);
@@ -820,9 +1159,14 @@ void recPSUBSW()
 	xPADD.D(xRegisterSSE(t1reg), xRegisterSSE(t0reg)); // t1reg = (Rs < 0) ? 0x80000000 : 0x7fffffff
 
 	// saturation
-	xPAND(xRegisterSSE(EEREC_D), xRegisterSSE(t2reg));
-	xPANDN(xRegisterSSE(t2reg), xRegisterSSE(t1reg));
-	xPOR(xRegisterSSE(EEREC_D), xRegisterSSE(t2reg));
+	if (avx512.HasCore())
+		emitMMIBitSelect(xRegisterSSE(EEREC_D), xRegisterSSE(t2reg), xRegisterSSE(t1reg));
+	else
+	{
+		xPAND(xRegisterSSE(EEREC_D), xRegisterSSE(t2reg));
+		xPANDN(xRegisterSSE(t2reg), xRegisterSSE(t1reg));
+		xPOR(xRegisterSSE(EEREC_D), xRegisterSSE(t2reg));
+	}
 
 	_freeXMMreg(t0reg);
 	_freeXMMreg(t1reg);
@@ -838,7 +1182,7 @@ void recPADDB()
 
 	EE::Profiler.EmitOp(eeOpcode::PADDB);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
 	xPADD.B(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T));
 	_clearNeededXMMregs();
 }
@@ -851,7 +1195,7 @@ void recPADDH()
 
 	EE::Profiler.EmitOp(eeOpcode::PADDH);
 
-	int info = eeRecompileCodeXMM((_Rs_ != 0 ? XMMINFO_READS : 0) | (_Rt_ != 0 ? XMMINFO_READT : 0) | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM((_Rs_ != 0 ? XMMINFO_READS : 0) | (_Rt_ != 0 ? XMMINFO_READT : 0) | XMMINFO_WRITED);
 	if (_Rs_ == 0)
 	{
 		if (_Rt_ == 0)
@@ -878,7 +1222,7 @@ void recPADDW()
 
 	EE::Profiler.EmitOp(eeOpcode::PADDW);
 
-	int info = eeRecompileCodeXMM((_Rs_ != 0 ? XMMINFO_READS : 0) | (_Rt_ != 0 ? XMMINFO_READT : 0) | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM((_Rs_ != 0 ? XMMINFO_READS : 0) | (_Rt_ != 0 ? XMMINFO_READT : 0) | XMMINFO_WRITED);
 	if (_Rs_ == 0)
 	{
 		if (_Rt_ == 0)
@@ -905,7 +1249,7 @@ void recPSUBB()
 
 	EE::Profiler.EmitOp(eeOpcode::PSUBB);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
 	ThreeArg(xPSUB.B, EEREC_D, EEREC_S, EEREC_T);
 	_clearNeededXMMregs();
 }
@@ -918,7 +1262,7 @@ void recPSUBH()
 
 	EE::Profiler.EmitOp(eeOpcode::PSUBH);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
 	if (EEREC_D != EEREC_T || x86Emitter::use_avx)
 		xPSUB.W(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T));
 	else
@@ -940,7 +1284,7 @@ void recPSUBW()
 
 	EE::Profiler.EmitOp(eeOpcode::PSUBW);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
 	ThreeArg(xPSUB.D, EEREC_D, EEREC_S, EEREC_T);
 	_clearNeededXMMregs();
 }
@@ -953,11 +1297,10 @@ void recPEXTLW()
 
 	EE::Profiler.EmitOp(eeOpcode::PEXTLW);
 
-	int info = eeRecompileCodeXMM((_Rs_ != 0 ? XMMINFO_READS : 0) | XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM((_Rs_ != 0 ? XMMINFO_READS : 0) | XMMINFO_READT | XMMINFO_WRITED);
 	if (_Rs_ == 0)
 	{
-		xPUNPCK.LDQ(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T));
-		xPSRL.Q(xRegisterSSE(EEREC_D), 32);
+		xPMOVZX.DQ(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T));
 	}
 	else
 	{
@@ -973,11 +1316,10 @@ void recPEXTLB()
 
 	EE::Profiler.EmitOp(eeOpcode::PEXTLB);
 
-	int info = eeRecompileCodeXMM((_Rs_ != 0 ? XMMINFO_READS : 0) | XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM((_Rs_ != 0 ? XMMINFO_READS : 0) | XMMINFO_READT | XMMINFO_WRITED);
 	if (_Rs_ == 0)
 	{
-		xPUNPCK.LBW(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T));
-		xPSRL.W(xRegisterSSE(EEREC_D), 8);
+		xPMOVZX.BW(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T));
 	}
 	else
 	{
@@ -993,11 +1335,10 @@ void recPEXTLH()
 
 	EE::Profiler.EmitOp(eeOpcode::PEXTLH);
 
-	int info = eeRecompileCodeXMM((_Rs_ != 0 ? XMMINFO_READS : 0) | XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM((_Rs_ != 0 ? XMMINFO_READS : 0) | XMMINFO_READT | XMMINFO_WRITED);
 	if (_Rs_ == 0)
 	{
-		xPUNPCK.LWD(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T));
-		xPSRL.D(xRegisterSSE(EEREC_D), 16);
+		xPMOVZX.WD(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T));
 	}
 	else
 	{
@@ -1048,17 +1389,11 @@ void recPABSW() //needs clamping
 
 	EE::Profiler.EmitOp(eeOpcode::PABSW);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
-	int t0reg = _allocTempXMMreg(XMMT_INT);
-	xPCMP.EQD(xRegisterSSE(t0reg), xRegisterSSE(t0reg));
-	xPSLL.D(xRegisterSSE(t0reg), 31);
-	xPCMP.EQD(xRegisterSSE(t0reg), xRegisterSSE(EEREC_T)); //0xffffffff if equal to 0x80000000
-	xPABS.D(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T)); //0x80000000 -> 0x80000000
-	xPXOR(xRegisterSSE(EEREC_D), xRegisterSSE(t0reg)); //0x80000000 -> 0x7fffffff
-	_freeXMMreg(t0reg);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
+	// PABS + unsigned min with INT_MAX: no TEMP, SSE4.1 only.
+	emitPABSAVX512(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T), false);
 	_clearNeededXMMregs();
 }
-
 
 ////////////////////////////////////////////////////
 void recPABSH()
@@ -1068,14 +1403,9 @@ void recPABSH()
 
 	EE::Profiler.EmitOp(eeOpcode::PABSH);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
-	int t0reg = _allocTempXMMreg(XMMT_INT);
-	xPCMP.EQW(xRegisterSSE(t0reg), xRegisterSSE(t0reg));
-	xPSLL.W(xRegisterSSE(t0reg), 15);
-	xPCMP.EQW(xRegisterSSE(t0reg), xRegisterSSE(EEREC_T)); //0xffff if equal to 0x8000
-	xPABS.W(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T)); //0x8000 -> 0x8000
-	xPXOR(xRegisterSSE(EEREC_D), xRegisterSSE(t0reg)); //0x8000 -> 0x7fff
-	_freeXMMreg(t0reg);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
+	// PABS + unsigned min with INT_MAX: no TEMP, SSE4.1 only.
+	emitPABSAVX512(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T), true);
 	_clearNeededXMMregs();
 }
 
@@ -1087,12 +1417,14 @@ void recPMINW()
 
 	EE::Profiler.EmitOp(eeOpcode::PMINW);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
 	xPMIN.SD(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T));
 	_clearNeededXMMregs();
 }
 
 ////////////////////////////////////////////////////
+alignas(16) static const s16 s_padsbhSign[8] = {-1, -1, -1, -1, 1, 1, 1, 1};
+
 void recPADSBH()
 {
 	if (!_Rd_)
@@ -1100,9 +1432,19 @@ void recPADSBH()
 
 	EE::Profiler.EmitOp(eeOpcode::PADSBH);
 
-	const int info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
+	const EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
 
-	if (EEREC_S == EEREC_T)
+	if (avx512.HasCore() || x86Emitter::use_avx)
+	{
+		// Only 128-bit VEX forms are used, so plain AVX is enough. Negate the low four Rt halfwords and preserve the high four, then add Rs.
+		// When Rd aliases Rs, keep the signed Rt in a TEMP so the old Rs survives.
+		const int signed_t = (EEREC_D == EEREC_S) ? _allocTempXMMreg(XMMT_INT) : EEREC_D;
+		xPSIGN.W(xRegisterSSE(signed_t), xRegisterSSE(EEREC_T), ptr128[s_padsbhSign]);
+		xPADD.W(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), xRegisterSSE(signed_t));
+		if (signed_t != EEREC_D)
+			_freeXMMreg(signed_t);
+	}
+	else if (EEREC_S == EEREC_T)
 	{
 		xPADD.W(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T));
 		// reset lower bits to 0s
@@ -1132,7 +1474,7 @@ void recPADDUW()
 
 	EE::Profiler.EmitOp(eeOpcode::PADDUW);
 
-	int info = eeRecompileCodeXMM((_Rs_ ? XMMINFO_READS : 0) | (_Rt_ ? XMMINFO_READT : 0) | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM((_Rs_ ? XMMINFO_READS : 0) | (_Rt_ ? XMMINFO_READT : 0) | XMMINFO_WRITED);
 
 	if (_Rt_ == 0)
 	{
@@ -1149,25 +1491,12 @@ void recPADDUW()
 	}
 	else
 	{
-		int t0reg = _allocTempXMMreg(XMMT_INT);
-		int t1reg = _allocTempXMMreg(XMMT_INT);
-
-		xPCMP.EQB(xRegisterSSE(t1reg), xRegisterSSE(t1reg));
-		xPSLL.D(xRegisterSSE(t1reg), 31); // 0x80000000
-		xPXOR(xRegisterSSE(t0reg), xRegisterSSE(t1reg), xRegisterSSE(EEREC_S)); // invert MSB of Rs (for unsigned comparison)
-
-		// normal 32-bit addition
-		xPADD.D(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T));
-
-		// unsigned 32-bit comparison
-		xPXOR(xRegisterSSE(t1reg), xRegisterSSE(EEREC_D)); // invert MSB of Rd (for unsigned comparison)
-		xPCMP.GTD(xRegisterSSE(t0reg), xRegisterSSE(t1reg));
-
-		// saturate
-		xPOR(xRegisterSSE(EEREC_D), xRegisterSSE(t0reg)); // clear word with 0xFFFFFFFF if (Rd < Rs)
-
-		_freeXMMreg(t0reg);
-		_freeXMMreg(t1reg);
+		// ~S + min, SSE4.1 only (ternlog form under AVX-512). Rd serves as TEMP when it aliases neither input.
+		const bool own = EEREC_D != EEREC_S && EEREC_D != EEREC_T;
+		const int a0 = own ? EEREC_D : _allocTempXMMreg(XMMT_INT);
+		emitPADDUWAVX512(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T), xRegisterSSE(a0));
+		if (!own)
+			_freeXMMreg(a0);
 	}
 	_clearNeededXMMregs();
 }
@@ -1180,7 +1509,7 @@ void recPSUBUB()
 
 	EE::Profiler.EmitOp(eeOpcode::PSUBUB);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
 	ThreeArg(xPSUB.USB, EEREC_D, EEREC_S, EEREC_T);
 	_clearNeededXMMregs();
 }
@@ -1193,7 +1522,7 @@ void recPSUBUH()
 
 	EE::Profiler.EmitOp(eeOpcode::PSUBUH);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
 	ThreeArg(xPSUB.USW, EEREC_D, EEREC_S, EEREC_T);
 	_clearNeededXMMregs();
 }
@@ -1206,38 +1535,12 @@ void recPSUBUW()
 
 	EE::Profiler.EmitOp(eeOpcode::PSUBUW);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
-	int t0reg = _allocTempXMMreg(XMMT_INT);
-	int t1reg = _allocTempXMMreg(XMMT_INT);
-
-	xPCMP.EQB(xRegisterSSE(t0reg), xRegisterSSE(t0reg));
-	xPSLL.D(xRegisterSSE(t0reg), 31); // 0x80000000
-
-	// normal 32-bit subtraction
-	// and invert MSB of Rs and Rt (for unsigned comparison)
-	if (CanUse3Arg(EEREC_D, EEREC_S, EEREC_T))
-	{
-		xPXOR(xRegisterSSE(t1reg), xRegisterSSE(t0reg), xRegisterSSE(EEREC_T));
-		xPXOR(xRegisterSSE(t0reg), xRegisterSSE(t0reg), xRegisterSSE(EEREC_S));
-		xPSUB.D(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T));
-	}
-	else
-	{
-		xMOVDQA(xRegisterSSE(t1reg), xRegisterSSE(EEREC_T));
-		xMOVDQA(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S));
-		xPSUB.D(xRegisterSSE(EEREC_D), xRegisterSSE(t1reg));
-		xPXOR(xRegisterSSE(t1reg), xRegisterSSE(t0reg));
-		xPXOR(xRegisterSSE(t0reg), xRegisterSSE(EEREC_S));
-	}
-
-	// unsigned 32-bit comparison
-	xPCMP.GTD(xRegisterSSE(t0reg), xRegisterSSE(t1reg));
-
-	// saturate
-	xPAND(xRegisterSSE(EEREC_D), xRegisterSSE(t0reg)); // clear word with zero if (Rs <= Rt)
-
-	_freeXMMreg(t0reg);
-	_freeXMMreg(t1reg);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
+	const bool own = EEREC_D != EEREC_T; // only Rd == Rt needs a TEMP
+	const int a0 = own ? EEREC_D : _allocTempXMMreg(XMMT_INT);
+	emitPSUBUWAVX512(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T), xRegisterSSE(a0));
+	if (!own)
+		_freeXMMreg(a0);
 	_clearNeededXMMregs();
 }
 
@@ -1249,7 +1552,7 @@ void recPEXTUH()
 
 	EE::Profiler.EmitOp(eeOpcode::PEXTUH);
 
-	int info = eeRecompileCodeXMM((_Rs_ != 0 ? XMMINFO_READS : 0) | XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM((_Rs_ != 0 ? XMMINFO_READS : 0) | XMMINFO_READT | XMMINFO_WRITED);
 	if (_Rs_ == 0)
 	{
 		xPUNPCK.HWD(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T));
@@ -1263,6 +1566,7 @@ void recPEXTUH()
 }
 
 alignas(16) static u32 tempqw[8];
+alignas(16) static const u8 s_qfsrvIota[16] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
 
 void recQFSRV()
 {
@@ -1276,7 +1580,7 @@ void recQFSRV()
 	{
 		_flushEEreg(_Rs_);
 		_flushEEreg(_Rt_);
-		int info = eeRecompileCodeXMM(XMMINFO_WRITED);
+		EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_WRITED);
 
 		xMOV(eax, ptr32[&cpuRegs.sa]);
 		xLEA(rcx, ptr[&cpuRegs.GPR.r[_Rt_]]);
@@ -1284,8 +1588,27 @@ void recQFSRV()
 		return;
 	}
 
-	int info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
 
+	if (avx512.HasCore())
+	{
+		xMOV(eax, ptr32[&cpuRegs.sa]);
+		if (EEREC_D != EEREC_S && EEREC_D != EEREC_T)
+		{
+			// The index register becomes the result, so Rd can serve as it directly.
+			emitQFSRVAVX512(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T), eax, s_qfsrvIota);
+		}
+		else
+		{
+			const int a0 = _allocTempXMMreg(XMMT_INT);
+			emitQFSRVAVX512(xRegisterSSE(a0), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T), eax, s_qfsrvIota);
+			// Both sources are dead now: hand the guest register over to the temp instead of copying (as PPACW does).
+			xmmregs[a0] = xmmregs[EEREC_D];
+			xmmregs[EEREC_D].inuse = 0;
+		}
+		_clearNeededXMMregs();
+		return;
+	}
 	xMOV(eax, ptr32[&cpuRegs.sa]);
 	xLEA(rcx, ptr[tempqw]);
 	xMOVDQA(ptr32[rcx], xRegisterSSE(EEREC_T));
@@ -1303,7 +1626,7 @@ void recPEXTUB()
 
 	EE::Profiler.EmitOp(eeOpcode::PEXTUB);
 
-	int info = eeRecompileCodeXMM((_Rs_ != 0 ? XMMINFO_READS : 0) | XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM((_Rs_ != 0 ? XMMINFO_READS : 0) | XMMINFO_READT | XMMINFO_WRITED);
 
 	if (_Rs_ == 0)
 	{
@@ -1325,7 +1648,7 @@ void recPEXTUW()
 
 	EE::Profiler.EmitOp(eeOpcode::PEXTUW);
 
-	int info = eeRecompileCodeXMM((_Rs_ != 0 ? XMMINFO_READS : 0) | XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM((_Rs_ != 0 ? XMMINFO_READS : 0) | XMMINFO_READT | XMMINFO_WRITED);
 	if (_Rs_ == 0)
 	{
 		xPUNPCK.HDQ(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T));
@@ -1346,7 +1669,7 @@ void recPMINH()
 
 	EE::Profiler.EmitOp(eeOpcode::PMINH);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
 	xPMIN.SW(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T));
 	_clearNeededXMMregs();
 }
@@ -1359,7 +1682,7 @@ void recPCEQB()
 
 	EE::Profiler.EmitOp(eeOpcode::PCEQB);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
 	xPCMP.EQB(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T));
 	_clearNeededXMMregs();
 }
@@ -1372,7 +1695,7 @@ void recPCEQH()
 
 	EE::Profiler.EmitOp(eeOpcode::PCEQH);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
 	xPCMP.EQW(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T));
 	_clearNeededXMMregs();
 }
@@ -1385,7 +1708,7 @@ void recPCEQW()
 
 	EE::Profiler.EmitOp(eeOpcode::PCEQW);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
 	xPCMP.EQD(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T));
 	_clearNeededXMMregs();
 }
@@ -1398,7 +1721,7 @@ void recPADDUB()
 
 	EE::Profiler.EmitOp(eeOpcode::PADDUB);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READS | (_Rt_ ? XMMINFO_READT : 0) | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READS | (_Rt_ ? XMMINFO_READT : 0) | XMMINFO_WRITED);
 	if (_Rt_)
 	{
 		xPADD.USB(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T));
@@ -1416,7 +1739,7 @@ void recPADDUH()
 
 	EE::Profiler.EmitOp(eeOpcode::PADDUH);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
 	xPADD.USW(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T));
 	_clearNeededXMMregs();
 }
@@ -1459,7 +1782,7 @@ void recPMADDW()
 {
 	EE::Profiler.EmitOp(eeOpcode::PMADDW);
 
-	int info = eeRecompileCodeXMM((((_Rs_) && (_Rt_)) ? XMMINFO_READS : 0) | (((_Rs_) && (_Rt_)) ? XMMINFO_READT : 0) | (_Rd_ ? XMMINFO_WRITED : 0) | XMMINFO_WRITELO | XMMINFO_WRITEHI | XMMINFO_READLO | XMMINFO_READHI);
+	EERecompileInfo info = eeRecompileCodeXMM((((_Rs_) && (_Rt_)) ? XMMINFO_READS : 0) | (((_Rs_) && (_Rt_)) ? XMMINFO_READT : 0) | (_Rd_ ? XMMINFO_WRITED : 0) | XMMINFO_WRITELO | XMMINFO_WRITEHI | XMMINFO_READLO | XMMINFO_READHI);
 	xSHUF.PS(xRegisterSSE(EEREC_LO), xRegisterSSE(EEREC_HI), 0x88);
 	xPSHUF.D(xRegisterSSE(EEREC_LO), xRegisterSSE(EEREC_LO), 0xd8); // LO = {LO[0], HI[0], LO[2], HI[2]}
 	int dst = _Rd_ ? EEREC_D : EEREC_HI;
@@ -1473,10 +1796,7 @@ void recPMADDW()
 	xPADD.Q(xRegisterSSE(dst), xRegisterSSE(EEREC_LO));
 
 	// interleave & sign extend
-	xPSHUF.D(xRegisterSSE(EEREC_LO), xRegisterSSE(dst), 0x88);
-	xPSHUF.D(xRegisterSSE(EEREC_HI), xRegisterSSE(dst), 0xdd);
-	xPMOVSX.DQ(xRegisterSSE(EEREC_LO), xRegisterSSE(EEREC_LO));
-	xPMOVSX.DQ(xRegisterSSE(EEREC_HI), xRegisterSSE(EEREC_HI));
+	emitSplitLoHi(EEREC_LO, EEREC_HI, dst);
 	_clearNeededXMMregs();
 }
 
@@ -1488,7 +1808,7 @@ void recPSLLVW()
 
 	EE::Profiler.EmitOp(eeOpcode::PSLLVW);
 
-	int info = eeRecompileCodeXMM((_Rs_ ? XMMINFO_READS : 0) | (_Rt_ ? XMMINFO_READT : 0) | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM((_Rs_ ? XMMINFO_READS : 0) | (_Rt_ ? XMMINFO_READT : 0) | XMMINFO_WRITED);
 	if (_Rs_ == 0)
 	{
 		if (_Rt_ == 0)
@@ -1507,6 +1827,15 @@ void recPSLLVW()
 	}
 	else
 	{
+		if (avx512.HasCore() || g_cpu.vectorISA >= ProcessorFeatures::VectorISA::AVX2)
+		{
+			const int a0 = _allocTempXMMreg(XMMT_INT);
+			(avx512.HasCore() ? emitPSxxVWAVX512 : emitPSxxVWAVX2)(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T),
+				xRegisterSSE(a0), 0);
+			_freeXMMreg(a0);
+			_clearNeededXMMregs();
+			return;
+		}
 		int t0reg = _allocTempXMMreg(XMMT_INT);
 		int t1reg = _allocTempXMMreg(XMMT_INT);
 
@@ -1542,7 +1871,7 @@ void recPSRLVW()
 
 	EE::Profiler.EmitOp(eeOpcode::PSRLVW);
 
-	int info = eeRecompileCodeXMM((_Rs_ ? XMMINFO_READS : 0) | (_Rt_ ? XMMINFO_READT : 0) | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM((_Rs_ ? XMMINFO_READS : 0) | (_Rt_ ? XMMINFO_READT : 0) | XMMINFO_WRITED);
 	if (_Rs_ == 0)
 	{
 		if (_Rt_ == 0)
@@ -1561,6 +1890,15 @@ void recPSRLVW()
 	}
 	else
 	{
+		if (avx512.HasCore() || g_cpu.vectorISA >= ProcessorFeatures::VectorISA::AVX2)
+		{
+			const int a0 = _allocTempXMMreg(XMMT_INT);
+			(avx512.HasCore() ? emitPSxxVWAVX512 : emitPSxxVWAVX2)(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T),
+				xRegisterSSE(a0), 1);
+			_freeXMMreg(a0);
+			_clearNeededXMMregs();
+			return;
+		}
 		int t0reg = _allocTempXMMreg(XMMT_INT);
 		int t1reg = _allocTempXMMreg(XMMT_INT);
 
@@ -1593,7 +1931,7 @@ void recPMSUBW()
 {
 	EE::Profiler.EmitOp(eeOpcode::PMSUBW);
 
-	int info = eeRecompileCodeXMM((((_Rs_) && (_Rt_)) ? XMMINFO_READS : 0) | (((_Rs_) && (_Rt_)) ? XMMINFO_READT : 0) | (_Rd_ ? XMMINFO_WRITED : 0) | XMMINFO_WRITELO | XMMINFO_WRITEHI | XMMINFO_READLO | XMMINFO_READHI);
+	EERecompileInfo info = eeRecompileCodeXMM((((_Rs_) && (_Rt_)) ? XMMINFO_READS : 0) | (((_Rs_) && (_Rt_)) ? XMMINFO_READT : 0) | (_Rd_ ? XMMINFO_WRITED : 0) | XMMINFO_WRITELO | XMMINFO_WRITEHI | XMMINFO_READLO | XMMINFO_READHI);
 	xSHUF.PS(xRegisterSSE(EEREC_LO), xRegisterSSE(EEREC_HI), 0x88);
 	xPSHUF.D(xRegisterSSE(EEREC_LO), xRegisterSSE(EEREC_LO), 0xd8); // LO = {LO[0], HI[0], LO[2], HI[2]}
 	int dst = _Rd_ ? EEREC_D : EEREC_HI;
@@ -1614,10 +1952,7 @@ void recPMSUBW()
 		xMOVDQA(xRegisterSSE(dst), xRegisterSSE(EEREC_LO));
 	}
 
-	xPSHUF.D(xRegisterSSE(EEREC_LO), xRegisterSSE(dst), 0x88);
-	xPSHUF.D(xRegisterSSE(EEREC_HI), xRegisterSSE(dst), 0xdd);
-	xPMOVSX.DQ(xRegisterSSE(EEREC_LO), xRegisterSSE(EEREC_LO));
-	xPMOVSX.DQ(xRegisterSSE(EEREC_HI), xRegisterSSE(EEREC_HI));
+	emitSplitLoHi(EEREC_LO, EEREC_HI, dst);
 	_clearNeededXMMregs();
 }
 
@@ -1626,7 +1961,7 @@ void recPMULTW()
 {
 	EE::Profiler.EmitOp(eeOpcode::PMULTW);
 
-	int info = eeRecompileCodeXMM((((_Rs_) && (_Rt_)) ? XMMINFO_READS : 0) | (((_Rs_) && (_Rt_)) ? XMMINFO_READT : 0) | (_Rd_ ? XMMINFO_WRITED : 0) | XMMINFO_WRITELO | XMMINFO_WRITEHI);
+	EERecompileInfo info = eeRecompileCodeXMM((((_Rs_) && (_Rt_)) ? XMMINFO_READS : 0) | (((_Rs_) && (_Rt_)) ? XMMINFO_READT : 0) | (_Rd_ ? XMMINFO_WRITED : 0) | XMMINFO_WRITELO | XMMINFO_WRITEHI);
 	if (!_Rs_ || !_Rt_)
 	{
 		if (_Rd_)
@@ -1640,10 +1975,7 @@ void recPMULTW()
 		xPMUL.DQ(xRegisterSSE(dst), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T));
 
 		// interleave & sign extend
-		xPSHUF.D(xRegisterSSE(EEREC_LO), xRegisterSSE(dst), 0x88);
-		xPSHUF.D(xRegisterSSE(EEREC_HI), xRegisterSSE(dst), 0xdd);
-		xPMOVSX.DQ(xRegisterSSE(EEREC_LO), xRegisterSSE(EEREC_LO));
-		xPMOVSX.DQ(xRegisterSSE(EEREC_HI), xRegisterSSE(EEREC_HI));
+		emitSplitLoHi(EEREC_LO, EEREC_HI, dst);
 	}
 	_clearNeededXMMregs();
 }
@@ -1673,11 +2005,20 @@ void recPHMADH()
 {
 	EE::Profiler.EmitOp(eeOpcode::PHMADH);
 
-	int info = eeRecompileCodeXMM((_Rd_ ? XMMINFO_WRITED : 0) | XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITELO | XMMINFO_WRITEHI);
+	EERecompileInfo info = eeRecompileCodeXMM((_Rd_ ? XMMINFO_WRITED : 0) | XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITELO | XMMINFO_WRITEHI);
 	int t0reg = _allocTempXMMreg(XMMT_INT);
 
-	xPXOR(xRegisterSSE(t0reg), xRegisterSSE(t0reg));
-	xPBLEND.W(xRegisterSSE(t0reg), xRegisterSSE(EEREC_S), 0xaa);
+	if (avx512.HasCore() || x86Emitter::use_avx)
+	{
+		alignas(16) static const u32 s_phmadhOddHalfwords[4] = {
+			0xffff0000u, 0xffff0000u, 0xffff0000u, 0xffff0000u};
+		xPAND(xRegisterSSE(t0reg), xRegisterSSE(EEREC_S), ptr128[s_phmadhOddHalfwords]);
+	}
+	else
+	{
+		xPXOR(xRegisterSSE(t0reg), xRegisterSSE(t0reg));
+		xPBLEND.W(xRegisterSSE(t0reg), xRegisterSSE(EEREC_S), 0xaa);
+	}
 	xPMADD.WD(xRegisterSSE(t0reg), xRegisterSSE(EEREC_T));
 
 	int dst = _Rd_ ? EEREC_D : EEREC_LO;
@@ -1704,9 +2045,22 @@ void recPMSUBH()
 {
 	EE::Profiler.EmitOp(eeOpcode::PMSUBH);
 
-	int info = eeRecompileCodeXMM((_Rd_ ? XMMINFO_WRITED : 0) | XMMINFO_READS | XMMINFO_READT | XMMINFO_READLO | XMMINFO_READHI | XMMINFO_WRITELO | XMMINFO_WRITEHI);
+	EERecompileInfo info = eeRecompileCodeXMM((_Rd_ ? XMMINFO_WRITED : 0) | XMMINFO_READS | XMMINFO_READT | XMMINFO_READLO | XMMINFO_READHI | XMMINFO_WRITELO | XMMINFO_WRITEHI);
 	int t0reg = _allocTempXMMreg(XMMT_INT);
 	int t1reg = _allocTempXMMreg(XMMT_INT);
+
+	if (useWideHalfwordMultiply())
+	{
+		emitHalfwordProducts(t0reg, t1reg, EEREC_S, EEREC_T);
+		xPSUB.D(xRegisterSSE(EEREC_LO), xRegisterSSE(t0reg));
+		xPSUB.D(xRegisterSSE(EEREC_HI), xRegisterSSE(t1reg));
+		if (_Rd_)
+			emitHalfwordRd(EEREC_D, EEREC_LO, EEREC_HI);
+		_freeXMMreg(t0reg);
+		_freeXMMreg(t1reg);
+		_clearNeededXMMregs();
+		return;
+	}
 
 	if (!_Rd_)
 	{
@@ -1765,7 +2119,51 @@ void recPHMSBH()
 {
 	EE::Profiler.EmitOp(eeOpcode::PHMSBH);
 
-	int info = eeRecompileCodeXMM((_Rd_ ? XMMINFO_WRITED : 0) | XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITELO | XMMINFO_WRITEHI);
+	EERecompileInfo info = eeRecompileCodeXMM((_Rd_ ? XMMINFO_WRITED : 0) | XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITELO | XMMINFO_WRITEHI);
+
+	if (avx512.HasCore())
+	{
+		// P = {p0..p7} as dwords in LO's YMM. With x = P: dwords {x1-x0, ~x1, x3-x2, ~x3, ...} are the
+		// interleaved (diff, NOT odd) pairs; VPERMQ 0xd8 then splits them into LO={d0,n0,d2,n2} and
+		// HI={d1,n1,d3,n3}. VPTERNLOGD 0x72 = C ? ~B : A with C = odd-lane mask. Needs proper testing.
+		alignas(32) static const u32 s_oddMask[8] = {0, ~0u, 0, ~0u, 0, ~0u, 0, ~0u};
+		xVPMOVSXWDY(xRegisterSSE(EEREC_LO), xRegisterSSE(EEREC_S));
+		xVPMOVSXWDY(xRegisterSSE(EEREC_HI), xRegisterSSE(EEREC_T));
+		xVPMULLDY(xRegisterSSE(EEREC_LO), xRegisterSSE(EEREC_LO), xRegisterSSE(EEREC_HI));
+		xVPSHUFDY(xRegisterSSE(EEREC_HI), xRegisterSSE(EEREC_LO), 0xb1);
+		xVPSUBDY(xRegisterSSE(EEREC_HI), xRegisterSSE(EEREC_HI), xRegisterSSE(EEREC_LO));
+		xVPTERNLOGDY(xRegisterSSE(EEREC_HI), xRegisterSSE(EEREC_LO), ptr128[s_oddMask], 0x72);
+		xVPERMQY(xRegisterSSE(EEREC_LO), xRegisterSSE(EEREC_HI), 0xd8);
+		xVEXTRACTI128Y(xRegisterSSE(EEREC_HI), xRegisterSSE(EEREC_LO), 1);
+		if (_Rd_)
+			emitHalfwordRd(EEREC_D, EEREC_LO, EEREC_HI);
+		_clearNeededXMMregs();
+		return;
+	}
+
+	if (x86Emitter::use_avx)
+	{
+		// Same split as the AVX-512 path, with an explicit ones register instead of VPTERNLOGD:
+		// HI = {x1-x0, x0-x1, ...} then odd lanes replaced by ~x (LO ^ ones), VPERMQ + VEXTRACTI128 split.
+		// Leaves the upper YMM halves of LO dirty. Needs proper testing; ~10 instructions vs ~16.
+		const int ones = _allocTempXMMreg(XMMT_INT);
+		xVexPMOVSXWDY(xRegisterSSE(EEREC_LO), xRegisterSSE(EEREC_S));
+		xVexPMOVSXWDY(xRegisterSSE(EEREC_HI), xRegisterSSE(EEREC_T));
+		xVexPMULLDY(xRegisterSSE(EEREC_LO), xRegisterSSE(EEREC_LO), xRegisterSSE(EEREC_HI));
+		xVexPSHUFDY(xRegisterSSE(EEREC_HI), xRegisterSSE(EEREC_LO), 0xb1);
+		xVexPSUBDY(xRegisterSSE(EEREC_HI), xRegisterSSE(EEREC_HI), xRegisterSSE(EEREC_LO));
+		xVexPCMPEQDY(xRegisterSSE(ones), xRegisterSSE(ones), xRegisterSSE(ones));
+		xVexPXORY(xRegisterSSE(EEREC_LO), xRegisterSSE(EEREC_LO), xRegisterSSE(ones));
+		xVexPBLENDDY(xRegisterSSE(EEREC_HI), xRegisterSSE(EEREC_HI), xRegisterSSE(EEREC_LO), 0xaa);
+		xVexPERMQY(xRegisterSSE(EEREC_LO), xRegisterSSE(EEREC_HI), 0xd8);
+		xVexEXTRACTI128Y(xRegisterSSE(EEREC_HI), xRegisterSSE(EEREC_LO), 1);
+		if (_Rd_)
+			emitHalfwordRd(EEREC_D, EEREC_LO, EEREC_HI);
+		_freeXMMreg(ones);
+		_clearNeededXMMregs();
+		return;
+	}
+
 	int t0reg = _allocTempXMMreg(XMMT_INT);
 
 	xPCMP.EQD(xRegisterSSE(EEREC_LO), xRegisterSSE(EEREC_LO));
@@ -1803,9 +2201,8 @@ void recPEXEH()
 
 	EE::Profiler.EmitOp(eeOpcode::PEXEH);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
-	xPSHUF.LW(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T), 0xc6);
-	xPSHUF.HW(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_D), 0xc6);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
+	emitHalfwordShuffle<0xc6>(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T));
 	_clearNeededXMMregs();
 }
 
@@ -1817,9 +2214,8 @@ void recPREVH()
 
 	EE::Profiler.EmitOp(eeOpcode::PREVH);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
-	xPSHUF.LW(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T), 0x1B);
-	xPSHUF.HW(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_D), 0x1B);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
+	emitHalfwordShuffle<0x1b>(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T));
 	_clearNeededXMMregs();
 }
 
@@ -1831,7 +2227,7 @@ void recPINTH()
 
 	EE::Profiler.EmitOp(eeOpcode::PINTH);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | XMMINFO_WRITED);
 	if (EEREC_D == EEREC_S)
 	{
 		int t0reg = _allocTempXMMreg(XMMT_INT);
@@ -1856,7 +2252,7 @@ void recPEXEW()
 
 	EE::Profiler.EmitOp(eeOpcode::PEXEW);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
 	xPSHUF.D(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T), 0xc6);
 	_clearNeededXMMregs();
 }
@@ -1868,7 +2264,7 @@ void recPROT3W()
 
 	EE::Profiler.EmitOp(eeOpcode::PROT3W);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
 	xPSHUF.D(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T), 0xc9);
 	_clearNeededXMMregs();
 }
@@ -1877,7 +2273,15 @@ void recPMULTH()
 {
 	EE::Profiler.EmitOp(eeOpcode::PMULTH);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | (_Rd_ ? XMMINFO_WRITED : 0) | XMMINFO_WRITELO | XMMINFO_WRITEHI);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_READT | (_Rd_ ? XMMINFO_WRITED : 0) | XMMINFO_WRITELO | XMMINFO_WRITEHI);
+	if (useWideHalfwordMultiply())
+	{
+		emitHalfwordProducts(EEREC_LO, EEREC_HI, EEREC_S, EEREC_T);
+		if (_Rd_)
+			emitHalfwordRd(EEREC_D, EEREC_LO, EEREC_HI);
+		_clearNeededXMMregs();
+		return;
+	}
 	int t0reg = _allocTempXMMreg(XMMT_INT);
 
 	xPMUL.LW(xRegisterSSE(EEREC_LO), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T));
@@ -1912,7 +2316,7 @@ void recPMFHI()
 
 	EE::Profiler.EmitOp(eeOpcode::PMFHI);
 
-	int info = eeRecompileCodeXMM(XMMINFO_WRITED | XMMINFO_READHI);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_WRITED | XMMINFO_READHI);
 	xMOVDQA(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_HI));
 	_clearNeededXMMregs();
 }
@@ -1925,7 +2329,7 @@ void recPMFLO()
 
 	EE::Profiler.EmitOp(eeOpcode::PMFLO);
 
-	int info = eeRecompileCodeXMM(XMMINFO_WRITED | XMMINFO_READLO);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_WRITED | XMMINFO_READLO);
 	xMOVDQA(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_LO));
 	_clearNeededXMMregs();
 }
@@ -1938,7 +2342,7 @@ void recPAND()
 
 	EE::Profiler.EmitOp(eeOpcode::PAND);
 
-	int info = eeRecompileCodeXMM(XMMINFO_WRITED | XMMINFO_READS | XMMINFO_READT);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_WRITED | XMMINFO_READS | XMMINFO_READT);
 	xPAND(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T));
 	_clearNeededXMMregs();
 }
@@ -1951,7 +2355,7 @@ void recPXOR()
 
 	EE::Profiler.EmitOp(eeOpcode::PXOR);
 
-	int info = eeRecompileCodeXMM(XMMINFO_WRITED | XMMINFO_READS | XMMINFO_READT);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_WRITED | XMMINFO_READS | XMMINFO_READT);
 	xPXOR(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T));
 	_clearNeededXMMregs();
 }
@@ -1964,7 +2368,7 @@ void recPCPYLD()
 
 	EE::Profiler.EmitOp(eeOpcode::PCPYLD);
 
-	int info = eeRecompileCodeXMM(XMMINFO_WRITED | ((_Rs_ == 0) ? 0 : XMMINFO_READS) | XMMINFO_READT);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_WRITED | ((_Rs_ == 0) ? 0 : XMMINFO_READS) | XMMINFO_READT);
 	if (_Rs_ == 0)
 	{
 		xMOVQZX(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T));
@@ -1993,9 +2397,22 @@ void recPMADDH()
 {
 	EE::Profiler.EmitOp(eeOpcode::PMADDH);
 
-	int info = eeRecompileCodeXMM((_Rd_ ? XMMINFO_WRITED : 0) | XMMINFO_READS | XMMINFO_READT | XMMINFO_READLO | XMMINFO_READHI | XMMINFO_WRITELO | XMMINFO_WRITEHI);
+	EERecompileInfo info = eeRecompileCodeXMM((_Rd_ ? XMMINFO_WRITED : 0) | XMMINFO_READS | XMMINFO_READT | XMMINFO_READLO | XMMINFO_READHI | XMMINFO_WRITELO | XMMINFO_WRITEHI);
 	int t0reg = _allocTempXMMreg(XMMT_INT);
 	int t1reg = _allocTempXMMreg(XMMT_INT);
+
+	if (useWideHalfwordMultiply())
+	{
+		emitHalfwordProducts(t0reg, t1reg, EEREC_S, EEREC_T);
+		xPADD.D(xRegisterSSE(EEREC_LO), xRegisterSSE(t0reg));
+		xPADD.D(xRegisterSSE(EEREC_HI), xRegisterSSE(t1reg));
+		if (_Rd_)
+			emitHalfwordRd(EEREC_D, EEREC_LO, EEREC_HI);
+		_freeXMMreg(t0reg);
+		_freeXMMreg(t1reg);
+		_clearNeededXMMregs();
+		return;
+	}
 
 	if (!_Rd_)
 	{
@@ -2080,7 +2497,7 @@ void recPSRAVW()
 
 	EE::Profiler.EmitOp(eeOpcode::PSRAVW);
 
-	int info = eeRecompileCodeXMM((_Rs_ ? XMMINFO_READS : 0) | (_Rt_ ? XMMINFO_READT : 0) | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM((_Rs_ ? XMMINFO_READS : 0) | (_Rt_ ? XMMINFO_READT : 0) | XMMINFO_WRITED);
 	if (_Rs_ == 0)
 	{
 		if (_Rt_ == 0)
@@ -2099,6 +2516,15 @@ void recPSRAVW()
 	}
 	else
 	{
+		if (avx512.HasCore() || g_cpu.vectorISA >= ProcessorFeatures::VectorISA::AVX2)
+		{
+			const int a0 = _allocTempXMMreg(XMMT_INT);
+			(avx512.HasCore() ? emitPSxxVWAVX512 : emitPSxxVWAVX2)(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T),
+				xRegisterSSE(a0), 2);
+			_freeXMMreg(a0);
+			_clearNeededXMMregs();
+			return;
+		}
 		int t0reg = _allocTempXMMreg(XMMT_INT);
 		int t1reg = _allocTempXMMreg(XMMT_INT);
 
@@ -2138,7 +2564,7 @@ void recPINTEH()
 
 	EE::Profiler.EmitOp(eeOpcode::PINTEH);
 
-	int info = eeRecompileCodeXMM((_Rs_ ? XMMINFO_READS : 0) | (_Rt_ ? XMMINFO_READT : 0) | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM((_Rs_ ? XMMINFO_READS : 0) | (_Rt_ ? XMMINFO_READT : 0) | XMMINFO_WRITED);
 
 	int t0reg = -1;
 
@@ -2161,8 +2587,7 @@ void recPINTEH()
 	{
 		if (EEREC_S == EEREC_T)
 		{
-			xPSHUF.LW(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), 0xa0);
-			xPSHUF.HW(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_D), 0xa0);
+			emitHalfwordShuffle<0xa0>(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S));
 		}
 		else if (EEREC_D == EEREC_T)
 		{
@@ -2188,7 +2613,7 @@ void recPMULTUW()
 {
 	EE::Profiler.EmitOp(eeOpcode::PMULTUW);
 
-	int info = eeRecompileCodeXMM((((_Rs_) && (_Rt_)) ? XMMINFO_READS : 0) | (((_Rs_) && (_Rt_)) ? XMMINFO_READT : 0) | (_Rd_ ? XMMINFO_WRITED : 0) | XMMINFO_WRITELO | XMMINFO_WRITEHI);
+	EERecompileInfo info = eeRecompileCodeXMM((((_Rs_) && (_Rt_)) ? XMMINFO_READS : 0) | (((_Rs_) && (_Rt_)) ? XMMINFO_READT : 0) | (_Rd_ ? XMMINFO_WRITED : 0) | XMMINFO_WRITELO | XMMINFO_WRITEHI);
 	if (!_Rs_ || !_Rt_)
 	{
 		if (_Rd_)
@@ -2202,10 +2627,7 @@ void recPMULTUW()
 		xPMUL.UDQ(xRegisterSSE(dst), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T));
 
 		// interleave & sign extend
-		xPSHUF.D(xRegisterSSE(EEREC_LO), xRegisterSSE(dst), 0x88);
-		xPSHUF.D(xRegisterSSE(EEREC_HI), xRegisterSSE(dst), 0xdd);
-		xPMOVSX.DQ(xRegisterSSE(EEREC_LO), xRegisterSSE(EEREC_LO));
-		xPMOVSX.DQ(xRegisterSSE(EEREC_HI), xRegisterSSE(EEREC_HI));
+		emitSplitLoHi(EEREC_LO, EEREC_HI, dst);
 	}
 	_clearNeededXMMregs();
 }
@@ -2215,17 +2637,14 @@ void recPMADDUW()
 {
 	EE::Profiler.EmitOp(eeOpcode::PMADDUW);
 
-	int info = eeRecompileCodeXMM((((_Rs_) && (_Rt_)) ? XMMINFO_READS : 0) | (((_Rs_) && (_Rt_)) ? XMMINFO_READT : 0) | (_Rd_ ? XMMINFO_WRITED : 0) | XMMINFO_WRITELO | XMMINFO_WRITEHI | XMMINFO_READLO | XMMINFO_READHI);
+	EERecompileInfo info = eeRecompileCodeXMM((((_Rs_) && (_Rt_)) ? XMMINFO_READS : 0) | (((_Rs_) && (_Rt_)) ? XMMINFO_READT : 0) | (_Rd_ ? XMMINFO_WRITED : 0) | XMMINFO_WRITELO | XMMINFO_WRITEHI | XMMINFO_READLO | XMMINFO_READHI);
 	xSHUF.PS(xRegisterSSE(EEREC_LO), xRegisterSSE(EEREC_HI), 0x88);
 	xPSHUF.D(xRegisterSSE(EEREC_LO), xRegisterSSE(EEREC_LO), 0xd8); // LO = {LO[0], HI[0], LO[2], HI[2]}
 	int dst = _Rd_ ? EEREC_D : EEREC_HI;
 	xPMUL.UDQ(xRegisterSSE(dst), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T));
 	xPADD.Q(xRegisterSSE(dst), xRegisterSSE(EEREC_LO));
 	// interleave & sign extend
-	xPSHUF.D(xRegisterSSE(EEREC_LO), xRegisterSSE(dst), 0x88);
-	xPSHUF.D(xRegisterSSE(EEREC_HI), xRegisterSSE(dst), 0xdd);
-	xPMOVSX.DQ(xRegisterSSE(EEREC_LO), xRegisterSSE(EEREC_LO));
-	xPMOVSX.DQ(xRegisterSSE(EEREC_HI), xRegisterSSE(EEREC_HI));
+	emitSplitLoHi(EEREC_LO, EEREC_HI, dst);
 
 	_clearNeededXMMregs();
 }
@@ -2247,7 +2666,7 @@ void recPEXCW()
 	if (!_Rd_)
 		return;
 
-	int info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
 	xPSHUF.D(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T), 0xd8);
 	_clearNeededXMMregs();
 }
@@ -2260,9 +2679,8 @@ void recPEXCH()
 	if (!_Rd_)
 		return;
 
-	int info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
-	xPSHUF.LW(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T), 0xd8);
-	xPSHUF.HW(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_D), 0xd8);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
+	emitHalfwordShuffle<0xd8>(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T));
 	_clearNeededXMMregs();
 }
 
@@ -2274,7 +2692,21 @@ void recPNOR()
 
 	EE::Profiler.EmitOp(eeOpcode::PNOR);
 
-	int info = eeRecompileCodeXMM((_Rs_ != 0 ? XMMINFO_READS : 0) | (_Rt_ != 0 ? XMMINFO_READT : 0) | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM((_Rs_ != 0 ? XMMINFO_READS : 0) | (_Rt_ != 0 ? XMMINFO_READT : 0) | XMMINFO_WRITED);
+	if (avx512.HasCore())
+	{
+		if (_Rs_ && _Rt_)
+			emitPNORAVX512(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T));
+		else if (_Rs_ || _Rt_)
+		{
+			const xRegisterSSE src(_Rs_ ? EEREC_S : EEREC_T);
+			emitPNORAVX512(xRegisterSSE(EEREC_D), src, src);
+		}
+		else
+			xPCMP.EQD(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_D));
+		_clearNeededXMMregs();
+		return;
+	}
 
 	if (_Rs_ == 0)
 	{
@@ -2330,7 +2762,7 @@ void recPMTHI()
 {
 	EE::Profiler.EmitOp(eeOpcode::PMTHI);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_WRITEHI);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_WRITEHI);
 	xMOVDQA(xRegisterSSE(EEREC_HI), xRegisterSSE(EEREC_S));
 	_clearNeededXMMregs();
 }
@@ -2340,7 +2772,7 @@ void recPMTLO()
 {
 	EE::Profiler.EmitOp(eeOpcode::PMTLO);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_WRITELO);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READS | XMMINFO_WRITELO);
 	xMOVDQA(xRegisterSSE(EEREC_LO), xRegisterSSE(EEREC_S));
 	_clearNeededXMMregs();
 }
@@ -2353,14 +2785,14 @@ void recPCPYUD()
 
 	EE::Profiler.EmitOp(eeOpcode::PCPYUD);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READS | ((_Rt_ == 0) ? 0 : XMMINFO_READT) | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READS | ((_Rt_ == 0) ? 0 : XMMINFO_READT) | XMMINFO_WRITED);
 
 	if (_Rt_ == 0)
 	{
-		if (EEREC_D == EEREC_S)
+		if (x86Emitter::use_avx || EEREC_D == EEREC_S)
 		{
-			xPUNPCK.HQDQ(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S));
-			xMOVQZX(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_D));
+			// [S.hi64, 0] is a byte shift right by 8 (needs proper testing)
+			xPSRL.DQ(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), 8);
 		}
 		else
 		{
@@ -2402,7 +2834,7 @@ void recPOR()
 
 	EE::Profiler.EmitOp(eeOpcode::POR);
 
-	int info = eeRecompileCodeXMM((_Rs_ != 0 ? XMMINFO_READS : 0) | (_Rt_ != 0 ? XMMINFO_READT : 0) | XMMINFO_WRITED);
+	EERecompileInfo info = eeRecompileCodeXMM((_Rs_ != 0 ? XMMINFO_READS : 0) | (_Rt_ != 0 ? XMMINFO_READT : 0) | XMMINFO_WRITED);
 
 	if (_Rs_ == 0)
 	{
@@ -2432,9 +2864,8 @@ void recPCPYH()
 
 	EE::Profiler.EmitOp(eeOpcode::PCPYH);
 
-	int info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
-	xPSHUF.LW(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T), 0);
-	xPSHUF.HW(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_D), 0);
+	EERecompileInfo info = eeRecompileCodeXMM(XMMINFO_READT | XMMINFO_WRITED);
+	emitHalfwordShuffle<0x00>(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_T));
 	_clearNeededXMMregs();
 }
 

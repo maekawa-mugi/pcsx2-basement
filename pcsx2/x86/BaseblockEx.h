@@ -3,9 +3,12 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstring>
 #include <iterator>
 #include <map>
+#include <memory>
+#include <vector>
 
 #include "common/Assertions.h"
 
@@ -35,89 +38,155 @@ struct BASEBLOCKEX
 #endif
 };
 
+// Sorted-by-startpc container of BASEBLOCKEX with array-like indexing. It used to be one flat array,
+// so every insert and discard memmove'd the whole tail (Full TLB does that thousands of times a
+// second). Entries now live in chunks of at most CHUNK_CAP; an edit moves at most one chunk, and
+// entries in other chunks keep their address. `starts` holds the global index of each chunk's
+// first entry so operator[](idx) stays a binary search over a few dozen to a few hundred chunks.
+// Needs proper testing under Full TLB load.
 class BaseBlockArray
 {
-	s32 _Reserved;
-	s32 _Size;
-	BASEBLOCKEX* blocks;
+	static constexpr u32 CHUNK_CAP = 256;
 
-	__fi void resize(s32 size)
+	struct Chunk
 	{
-		pxAssert(size > 0);
-		BASEBLOCKEX* newMem = new BASEBLOCKEX[size];
-		if (blocks)
+		u32 count;
+		BASEBLOCKEX items[CHUNK_CAP];
+	};
+
+	std::vector<std::unique_ptr<Chunk>> chunks;
+	std::vector<s32> starts;
+	s32 _Size;
+
+	// Last chunk whose first startpc is <= startpc (chunk 0 when startpc is below everything).
+	__fi size_t findChunk(u32 startpc) const
+	{
+		size_t lo = 0, hi = chunks.size();
+		while (hi - lo > 1)
 		{
-			memcpy(newMem, blocks, _Reserved * sizeof(BASEBLOCKEX));
-			delete[] blocks;
+			const size_t mid = (lo + hi) >> 1;
+			if (chunks[mid]->items[0].startpc > startpc)
+				hi = mid;
+			else
+				lo = mid;
 		}
-		blocks = newMem;
-		pxAssert(blocks != NULL);
+		return lo;
 	}
 
-	void reserve(u32 size)
+	__fi size_t findChunkByIndex(s32 idx) const
 	{
-		resize(size);
-		_Reserved = size;
+		size_t lo = 0, hi = chunks.size();
+		while (hi - lo > 1)
+		{
+			const size_t mid = (lo + hi) >> 1;
+			if (starts[mid] > idx)
+				hi = mid;
+			else
+				lo = mid;
+		}
+		return lo;
+	}
+
+	void renumber(size_t from)
+	{
+		s32 pos = from ? starts[from - 1] + static_cast<s32>(chunks[from - 1]->count) : 0;
+		for (size_t c = from; c < chunks.size(); c++)
+		{
+			starts[c] = pos;
+			pos += static_cast<s32>(chunks[c]->count);
+		}
 	}
 
 public:
-	~BaseBlockArray()
-	{
-		if (blocks)
-			delete[] blocks;
-	}
-
 	BaseBlockArray(s32 size)
-		: _Reserved(0)
-		, _Size(0)
-		, blocks(NULL)
+		: _Size(0)
 	{
-		reserve(size);
+		chunks.reserve(static_cast<size_t>(size) / (CHUNK_CAP / 2) + 1);
+		starts.reserve(chunks.capacity());
 	}
 
 	BASEBLOCKEX* insert(u32 startpc, uptr fnptr)
 	{
-		if (_Size + 1 >= _Reserved)
+		if (chunks.empty())
 		{
-			reserve(_Reserved + 0x2000); // some games requires even more!
+			chunks.push_back(std::make_unique<Chunk>());
+			chunks[0]->count = 0;
+			starts.push_back(0);
 		}
 
-		// Insert the the new BASEBLOCKEX by startpc order
-		int imin = 0, imax = _Size, imid;
+		size_t c = findChunk(startpc);
+		if (chunks[c]->count == CHUNK_CAP)
+		{
+			// Split in half; the upper half becomes a new chunk right after.
+			auto upper = std::make_unique<Chunk>();
+			const u32 half = CHUNK_CAP / 2;
+			memcpy(upper->items, chunks[c]->items + half, (CHUNK_CAP - half) * sizeof(BASEBLOCKEX));
+			upper->count = CHUNK_CAP - half;
+			chunks[c]->count = half;
+			chunks.insert(chunks.begin() + c + 1, std::move(upper));
+			starts.insert(starts.begin() + c + 1, 0);
+			renumber(c + 1);
+			if (chunks[c + 1]->items[0].startpc <= startpc)
+				c++;
+		}
 
+		Chunk& chunk = *chunks[c];
+		u32 imin = 0, imax = chunk.count;
 		while (imin < imax)
 		{
-			imid = (imin + imax) >> 1;
-
-			if (blocks[imid].startpc > startpc)
+			const u32 imid = (imin + imax) >> 1;
+			if (chunk.items[imid].startpc > startpc)
 				imax = imid;
 			else
 				imin = imid + 1;
 		}
 
-		pxAssert(imin == _Size || blocks[imin].startpc > startpc);
+		pxAssert(imin == chunk.count || chunk.items[imin].startpc > startpc);
 
-		if (imin < _Size)
-		{
-			// make a hole for a new block.
-			memmove(blocks + imin + 1, blocks + imin, (_Size - imin) * sizeof(BASEBLOCKEX));
-		}
+		if (imin < chunk.count)
+			memmove(chunk.items + imin + 1, chunk.items + imin, (chunk.count - imin) * sizeof(BASEBLOCKEX));
 
-		memset((blocks + imin), 0, sizeof(BASEBLOCKEX));
-		blocks[imin].startpc = startpc;
-		blocks[imin].fnptr = fnptr;
+		memset(&chunk.items[imin], 0, sizeof(BASEBLOCKEX));
+		chunk.items[imin].startpc = startpc;
+		chunk.items[imin].fnptr = fnptr;
+		chunk.count++;
+		for (size_t i = c + 1; i < starts.size(); i++)
+			starts[i]++;
 
 		_Size++;
-		return &blocks[imin];
+		return &chunk.items[imin];
+	}
+
+	// Index of the last entry with startpc <= the argument, 0 if there is none, -1 when empty.
+	int lastIndex(u32 startpc) const
+	{
+		if (_Size == 0)
+			return -1;
+
+		const size_t c = findChunk(startpc);
+		const Chunk& chunk = *chunks[c];
+		u32 imin = 0, imax = chunk.count - 1;
+		while (imin != imax)
+		{
+			const u32 imid = (imin + imax + 1) >> 1;
+			if (chunk.items[imid].startpc > startpc)
+				imax = imid - 1;
+			else
+				imin = imid;
+		}
+		return starts[c] + static_cast<s32>(imin);
 	}
 
 	__fi BASEBLOCKEX& operator[](int idx) const
 	{
-		return *(blocks + idx);
+		const size_t c = findChunkByIndex(idx);
+		return chunks[c]->items[idx - starts[c]];
 	}
 
 	void clear()
 	{
+		chunks.clear();
+		starts.clear();
 		_Size = 0;
 	}
 
@@ -126,16 +195,56 @@ public:
 		return _Size;
 	}
 
-	__fi void erase(s32 first, s32 last)
+	// Removes entries [first, last).
+	void erase(s32 first, s32 last)
 	{
-		int range = last - first;
+		if (first >= last)
+			return;
 
-		if (last < _Size)
+		const size_t c0 = findChunkByIndex(first);
+		const size_t c1 = findChunkByIndex(last - 1);
+		const u32 off0 = first - starts[c0];
+		const u32 off1 = (last - 1) - starts[c1]; // inclusive
+
+		if (c0 == c1)
 		{
-			memmove(blocks + first, blocks + last, (_Size - last) * sizeof(BASEBLOCKEX));
+			Chunk& chunk = *chunks[c0];
+			memmove(chunk.items + off0, chunk.items + off1 + 1, (chunk.count - off1 - 1) * sizeof(BASEBLOCKEX));
+			chunk.count -= off1 - off0 + 1;
 		}
+		else
+		{
+			Chunk& head = *chunks[c0];
+			Chunk& tail = *chunks[c1];
+			head.count = off0;
+			memmove(tail.items, tail.items + off1 + 1, (tail.count - off1 - 1) * sizeof(BASEBLOCKEX));
+			tail.count -= off1 + 1;
+			// Chunks strictly between are dropped whole.
+			chunks.erase(chunks.begin() + c0 + 1, chunks.begin() + c1);
+			starts.erase(starts.begin() + c0 + 1, starts.begin() + c1);
+		}
+		_Size -= last - first;
 
-		_Size -= range;
+		// Drop chunks which became empty, and fold a small chunk into its right neighbour.
+		for (size_t c = std::min(c0 + 2, chunks.size()); c-- > c0;)
+		{
+			if (chunks[c]->count == 0)
+			{
+				chunks.erase(chunks.begin() + c);
+				starts.erase(starts.begin() + c);
+			}
+		}
+		size_t c = c0 < chunks.size() ? c0 : chunks.size() - 1;
+		if (!chunks.empty() && c + 1 < chunks.size() && chunks[c]->count + chunks[c + 1]->count <= CHUNK_CAP / 2)
+		{
+			Chunk& dst = *chunks[c];
+			Chunk& src = *chunks[c + 1];
+			memcpy(dst.items + dst.count, src.items, src.count * sizeof(BASEBLOCKEX));
+			dst.count += src.count;
+			chunks.erase(chunks.begin() + c + 1);
+			starts.erase(starts.begin() + c + 1);
+		}
+		renumber(c0 < chunks.size() ? c0 : chunks.size());
 	}
 };
 

@@ -31,7 +31,7 @@ REC_FUNC_DEL(SLTIU, _Rt_);
 
 #else
 
-static void recMoveStoT(int info)
+static void recMoveStoT(EERecompileInfo info)
 {
 	if (info & PROCESS_EE_S)
 		xMOV(xRegister32(EEREC_T), xRegister32(EEREC_S));
@@ -39,7 +39,7 @@ static void recMoveStoT(int info)
 		xMOV(xRegister32(EEREC_T), ptr32[&cpuRegs.GPR.r[_Rs_].UL[0]]);
 }
 
-static void recMoveStoT64(int info)
+static void recMoveStoT64(EERecompileInfo info)
 {
 	if (info & PROCESS_EE_S)
 		xMOV(xRegister64(EEREC_T), xRegister64(EEREC_S));
@@ -53,7 +53,7 @@ static void recADDI_const(void)
 	g_cpuConstRegs[_Rt_].SD[0] = s64(s32(g_cpuConstRegs[_Rs_].UL[0] + u32(s32(_Imm_))));
 }
 
-static void recADDI_(int info)
+static void recADDI_(EERecompileInfo info)
 {
 	pxAssert(!(info & PROCESS_EE_XMM));
 	recMoveStoT(info);
@@ -75,7 +75,7 @@ static void recDADDI_const()
 	g_cpuConstRegs[_Rt_].UD[0] = g_cpuConstRegs[_Rs_].UD[0] + u64(s64(_Imm_));
 }
 
-static void recDADDI_(int info)
+static void recDADDI_(EERecompileInfo info)
 {
 	pxAssert(!(info & PROCESS_EE_XMM));
 	recMoveStoT64(info);
@@ -96,7 +96,7 @@ static void recSLTIU_const()
 	g_cpuConstRegs[_Rt_].UD[0] = g_cpuConstRegs[_Rs_].UD[0] < (u64)(_Imm_);
 }
 
-static void recSLTIU_(int info)
+static void recSLTIU_(EERecompileInfo info)
 {
 	pxAssert(!(info & PROCESS_EE_XMM));
 
@@ -126,7 +126,7 @@ static void recSLTI_const()
 	g_cpuConstRegs[_Rt_].UD[0] = g_cpuConstRegs[_Rs_].SD[0] < (s64)(_Imm_);
 }
 
-static void recSLTI_(int info)
+static void recSLTI_(EERecompileInfo info)
 {
 	const xRegister32 dreg((_Rt_ == _Rs_) ? _allocX86reg(X86TYPE_TEMP, 0, 0) : EEREC_T);
 	xXOR(dreg, dreg);
@@ -163,7 +163,7 @@ enum class LogicalOp
 };
 } // namespace
 
-static void recLogicalOpI(int info, LogicalOp op)
+static void recLogicalOpI(EERecompileInfo info, LogicalOp op)
 {
 	xImpl_G1Logic* bad = nullptr;
 	const xImpl_G1Logic& xOP = op == LogicalOp::AND ? xAND
@@ -190,7 +190,7 @@ static void recLogicalOpI(int info, LogicalOp op)
 	}
 }
 
-static void recANDI_(int info)
+static void recANDI_(EERecompileInfo info)
 {
 	recLogicalOpI(info, LogicalOp::AND);
 }
@@ -203,7 +203,7 @@ static void recORI_const()
 	g_cpuConstRegs[_Rt_].UD[0] = g_cpuConstRegs[_Rs_].UD[0] | (u64)_ImmU_; // Zero-extended Immediate
 }
 
-static void recORI_(int info)
+static void recORI_(EERecompileInfo info)
 {
 	recLogicalOpI(info, LogicalOp::OR);
 }
@@ -216,7 +216,7 @@ static void recXORI_const()
 	g_cpuConstRegs[_Rt_].UD[0] = g_cpuConstRegs[_Rs_].UD[0] ^ (u64)_ImmU_; // Zero-extended Immediate
 }
 
-static void recXORI_(int info)
+static void recXORI_(EERecompileInfo info)
 {
 	recLogicalOpI(info, LogicalOp::XOR);
 }

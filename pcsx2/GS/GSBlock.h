@@ -10,6 +10,69 @@
 
 MULTI_ISA_UNSHARED_START
 
+#if defined(__AVX512VBMI__) && defined(__AVX512VL__)
+// VBMI unswizzle tables, generated from columnTable8 / columnTable4 (GSTables.cpp).
+// 8bpp: for column c, output row r, pixel x the source byte (within the 64-byte column) is
+// k8[(c * 4 + r) * 16 + x].
+// 4bpp: for pixel (y, x) the pixel's nibble m has index byte (m & 1) * 64 + ((m >> 1) & 63); VPERMI2B over
+// {column, column >> 4 per byte} then yields the nibble in bits 3:0 of the selected byte.
+struct VBMITables
+{
+	alignas(64) u8 r8[4][64];     // ReadColumn8<c>: dst rows 0..3 as four 16-byte rows
+	alignas(64) u8 e4[4][8][64];  // ReadAndExpandBlock4_32: [column][row * 2 + half], index byte in each dword's low byte
+	constexpr VBMITables()
+		: r8(), e4()
+	{
+		constexpr u8 k8[256] = {
+		0, 4, 16, 20, 32, 36, 48, 52, 2, 6, 18, 22, 34, 38, 50, 54,
+		8, 12, 24, 28, 40, 44, 56, 60, 10, 14, 26, 30, 42, 46, 58, 62,
+		33, 37, 49, 53, 1, 5, 17, 21, 35, 39, 51, 55, 3, 7, 19, 23,
+		41, 45, 57, 61, 9, 13, 25, 29, 43, 47, 59, 63, 11, 15, 27, 31,
+		32, 36, 48, 52, 0, 4, 16, 20, 34, 38, 50, 54, 2, 6, 18, 22,
+		40, 44, 56, 60, 8, 12, 24, 28, 42, 46, 58, 62, 10, 14, 26, 30,
+		1, 5, 17, 21, 33, 37, 49, 53, 3, 7, 19, 23, 35, 39, 51, 55,
+		9, 13, 25, 29, 41, 45, 57, 61, 11, 15, 27, 31, 43, 47, 59, 63,
+		0, 4, 16, 20, 32, 36, 48, 52, 2, 6, 18, 22, 34, 38, 50, 54,
+		8, 12, 24, 28, 40, 44, 56, 60, 10, 14, 26, 30, 42, 46, 58, 62,
+		33, 37, 49, 53, 1, 5, 17, 21, 35, 39, 51, 55, 3, 7, 19, 23,
+		41, 45, 57, 61, 9, 13, 25, 29, 43, 47, 59, 63, 11, 15, 27, 31,
+		32, 36, 48, 52, 0, 4, 16, 20, 34, 38, 50, 54, 2, 6, 18, 22,
+		40, 44, 56, 60, 8, 12, 24, 28, 42, 46, 58, 62, 10, 14, 26, 30,
+		1, 5, 17, 21, 33, 37, 49, 53, 3, 7, 19, 23, 35, 39, 51, 55,
+		9, 13, 25, 29, 41, 45, 57, 61, 11, 15, 27, 31, 43, 47, 59, 63
+		};
+		constexpr u8 k4[512] = {
+		0, 4, 16, 20, 32, 36, 48, 52, 1, 5, 17, 21, 33, 37, 49, 53, 2, 6, 18, 22, 34, 38, 50, 54, 3, 7, 19, 23, 35, 39, 51, 55,
+		8, 12, 24, 28, 40, 44, 56, 60, 9, 13, 25, 29, 41, 45, 57, 61, 10, 14, 26, 30, 42, 46, 58, 62, 11, 15, 27, 31, 43, 47, 59, 63,
+		96, 100, 112, 116, 64, 68, 80, 84, 97, 101, 113, 117, 65, 69, 81, 85, 98, 102, 114, 118, 66, 70, 82, 86, 99, 103, 115, 119, 67, 71, 83, 87,
+		104, 108, 120, 124, 72, 76, 88, 92, 105, 109, 121, 125, 73, 77, 89, 93, 106, 110, 122, 126, 74, 78, 90, 94, 107, 111, 123, 127, 75, 79, 91, 95,
+		32, 36, 48, 52, 0, 4, 16, 20, 33, 37, 49, 53, 1, 5, 17, 21, 34, 38, 50, 54, 2, 6, 18, 22, 35, 39, 51, 55, 3, 7, 19, 23,
+		40, 44, 56, 60, 8, 12, 24, 28, 41, 45, 57, 61, 9, 13, 25, 29, 42, 46, 58, 62, 10, 14, 26, 30, 43, 47, 59, 63, 11, 15, 27, 31,
+		64, 68, 80, 84, 96, 100, 112, 116, 65, 69, 81, 85, 97, 101, 113, 117, 66, 70, 82, 86, 98, 102, 114, 118, 67, 71, 83, 87, 99, 103, 115, 119,
+		72, 76, 88, 92, 104, 108, 120, 124, 73, 77, 89, 93, 105, 109, 121, 125, 74, 78, 90, 94, 106, 110, 122, 126, 75, 79, 91, 95, 107, 111, 123, 127,
+		0, 4, 16, 20, 32, 36, 48, 52, 1, 5, 17, 21, 33, 37, 49, 53, 2, 6, 18, 22, 34, 38, 50, 54, 3, 7, 19, 23, 35, 39, 51, 55,
+		8, 12, 24, 28, 40, 44, 56, 60, 9, 13, 25, 29, 41, 45, 57, 61, 10, 14, 26, 30, 42, 46, 58, 62, 11, 15, 27, 31, 43, 47, 59, 63,
+		96, 100, 112, 116, 64, 68, 80, 84, 97, 101, 113, 117, 65, 69, 81, 85, 98, 102, 114, 118, 66, 70, 82, 86, 99, 103, 115, 119, 67, 71, 83, 87,
+		104, 108, 120, 124, 72, 76, 88, 92, 105, 109, 121, 125, 73, 77, 89, 93, 106, 110, 122, 126, 74, 78, 90, 94, 107, 111, 123, 127, 75, 79, 91, 95,
+		32, 36, 48, 52, 0, 4, 16, 20, 33, 37, 49, 53, 1, 5, 17, 21, 34, 38, 50, 54, 2, 6, 18, 22, 35, 39, 51, 55, 3, 7, 19, 23,
+		40, 44, 56, 60, 8, 12, 24, 28, 41, 45, 57, 61, 9, 13, 25, 29, 42, 46, 58, 62, 10, 14, 26, 30, 43, 47, 59, 63, 11, 15, 27, 31,
+		64, 68, 80, 84, 96, 100, 112, 116, 65, 69, 81, 85, 97, 101, 113, 117, 66, 70, 82, 86, 98, 102, 114, 118, 67, 71, 83, 87, 99, 103, 115, 119,
+		72, 76, 88, 92, 104, 108, 120, 124, 73, 77, 89, 93, 105, 109, 121, 125, 74, 78, 90, 94, 106, 110, 122, 126, 75, 79, 91, 95, 107, 111, 123, 127
+		};
+		for (int c = 0; c < 4; c++)
+			for (int j = 0; j < 64; j++)
+				r8[c][j] = k8[c * 64 + j];
+		for (int c = 0; c < 4; c++)
+			for (int r = 0; r < 4; r++)
+				for (int h = 0; h < 2; h++)
+					for (int k = 0; k < 16; k++)
+						e4[c][r * 2 + h][k * 4] = k4[(c * 4 + r) * 32 + h * 16 + k];
+	}
+};
+
+inline constexpr VBMITables k_vbmi{};
+#endif
+
 class GSBlock
 {
 	static const GSVector4i m_r16mask;
@@ -480,7 +543,17 @@ public:
 
 		//for(int j = 0; j < 64; j++) ((u8*)src)[j] = (u8)j;
 
-#if _M_SSE >= 0x501
+#if defined(__AVX512VBMI__) && defined(__AVX512VL__)
+
+		// One VPERMB unswizzles the whole 64-byte column into four 16-byte rows.
+		// Needs proper testing on real hardware (written without VBMI hardware at hand).
+		const __m512i rows = _mm512_permutexvar_epi8(_mm512_load_si512(k_vbmi.r8[i]), _mm512_loadu_si512(src));
+		_mm_storeu_si128(reinterpret_cast<__m128i*>(&dst[dstpitch * 0]), _mm512_castsi512_si128(rows));
+		_mm_storeu_si128(reinterpret_cast<__m128i*>(&dst[dstpitch * 1]), _mm512_extracti32x4_epi32(rows, 1));
+		_mm_storeu_si128(reinterpret_cast<__m128i*>(&dst[dstpitch * 2]), _mm512_extracti32x4_epi32(rows, 2));
+		_mm_storeu_si128(reinterpret_cast<__m128i*>(&dst[dstpitch * 3]), _mm512_extracti32x4_epi32(rows, 3));
+
+#elif _M_SSE >= 0x501
 
 		const GSVector8i* s = (const GSVector8i*)src;
 
@@ -1671,7 +1744,29 @@ public:
 	{
 		//printf("ReadAndExpandBlock4_32\n");
 
-#if _M_SSE >= 0x501
+#if defined(__AVX512VBMI__) && defined(__AVX512VL__)
+
+		// Unswizzle and look up in one pass, no index temporary. Per 64-byte column: lo = the column, hi = every
+		// byte shifted right by 4 (nibble in bits 3:0); one VPERMI2B per 16 pixels picks each pixel's nibble
+		// (index byte in each dword's low byte) and VPERMD reads the 16-colour palette, which fits in one ZMM
+		// and only looks at the low 4 bits of each dword. Needs proper testing on real hardware.
+		const __m512i palette = _mm512_loadu_si512(pal);
+
+		for (int c = 0; c < 4; c++)
+		{
+			const __m512i lo = _mm512_loadu_si512(src + c * 64);
+			const __m512i hi = _mm512_srli_epi16(lo, 4);
+
+			for (int r = 0; r < 4; r++, dst += dstpitch)
+			{
+				const __m512i i0 = _mm512_permutex2var_epi8(lo, _mm512_load_si512(k_vbmi.e4[c][r * 2 + 0]), hi);
+				const __m512i i1 = _mm512_permutex2var_epi8(lo, _mm512_load_si512(k_vbmi.e4[c][r * 2 + 1]), hi);
+				_mm512_storeu_si512(dst, _mm512_permutexvar_epi32(i0, palette));
+				_mm512_storeu_si512(dst + 64, _mm512_permutexvar_epi32(i1, palette));
+			}
+		}
+
+#elif _M_SSE >= 0x501
 
 		const GSVector8i* s = (const GSVector8i*)src;
 

@@ -5,6 +5,10 @@
 
 #include "R5900OpcodeTables.h"
 #include "R5900.h"
+#ifdef _M_X86
+#include "common/emitter/x86types.h"
+#include "x86/InterpreterAVX512.h"
+#endif
 
 namespace R5900
 {
@@ -508,7 +512,7 @@ namespace R5900
 			MTSAB,  MTSAH , Unknown,    Unknown, Unknown, Unknown, Unknown, Unknown,
 		};
 
-		static const OPCODE tbl_MMI[64] =
+		static OPCODE tbl_MMI[64] =
 		{
 			MADD,               MADDU,           MMI_Unknown,          MMI_Unknown,          PLZCW,            MMI_Unknown,       MMI_Unknown,          MMI_Unknown,
 			MMI0,      MMI2,   MMI_Unknown,          MMI_Unknown,          MMI_Unknown,      MMI_Unknown,       MMI_Unknown,          MMI_Unknown,
@@ -520,7 +524,7 @@ namespace R5900
 			MMI_Unknown,        MMI_Unknown,     MMI_Unknown,          MMI_Unknown,          PSLLW,            MMI_Unknown,       PSRLW,                PSRAW,
 		};
 
-		static const OPCODE tbl_MMI0[32] =
+		static OPCODE tbl_MMI0[32] =
 		{
 			PADDW,         PSUBW,         PCGTW,          PMAXW,
 			PADDH,         PSUBH,         PCGTH,          PMAXH,
@@ -532,7 +536,7 @@ namespace R5900
 			MMI_Unknown,   MMI_Unknown,   PEXT5,          PPAC5,
 		};
 
-		static const OPCODE tbl_MMI1[32] =
+		static OPCODE tbl_MMI1[32] =
 		{
 			MMI_Unknown,   PABSW,         PCEQW,         PMINW,
 			PADSBH,        PABSH,         PCEQH,         PMINH,
@@ -557,7 +561,7 @@ namespace R5900
 			PMULTH,        PDIVBW,        PEXEW,         PROT3W,
 		};
 
-		static const OPCODE tbl_MMI3[32] =
+		static OPCODE tbl_MMI3[32] =
 		{
 			PMADDUW,       MMI_Unknown,   MMI_Unknown,   PSRAVW,
 			MMI_Unknown,   MMI_Unknown,   MMI_Unknown,   MMI_Unknown,
@@ -637,6 +641,20 @@ namespace R5900
 			COP1_Unknown,COP1_Unknown,COP1_Unknown,COP1_Unknown,COP1_Unknown,COP1_Unknown,COP1_Unknown,COP1_Unknown,
 		};
 
+		void InitializeInterpreterISA()
+		{
+#ifdef _M_X86
+			namespace MMIImpl = Interpreter::OpcodeImpl::MMI;
+			const bool enabled = x86Emitter::avx512.HasCore();
+			// Select once so the existing fetch/decode/dispatch loop gains no
+			// per-instruction feature branch. Recompiler/disassembly stay intact.
+			tbl_MMI[4].interpret = enabled ? MMIImpl::PLZCW_AVX512 : MMIImpl::PLZCW;
+			tbl_MMI0[30].interpret = enabled ? MMIImpl::PEXT5_AVX512 : MMIImpl::PEXT5;
+			tbl_MMI0[31].interpret = enabled ? MMIImpl::PPAC5_AVX512 : MMIImpl::PPAC5;
+			tbl_MMI1[27].interpret = enabled ? MMIImpl::QFSRV_AVX512 : MMIImpl::QFSRV;
+			tbl_MMI3[19].interpret = enabled ? MMIImpl::PNOR_AVX512 : MMIImpl::PNOR;
+#endif
+		}
 	}	// end namespace R5900::OpcodeTables
 
 	namespace Opcodes

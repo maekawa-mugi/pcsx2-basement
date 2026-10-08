@@ -3,7 +3,12 @@
 
 #pragma once
 #include "microVU.h"
+#include "AVX512Profile.h"
 #include <array>
+#include <cstdio>
+#include <cstdlib>
+#include <iterator>
+#include <string>
 
 inline constexpr int mVUsoftAccRegisterIndex = 32;
 
@@ -226,6 +231,112 @@ struct microMapGPR
 	bool usable;
 };
 
+// AVX-512: VF/ACC "home" registers. Each listed VF owns one of XMM16-31 for the
+// whole micro program and the register always equals the VF in memory: every
+// allocator write-back updates it as well (write-through), and it is refilled
+// from memory at dispatcher entry and after helper calls (XMM16-31 are caller
+// saved). Because it never holds newer data than memory, it is valid at every
+// block boundary without extending the block state, and a VF read becomes a
+// register move instead of a load. Remaining slots are used for in-block
+// copies (see HighCopy). Needs proper testing in games.
+//
+// Opt-in: off by default. In Katamari Damacy the homes served ~65% of VU1 VF
+// loads, yet the VU thread time (OSD, Ice Lake) did not change measurably, so
+// they are not worth the extra guest state by default.
+// PCSX2_AVX512_VF_HOMES selects the VU1 VFs, e.g. "12,13,16,18-28,31,acc" (the
+// 16 most requested VF/ACC registers in that profile; vu_vf.csv shows the
+// per-VF loads) or "1-15,acc". PCSX2_AVX512_VU0_VF_HOMES does the same for VU0
+// micro; VU0 programs are short, so the 16 loads at every dispatcher entry
+// tend to cost more than the ~2 VF loads per block they could save.
+// PCSX2_AVX512_NO_HIGHCOPY=1 turns homes off as well.
+//
+// PCSX2_AVX512_VF_HOME_LAZY=1 (experimental) makes the homes authoritative:
+// write-backs of a homed VF update only the register, and all homes are stored
+// to memory at program end and before helper calls (spillHomes). Trades ~4
+// stores per block run for 16 stores per program run / call.
+struct microVFHomeMap
+{
+	int count = 0;
+	bool lazy = false;
+	int vf[iREGCNT_XMM_EVEX - iREGCNT_XMM] = {};
+	int slotOf[33] = {}; // VF0-31, ACC(32) -> slot or -1
+};
+
+static microVFHomeMap mVUparseVFHomeMap(const char* env_name, const char* default_spec)
+{
+	microVFHomeMap m;
+	std::fill(std::begin(m.slotOf), std::end(m.slotOf), -1);
+	const char* off = std::getenv("PCSX2_AVX512_NO_HIGHCOPY");
+	if ((off && off[0] == '1') || !x86Emitter::avx512.HasCore())
+		return m;
+	const char* lazy = std::getenv("PCSX2_AVX512_VF_HOME_LAZY");
+	m.lazy = lazy && lazy[0] == '1';
+	const char* env = std::getenv(env_name);
+	const std::string spec = env ? env : default_spec;
+	const auto add = [&m](int vf) {
+		if (vf >= 1 && vf <= 32 && m.slotOf[vf] < 0 && m.count < static_cast<int>(std::size(m.vf)))
+		{
+			m.slotOf[vf] = m.count;
+			m.vf[m.count++] = vf;
+		}
+	};
+	size_t pos = 0;
+	while (pos < spec.size())
+	{
+		size_t end = spec.find(',', pos);
+		if (end == std::string::npos)
+			end = spec.size();
+		const std::string item = spec.substr(pos, end - pos);
+		pos = end + 1;
+		if (item == "acc" || item == "ACC")
+		{
+			add(32);
+			continue;
+		}
+		int lo = 0, hi = 0;
+		const int n = std::sscanf(item.c_str(), "%d-%d", &lo, &hi);
+		if (n == 1)
+			add(lo);
+		else if (n == 2)
+		{
+			for (int vf = lo; vf <= hi; vf++)
+				add(vf);
+		}
+	}
+	return m;
+}
+
+static const microVFHomeMap& mVUgetVFHomeMap(int index)
+{
+	static const microVFHomeMap vu0 = mVUparseVFHomeMap("PCSX2_AVX512_VU0_VF_HOMES", "none");
+	static const microVFHomeMap vu1 = mVUparseVFHomeMap("PCSX2_AVX512_VF_HOMES", "none");
+	return index ? vu1 : vu0;
+}
+
+// Loads every home register from guest memory.
+static void mVUloadVFHomes(int index)
+{
+	const microVFHomeMap& map = mVUgetVFHomeMap(index);
+	VURegs& regs = ::vuRegs[index];
+	for (int slot = 0; slot < map.count; slot++)
+	{
+		const int vf = map.vf[slot];
+		xVMOVDQA32(xRegisterSSE(iREGCNT_XMM + slot), ptr[(vf == 32) ? &regs.ACC : &regs.VF[vf]]);
+	}
+}
+
+// Stores every home register to guest memory (lazy homes only).
+static void mVUstoreVFHomes(int index)
+{
+	const microVFHomeMap& map = mVUgetVFHomeMap(index);
+	VURegs& regs = ::vuRegs[index];
+	for (int slot = 0; slot < map.count; slot++)
+	{
+		const int vf = map.vf[slot];
+		xVMOVDQA32(ptr[(vf == 32) ? &regs.ACC : &regs.VF[vf]], xRegisterSSE(iREGCNT_XMM + slot));
+	}
+}
+
 class microRegAlloc
 {
 protected:
@@ -235,6 +346,24 @@ protected:
 	std::array<microMapXMM, xmmTotal> xmmMap;
 	std::array<microMapGPR, gprTotal> gprMap;
 	std::array<u8, mVUsoftAccRegisterIndex + 1> softNonExtendedMask = {};
+
+	// AVX-512: clean copies of evicted VF/ACC values in XMM16-31. Memory stays
+	// authoritative (write-through); a copy only replaces a later reload with a
+	// register move. Micro mode only, and not with SoftFloat, whose exact paths
+	// use XMM16-30 as fixed scratch. Needs proper testing in games.
+	struct HighCopy
+	{
+		int vf = -1;
+		int count = 0;
+	};
+	std::array<HighCopy, iREGCNT_XMM_EVEX - iREGCNT_XMM> highCopies;
+	bool highCopiesEnabled = false;
+	// VF home registers (microVFHomeMap) take slots [0, homeBase); copies use the rest.
+	bool homesEnabled = false;
+	int homeBase = 0;
+	// Profile only: VF/ACC registers touched in this block, and since copies were last invalidated.
+	u64 touchedInBlock = 0;
+	u64 touchedSinceInvalidate = 0;
 
 	int         counter; // Current allocation count
 	int         index;   // VU0 or VU1
@@ -247,6 +376,57 @@ protected:
 
 	bool        regAllocCOP2;    // Local COP2 check
 
+	int homeSlot(int vfreg) const
+	{
+		return (homesEnabled && vfreg >= 1 && vfreg <= 32) ? mVUgetVFHomeMap(index).slotOf[vfreg] : -1;
+	}
+
+	// Keeps a home register equal to memory: applies the same lanes the
+	// write-back stores. Single-lane values sit in lane 0 (modXYZW).
+	void updateHome(const xmm& reg, int vfreg, int xyzw)
+	{
+		const int slot = homeSlot(vfreg);
+		if (slot < 0)
+			return;
+		const xRegisterSSE home(iREGCNT_XMM + slot);
+		const auto insertIdx = [](int src, int dst) { return static_cast<u8>((src << 6) | (dst << 4)); };
+		switch (xyzw)
+		{
+			case 0xf: xVMOVDQA32(home, reg); break;
+			case 8: xVINSERTPS(home, home, reg, insertIdx(0, 0)); break;
+			case 4: xVINSERTPS(home, home, reg, insertIdx(0, 1)); break;
+			case 2: xVINSERTPS(home, home, reg, insertIdx(0, 2)); break;
+			case 1: xVINSERTPS(home, home, reg, insertIdx(0, 3)); break;
+			default:
+				for (int lane = 0; lane < 4; lane++)
+				{
+					if (xyzw & (8 >> lane))
+						xVINSERTPS(home, home, reg, insertIdx(lane, lane));
+				}
+				break;
+		}
+	}
+
+	// Write-back of a guest VF/ACC value to memory, counted for the opt-in
+	// AVX-512 planning profile (microVU blocks only, never COP2 macro ops).
+	void profiledSaveReg(const xmm& reg, int vfreg, xAddressVoid ptr, int xyzw, bool modXYZW)
+	{
+		if (profileBlock)
+			profileBlock->vf_writebacks++;
+		updateHome(reg, vfreg, xyzw); // before the store, which may modify reg
+		if (homeSlot(vfreg) >= 0 && mVUgetVFHomeMap(index).lazy)
+		{
+			if (profileBlock)
+				profileBlock->vf_home_only_writebacks++;
+			return; // memory is updated by spillHomes()
+		}
+		mVUsaveReg(reg, ptr, xyzw, modXYZW);
+	}
+
+public:
+	AVX512Profile::VUBlock* profileBlock = nullptr;
+
+protected:
 	// Helper functions to get VU regs
 	VURegs& regs() const { return ::vuRegs[index]; }
 	__fi REG_VI& getVI(uint reg) const { return regs().VI[reg]; }
@@ -269,6 +449,122 @@ protected:
 		xMOVSSZX(reg, ptr32[&getVI(REG_I)]);
 		if (!_XYZWss(xyzw))
 			xSHUF.PS(reg, reg, 0);
+	}
+
+	void touchVF(int vfreg)
+	{
+		if (profileBlock && vfreg >= 1 && vfreg <= 32)
+		{
+			touchedInBlock |= 1ull << vfreg;
+			touchedSinceInvalidate |= 1ull << vfreg;
+		}
+	}
+
+	int findHighCopy(int vfreg) const
+	{
+		for (size_t i = homeBase; i < highCopies.size(); i++)
+		{
+			if (highCopies[i].vf == vfreg)
+				return static_cast<int>(i);
+		}
+		return -1;
+	}
+
+	void dropHighCopy(int vfreg)
+	{
+		const int slot = findHighCopy(vfreg);
+		if (slot >= 0)
+			highCopies[slot].vf = -1;
+	}
+
+	// Called when a host register is about to be reused. A clean, complete
+	// VF/ACC value is kept in a free (or least recently used) high register.
+	void stashHighCopy(int regId, int keepVF)
+	{
+		if (!highCopiesEnabled)
+			return;
+		const microMapXMM& map = xmmMap[regId];
+		if (map.VFreg < 1 || map.VFreg > 32 || map.xyzw != 0 || homeSlot(map.VFreg) >= 0)
+			return;
+		// A clean register can coexist with a not yet written back new value of
+		// the same VF (cleared by clearNeeded). Its contents are stale then.
+		for (int i = 0; i < xmmTotal; i++)
+		{
+			if (i != regId && xmmMap[i].VFreg == map.VFreg && xmmMap[i].xyzw != 0)
+			{
+				if (profileBlock)
+					profileBlock->vf_copy_refused++;
+				return;
+			}
+		}
+		const int existing = findHighCopy(map.VFreg);
+		if (existing >= 0)
+		{
+			highCopies[existing].count = counter;
+			return;
+		}
+		int slot = -1;
+		for (size_t i = homeBase; i < highCopies.size(); i++)
+		{
+			if (highCopies[i].vf == keepVF && keepVF >= 0)
+				continue;
+			if (slot < 0 || highCopies[i].vf < 0 ||
+				(highCopies[slot].vf >= 0 && highCopies[i].count < highCopies[slot].count))
+				slot = static_cast<int>(i);
+			if (highCopies[slot].vf < 0)
+				break;
+		}
+		if (slot < 0)
+			return;
+		if (profileBlock && highCopies[slot].vf >= 0)
+			profileBlock->vf_copy_replaced++;
+		xVMOVDQA32(xRegisterSSE(iREGCNT_XMM + slot), xRegisterSSE::GetInstance(regId));
+		highCopies[slot] = {map.VFreg, counter};
+	}
+
+	// Replaces a full 128-bit reload of vfreg when a home or high copy exists.
+	bool loadHighCopy(const xmm& reg, int vfreg)
+	{
+		if (const int home = homeSlot(vfreg); home >= 0)
+		{
+			xVMOVDQA32(reg, xRegisterSSE(iREGCNT_XMM + home));
+			if (profileBlock)
+			{
+				profileBlock->vf_high_loads++;
+				profileBlock->vf_home_loads++;
+			}
+			return true;
+		}
+		if (!highCopiesEnabled)
+			return false;
+		const int slot = findHighCopy(vfreg);
+		if (slot < 0)
+			return false;
+		xVMOVDQA32(reg, xRegisterSSE(iREGCNT_XMM + slot));
+		highCopies[slot].count = counter;
+		if (profileBlock)
+			profileBlock->vf_high_loads++;
+		return true;
+	}
+
+	// Replaces a single-lane load (value moved to lane 0, like the cached-register
+	// path; the other lanes are don't-care) when vfreg has a home register.
+	bool loadHomeLane(const xmm& reg, int vfreg, int xyzw)
+	{
+		const int home = homeSlot(vfreg);
+		if (home < 0)
+			return false;
+		const xRegisterSSE src(iREGCNT_XMM + home);
+		if (xyzw == 8)
+			xVMOVDQA32(reg, src);
+		else
+			xVPSHUFD(reg, src, (xyzw == 4) ? 1 : (xyzw == 2) ? 2 : 3);
+		if (profileBlock)
+		{
+			profileBlock->vf_high_loads++;
+			profileBlock->vf_home_loads++;
+		}
+		return true;
 	}
 
 	int findFreeRegRec(int startIdx)
@@ -361,9 +657,50 @@ public:
 		reset(false);
 	}
 
+	// Lazy homes hold the only current copy: store them before anything outside
+	// generated block code may read VF memory or clobber XMM16-31.
+	void spillHomes()
+	{
+		if (!homesEnabled || !mVUgetVFHomeMap(index).lazy)
+			return;
+		mVUstoreVFHomes(index);
+		if (profileBlock)
+			profileBlock->vf_home_spills += mVUgetVFHomeMap(index).count;
+	}
+
+	// Refills the home registers after a helper call clobbered XMM16-31.
+	// Memory is current there because homes are write-through.
+	void reloadHomes()
+	{
+		if (!homesEnabled)
+			return;
+		mVUloadVFHomes(index);
+		if (profileBlock)
+			profileBlock->vf_home_refills += mVUgetVFHomeMap(index).count;
+	}
+
+	// Host registers XMM16-31 are caller-saved and clobbered by helpers:
+	// forget every copy at calls, flushes and block boundaries.
+	void invalidateHighCopies()
+	{
+		for (HighCopy& copy : highCopies)
+			copy.vf = -1;
+		touchedSinceInvalidate = 0;
+	}
+
 	// Fully resets the regalloc by clearing all cached data
 	void reset(bool cop2mode)
 	{
+		invalidateHighCopies();
+		touchedInBlock = 0;
+		// PCSX2_AVX512_NO_HIGHCOPY=1 turns the copies off for A/B testing.
+		static const bool highCopiesDisabled = [] {
+			const char* env = std::getenv("PCSX2_AVX512_NO_HIGHCOPY");
+			return env && env[0] == '1';
+		}();
+		highCopiesEnabled = !cop2mode && !highCopiesDisabled && x86Emitter::avx512.HasCore() && !CHECK_VU_SOFT(index);
+		homesEnabled = highCopiesEnabled && mVUgetVFHomeMap(index).count > 0;
+		homeBase = homesEnabled ? mVUgetVFHomeMap(index).count : 0;
 		// we run this at the of cop2, so don't free fprs
 		regAllocCOP2 = false;
 
@@ -506,6 +843,7 @@ public:
 	// If clearState is 1, then it invalidates all cached reg data after write-back
 	void flushAll(bool clearState = true)
 	{
+		invalidateHighCopies();
 		for (int i = 0; i < xmmTotal; i++)
 		{
 			writeBackReg(xmm(i));
@@ -535,6 +873,7 @@ public:
 
 	void flushCallerSavedRegisters(bool clearNeeded = false)
 	{
+		invalidateHighCopies();
 		for (int i = 0; i < xmmTotal; i++)
 		{
 			if (!xRegisterSSE::IsCallerSaved(i))
@@ -558,6 +897,7 @@ public:
 
 	void flushPartialForCOP2()
 	{
+		invalidateHighCopies();
 		for (int i = 0; i < xmmTotal; i++)
 		{
 			microMapXMM& clear = xmmMap[i];
@@ -601,9 +941,9 @@ public:
 				if (mapX.VFreg == 33)
 					xMOVSS(ptr32[&getVI(REG_I)], xmm(i));
 				else if (mapX.VFreg == 32)
-					mVUsaveReg(xmm(i), ptr[&regs().ACC], mapX.xyzw, 1);
+					profiledSaveReg(xmm(i), 32, ptr[&regs().ACC], mapX.xyzw, 1);
 				else
-					mVUsaveReg(xmm(i), ptr[&getVF(mapX.VFreg)], mapX.xyzw, 1);
+					profiledSaveReg(xmm(i), mapX.VFreg, ptr[&getVF(mapX.VFreg)], mapX.xyzw, 1);
 			}
 		}
 
@@ -684,12 +1024,13 @@ public:
 
 		if ((mapX.VFreg > 0) && mapX.xyzw) // Reg was modified and not Temp or vf0
 		{
+			dropHighCopy(mapX.VFreg); // memory is about to change
 			if (mapX.VFreg == 33)
 				xMOVSS(ptr32[&getVI(REG_I)], reg);
 			else if (mapX.VFreg == 32)
-				mVUsaveReg(reg, ptr[&regs().ACC], mapX.xyzw, true);
+				profiledSaveReg(reg, 32, ptr[&regs().ACC], mapX.xyzw, true);
 			else
-				mVUsaveReg(reg, ptr[&getVF(mapX.VFreg)], mapX.xyzw, true);
+				profiledSaveReg(reg, mapX.VFreg, ptr[&getVF(mapX.VFreg)], mapX.xyzw, true);
 
 			if (invalidateRegs)
 			{
@@ -815,6 +1156,8 @@ public:
 							z = findFreeReg(vfWriteReg);
 							const xmm& xmmZ = xmm::GetInstance(z);
 							writeBackReg(xmmZ);
+							if (z != i)
+								stashHighCopy(z, vfLoadReg);
 
 							if (xyzw == 4)
 								xPSHUF.D(xmmZ, xmmI, 1);
@@ -846,6 +1189,10 @@ public:
 					xmmMap[z].count = counter;
 					xmmMap[z].isNeeded = true;
 					updateCOP2AllocState(z);
+					if (vfWriteReg > 0)
+						dropHighCopy(vfWriteReg);
+					touchVF(vfLoadReg);
+					touchVF(vfWriteReg);
 
 					return xmm::GetInstance(z);
 				}
@@ -854,6 +1201,8 @@ public:
 		int x = findFreeReg((vfWriteReg >= 0) ? vfWriteReg : vfLoadReg);
 		const xmm& xmmX = xmm::GetInstance(x);
 		writeBackReg(xmmX);
+		stashHighCopy(x, vfLoadReg);
+		const u32 highLoadsBefore = profileBlock ? profileBlock->vf_high_loads : 0;
 
 		if (vfWriteReg >= 0) // Reg Will Be Modified (allow partial reg loading)
 		{
@@ -861,6 +1210,10 @@ public:
 				xPXOR(xmmX, xmmX);
 			else if (vfLoadReg == 33)
 				loadIreg(xmmX, xyzw);
+			else if (vfLoadReg > 0 && !_XYZWss(xyzw) && loadHighCopy(xmmX, vfLoadReg))
+				; // full reload served from a home or high copy
+			else if (vfLoadReg > 0 && _XYZWss(xyzw) && loadHomeLane(xmmX, vfLoadReg, xyzw))
+				; // single-lane load served from a home register
 			else if (vfLoadReg == 32)
 				mVUloadReg(xmmX, ptr[&regs().ACC], xyzw);
 			else if (vfLoadReg >= 0)
@@ -873,6 +1226,8 @@ public:
 		{
 			if (vfLoadReg == 33)
 				loadIreg(xmmX, 0xf);
+			else if (vfLoadReg > 0 && loadHighCopy(xmmX, vfLoadReg))
+				; // reload served from a high copy
 			else if (vfLoadReg == 32)
 				xMOVAPS (xmmX, ptr128[&regs().ACC]);
 			else if (vfLoadReg >= 0)
@@ -881,6 +1236,28 @@ public:
 			xmmMap[x].VFreg = vfLoadReg;
 			xmmMap[x].xyzw  = 0;
 		}
+		if (profileBlock && vfLoadReg >= 1 && vfLoadReg <= 32)
+		{
+			profileBlock->vf_loads++;
+			profileBlock->vf_requests_by_reg[vfLoadReg]++;
+			if (profileBlock->vf_high_loads == highLoadsBefore)
+				profileBlock->vf_memory_loads_by_reg[vfLoadReg]++;
+			const u64 bit = 1ull << vfLoadReg;
+			if (profileBlock->vf_high_loads != highLoadsBefore)
+				; // served from a copy
+			else if (!(touchedInBlock & bit))
+				profileBlock->vf_first_loads++;
+			else if (!(touchedSinceInvalidate & bit))
+				profileBlock->vf_flushed_reloads++;
+			else if (vfWriteReg >= 0 && _XYZWss(xyzw))
+				profileBlock->vf_partial_reloads++;
+			else
+				profileBlock->vf_lost_reloads++;
+		}
+		touchVF(vfLoadReg);
+		touchVF(vfWriteReg);
+		if (vfWriteReg > 0)
+			dropHighCopy(vfWriteReg); // the old value is about to change
 		xmmMap[x].isZero = (vfLoadReg == 0);
 		xmmMap[x].count    = counter;
 		xmmMap[x].isNeeded = true;

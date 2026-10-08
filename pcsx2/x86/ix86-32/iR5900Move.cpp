@@ -260,7 +260,7 @@ static void recMOVZtemp_const()
 	g_cpuConstRegs[_Rd_].UD[0] = g_cpuConstRegs[_Rs_].UD[0];
 }
 
-static void recMOVZtemp_consts(int info)
+static void recMOVZtemp_consts(EERecompileInfo info)
 {
 	// we need the constant anyway, so just force it into a register
 	const int regs = (info & PROCESS_EE_S) ? EEREC_S : _allocX86reg(X86TYPE_GPR, _Rs_, MODE_READ);
@@ -272,7 +272,7 @@ static void recMOVZtemp_consts(int info)
 	xCMOVE(xRegister64(EEREC_D), xRegister64(regs));
 }
 
-static void recMOVZtemp_constt(int info)
+static void recMOVZtemp_constt(EERecompileInfo info)
 {
 	if (info & PROCESS_EE_S)
 		xMOV(xRegister64(EEREC_D), xRegister64(EEREC_S));
@@ -280,7 +280,7 @@ static void recMOVZtemp_constt(int info)
 		xMOV(xRegister64(EEREC_D), ptr64[&cpuRegs.GPR.r[_Rs_].UD[0]]);
 }
 
-static void recMOVZtemp_(int info)
+static void recMOVZtemp_(EERecompileInfo info)
 {
 	if (info & PROCESS_EE_T)
 		xTEST(xRegister64(EEREC_T), xRegister64(EEREC_T));
@@ -313,7 +313,7 @@ static void recMOVNtemp_const()
 	g_cpuConstRegs[_Rd_].UD[0] = g_cpuConstRegs[_Rs_].UD[0];
 }
 
-static void recMOVNtemp_consts(int info)
+static void recMOVNtemp_consts(EERecompileInfo info)
 {
 	// we need the constant anyway, so just force it into a register
 	const int regs = (info & PROCESS_EE_S) ? EEREC_S : _allocX86reg(X86TYPE_GPR, _Rs_, MODE_READ);
@@ -325,7 +325,7 @@ static void recMOVNtemp_consts(int info)
 	xCMOVNE(xRegister64(EEREC_D), xRegister64(regs));
 }
 
-static void recMOVNtemp_constt(int info)
+static void recMOVNtemp_constt(EERecompileInfo info)
 {
 	if (info & PROCESS_EE_S)
 		xMOV(xRegister64(EEREC_D), xRegister64(EEREC_S));
@@ -333,7 +333,7 @@ static void recMOVNtemp_constt(int info)
 		xMOV(xRegister64(EEREC_D), ptr64[&cpuRegs.GPR.r[_Rs_].UD[0]]);
 }
 
-static void recMOVNtemp_(int info)
+static void recMOVNtemp_(EERecompileInfo info)
 {
 	if (info & PROCESS_EE_T)
 		xTEST(xRegister64(EEREC_T), xRegister64(EEREC_T));

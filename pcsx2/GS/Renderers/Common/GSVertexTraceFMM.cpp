@@ -171,6 +171,92 @@ void GSVertexTraceFMM::FindMinMax(GSVertexTrace& vt, const void* vertex, const u
 	else if (iip || n == 1) // iip means final and non-final vertexes are treated the same
 	{
 		int i = 0;
+#if defined(__AVX512F__) && defined(__AVX512BW__) && defined(__AVX512VL__) && defined(__AVX512DQ__)
+		// Four vertices per ZMM, one per 128-bit lane, with the same lane operations as
+		// processVertices. NaN lanes are masked out with a k-mask instead of a blend.
+		// Needs proper testing: reducing the lanes at the end changes the order of the
+		// min/max, which can flip the sign of a zero in tmin/tmax.
+		if (count >= 8)
+		{
+			const auto load4 = [&](int base, int m) {
+				__m512i r = _mm512_castsi128_si512(_mm_load_si128(reinterpret_cast<const __m128i*>(&v[index[base + 0]].m[m])));
+				r = _mm512_inserti32x4(r, _mm_load_si128(reinterpret_cast<const __m128i*>(&v[index[base + 1]].m[m])), 1);
+				r = _mm512_inserti32x4(r, _mm_load_si128(reinterpret_cast<const __m128i*>(&v[index[base + 2]].m[m])), 2);
+				return _mm512_inserti32x4(r, _mm_load_si128(reinterpret_cast<const __m128i*>(&v[index[base + 3]].m[m])), 3);
+			};
+
+			__m512 ztmin = _mm512_broadcast_f32x4(tmin.m);
+			__m512 ztmax = _mm512_broadcast_f32x4(tmax.m);
+			__m512i zcmin = _mm512_broadcast_i32x4(cmin.m);
+			__m512i zcmax = _mm512_broadcast_i32x4(cmax.m);
+			__m512i zpmin = _mm512_broadcast_i32x4(pmin.m);
+			__m512i zpmax = _mm512_broadcast_i32x4(pmax.m);
+			u32 knan = 0;
+
+			for (; i + 4 <= count; i += 4)
+			{
+				const __m512i m0 = load4(i, 0);
+				const __m512i m1 = load4(i, 1);
+
+				if (color)
+				{
+					// GSVector4i::load(RGBAQ.U32[0]): the colour in dword 0, zero elsewhere.
+					const __m512i c = _mm512_maskz_shuffle_epi32(0x1111, m0, _MM_PERM_CCCC);
+					zcmin = _mm512_min_epu8(zcmin, c);
+					zcmax = _mm512_max_epu8(zcmax, c);
+				}
+
+				if (tme)
+				{
+					if (!fst)
+					{
+						const __m512 stq = _mm512_castsi512_ps(m0);
+						const __m512 q = _mm512_permute_ps(stq, _MM_SHUFFLE(3, 3, 3, 3));
+						// (s / q, t / q, q, q)
+						const __m512 t = _mm512_mask_div_ps(q, 0x3333, stq, q);
+						const __mmask16 nan = _mm512_cmp_ps_mask(t, t, _CMP_UNORD_Q);
+						ztmin = _mm512_mask_min_ps(ztmin, static_cast<__mmask16>(~nan), ztmin, t);
+						ztmax = _mm512_mask_max_ps(ztmax, static_cast<__mmask16>(~nan), ztmax, t);
+						knan |= nan;
+					}
+					else
+					{
+						const __m512 st = _mm512_permute_ps(
+							_mm512_cvtepi32_ps(_mm512_unpackhi_epi16(m1, _mm512_setzero_si512())), _MM_SHUFFLE(1, 0, 1, 0));
+						ztmin = _mm512_min_ps(ztmin, st);
+						ztmax = _mm512_max_ps(ztmax, st);
+					}
+				}
+
+				const __m512i xy = _mm512_unpacklo_epi16(m1, _mm512_setzero_si512());
+				const __m512i zf = _mm512_shuffle_epi32(m1, _MM_PERM_DBDB);
+				const __m512i p = _mm512_mask_blend_epi32(0xcccc, xy, zf);
+				zpmin = _mm512_min_epu32(zpmin, p);
+				zpmax = _mm512_max_epu32(zpmax, p);
+			}
+
+			alignas(64) float ft[2][16];
+			alignas(64) u32 it[4][16];
+			_mm512_store_ps(ft[0], ztmin);
+			_mm512_store_ps(ft[1], ztmax);
+			_mm512_store_si512(it[0], zcmin);
+			_mm512_store_si512(it[1], zcmax);
+			_mm512_store_si512(it[2], zpmin);
+			_mm512_store_si512(it[3], zpmax);
+			u32 nanbits = 0;
+			for (int l = 0; l < 4; l++)
+			{
+				tmin = tmin.min(GSVector4::load<true>(&ft[0][l * 4]));
+				tmax = tmax.max(GSVector4::load<true>(&ft[1][l * 4]));
+				cmin = cmin.min_u8(GSVector4i::load<true>(&it[0][l * 4]));
+				cmax = cmax.max_u8(GSVector4i::load<true>(&it[1][l * 4]));
+				pmin = pmin.min_u32(GSVector4i::load<true>(&it[2][l * 4]));
+				pmax = pmax.max_u32(GSVector4i::load<true>(&it[3][l * 4]));
+				nanbits |= (knan >> (l * 4)) & 0xf;
+			}
+			tnan |= GSVector4i(_mm_movm_epi32(static_cast<__mmask8>(nanbits)));
+		}
+#endif
 		for (; i < (count - 1); i += 2) // 2x loop unroll
 		{
 			processVertices(v[index[i + 0]], v[index[i + 1]], true);

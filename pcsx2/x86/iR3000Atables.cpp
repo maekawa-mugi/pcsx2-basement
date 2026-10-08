@@ -58,41 +58,41 @@ static int rpsxAllocRegIfUsed(int reg, int mode)
 
 static void rpsxMoveStoT(int info)
 {
-	if (EEREC_T == EEREC_S)
+	if (PSXREC_T == PSXREC_S)
 		return;
 
 	if (info & PROCESS_EE_S)
-		xMOV(xRegister32(EEREC_T), xRegister32(EEREC_S));
+		xMOV(xRegister32(PSXREC_T), xRegister32(PSXREC_S));
 	else
-		xMOV(xRegister32(EEREC_T), ptr32[&psxRegs.GPR.r[_Rs_]]);
+		xMOV(xRegister32(PSXREC_T), ptr32[&psxRegs.GPR.r[_Rs_]]);
 }
 
 static void rpsxMoveStoD(int info)
 {
-	if (EEREC_D == EEREC_S)
+	if (PSXREC_D == PSXREC_S)
 		return;
 
 	if (info & PROCESS_EE_S)
-		xMOV(xRegister32(EEREC_D), xRegister32(EEREC_S));
+		xMOV(xRegister32(PSXREC_D), xRegister32(PSXREC_S));
 	else
-		xMOV(xRegister32(EEREC_D), ptr32[&psxRegs.GPR.r[_Rs_]]);
+		xMOV(xRegister32(PSXREC_D), ptr32[&psxRegs.GPR.r[_Rs_]]);
 }
 
 static void rpsxMoveTtoD(int info)
 {
-	if (EEREC_D == EEREC_T)
+	if (PSXREC_D == PSXREC_T)
 		return;
 
 	if (info & PROCESS_EE_T)
-		xMOV(xRegister32(EEREC_D), xRegister32(EEREC_T));
+		xMOV(xRegister32(PSXREC_D), xRegister32(PSXREC_T));
 	else
-		xMOV(xRegister32(EEREC_D), ptr32[&psxRegs.GPR.r[_Rt_]]);
+		xMOV(xRegister32(PSXREC_D), ptr32[&psxRegs.GPR.r[_Rt_]]);
 }
 
 static void rpsxMoveSToECX(int info)
 {
 	if (info & PROCESS_EE_S)
-		xMOV(ecx, xRegister32(EEREC_S));
+		xMOV(ecx, xRegister32(PSXREC_S));
 	else
 		xMOV(ecx, ptr32[&psxRegs.GPR.r[_Rs_]]);
 }
@@ -157,7 +157,7 @@ static void rpsxADDIU_(int info)
 	// Rt = Rs + Im
 	rpsxMoveStoT(info);
 	if (_Imm_ != 0)
-		xADD(xRegister32(EEREC_T), _Imm_);
+		xADD(xRegister32(PSXREC_T), _Imm_);
 }
 
 PSXRECOMPILE_CONSTCODE1(ADDIU, XMMINFO_WRITET | XMMINFO_READS);
@@ -172,20 +172,20 @@ static void rpsxSLTI_const()
 
 static void rpsxSLTI_(int info)
 {
-	const xRegister32 dreg((_Rt_ == _Rs_) ? _allocX86reg(X86TYPE_TEMP, 0, 0) : EEREC_T);
+	const xRegister32 dreg((_Rt_ == _Rs_) ? _allocX86reg(X86TYPE_TEMP, 0, 0) : PSXREC_T);
 	xXOR(dreg, dreg);
 
 	if (info & PROCESS_EE_S)
-		xCMP(xRegister32(EEREC_S), _Imm_);
+		xCMP(xRegister32(PSXREC_S), _Imm_);
 	else
 		xCMP(ptr32[&psxRegs.GPR.r[_Rs_]], _Imm_);
 
 	xSETL(xRegister8(dreg));
 
-	if (dreg.GetId() != EEREC_T)
+	if (dreg.GetId() != PSXREC_T)
 	{
-		std::swap(x86regs[dreg.GetId()], x86regs[EEREC_T]);
-		_freeX86reg(EEREC_T);
+		std::swap(x86regs[dreg.GetId()], x86regs[PSXREC_T]);
+		_freeX86reg(PSXREC_T);
 	}
 }
 
@@ -199,20 +199,20 @@ static void rpsxSLTIU_const()
 
 static void rpsxSLTIU_(int info)
 {
-	const xRegister32 dreg((_Rt_ == _Rs_) ? _allocX86reg(X86TYPE_TEMP, 0, 0) : EEREC_T);
+	const xRegister32 dreg((_Rt_ == _Rs_) ? _allocX86reg(X86TYPE_TEMP, 0, 0) : PSXREC_T);
 	xXOR(dreg, dreg);
 
 	if (info & PROCESS_EE_S)
-		xCMP(xRegister32(EEREC_S), _Imm_);
+		xCMP(xRegister32(PSXREC_S), _Imm_);
 	else
 		xCMP(ptr32[&psxRegs.GPR.r[_Rs_]], _Imm_);
 
 	xSETB(xRegister8(dreg));
 
-	if (dreg.GetId() != EEREC_T)
+	if (dreg.GetId() != PSXREC_T)
 	{
-		std::swap(x86regs[dreg.GetId()], x86regs[EEREC_T]);
-		_freeX86reg(EEREC_T);
+		std::swap(x86regs[dreg.GetId()], x86regs[PSXREC_T]);
+		_freeX86reg(PSXREC_T);
 	}
 }
 
@@ -226,13 +226,13 @@ static void rpsxLogicalOpI(u64 info, int op)
 		switch (op)
 		{
 			case 0:
-				xAND(xRegister32(EEREC_T), _ImmU_);
+				xAND(xRegister32(PSXREC_T), _ImmU_);
 				break;
 			case 1:
-				xOR(xRegister32(EEREC_T), _ImmU_);
+				xOR(xRegister32(PSXREC_T), _ImmU_);
 				break;
 			case 2:
-				xXOR(xRegister32(EEREC_T), _ImmU_);
+				xXOR(xRegister32(PSXREC_T), _ImmU_);
 				break;
 
 				jNO_DEFAULT
@@ -242,9 +242,9 @@ static void rpsxLogicalOpI(u64 info, int op)
 	{
 		if (op == 0)
 		{
-			xXOR(xRegister32(EEREC_T), xRegister32(EEREC_T));
+			xXOR(xRegister32(PSXREC_T), xRegister32(PSXREC_T));
 		}
-		else if (EEREC_T != EEREC_S)
+		else if (PSXREC_T != PSXREC_S)
 		{
 			rpsxMoveStoT(info);
 		}
@@ -309,7 +309,7 @@ static void rpsxADDU_consts(int info)
 	const s32 cval = static_cast<s32>(g_psxConstRegs[_Rs_]);
 	rpsxMoveTtoD(info);
 	if (cval != 0)
-		xADD(xRegister32(EEREC_D), cval);
+		xADD(xRegister32(PSXREC_D), cval);
 }
 
 static void rpsxADDU_constt(int info)
@@ -317,41 +317,41 @@ static void rpsxADDU_constt(int info)
 	const s32 cval = static_cast<s32>(g_psxConstRegs[_Rt_]);
 	rpsxMoveStoD(info);
 	if (cval != 0)
-		xADD(xRegister32(EEREC_D), cval);
+		xADD(xRegister32(PSXREC_D), cval);
 }
 
 void rpsxADDU_(int info)
 {
 	if ((info & PROCESS_EE_S) && (info & PROCESS_EE_T))
 	{
-		if (EEREC_D == EEREC_S)
+		if (PSXREC_D == PSXREC_S)
 		{
-			xADD(xRegister32(EEREC_D), xRegister32(EEREC_T));
+			xADD(xRegister32(PSXREC_D), xRegister32(PSXREC_T));
 		}
-		else if (EEREC_D == EEREC_T)
+		else if (PSXREC_D == PSXREC_T)
 		{
-			xADD(xRegister32(EEREC_D), xRegister32(EEREC_S));
+			xADD(xRegister32(PSXREC_D), xRegister32(PSXREC_S));
 		}
 		else
 		{
-			xMOV(xRegister32(EEREC_D), xRegister32(EEREC_S));
-			xADD(xRegister32(EEREC_D), xRegister32(EEREC_T));
+			xMOV(xRegister32(PSXREC_D), xRegister32(PSXREC_S));
+			xADD(xRegister32(PSXREC_D), xRegister32(PSXREC_T));
 		}
 	}
 	else if (info & PROCESS_EE_S)
 	{
-		xMOV(xRegister32(EEREC_D), xRegister32(EEREC_S));
-		xADD(xRegister32(EEREC_D), ptr32[&psxRegs.GPR.r[_Rt_]]);
+		xMOV(xRegister32(PSXREC_D), xRegister32(PSXREC_S));
+		xADD(xRegister32(PSXREC_D), ptr32[&psxRegs.GPR.r[_Rt_]]);
 	}
 	else if (info & PROCESS_EE_T)
 	{
-		xMOV(xRegister32(EEREC_D), xRegister32(EEREC_T));
-		xADD(xRegister32(EEREC_D), ptr32[&psxRegs.GPR.r[_Rs_]]);
+		xMOV(xRegister32(PSXREC_D), xRegister32(PSXREC_T));
+		xADD(xRegister32(PSXREC_D), ptr32[&psxRegs.GPR.r[_Rs_]]);
 	}
 	else
 	{
-		xMOV(xRegister32(EEREC_D), ptr32[&psxRegs.GPR.r[_Rs_]]);
-		xADD(xRegister32(EEREC_D), ptr32[&psxRegs.GPR.r[_Rt_]]);
+		xMOV(xRegister32(PSXREC_D), ptr32[&psxRegs.GPR.r[_Rs_]]);
+		xADD(xRegister32(PSXREC_D), ptr32[&psxRegs.GPR.r[_Rt_]]);
 	}
 }
 
@@ -368,15 +368,15 @@ static void rpsxSUBU_consts(int info)
 {
 	// more complex because Rt can be Rd, and we're reversing the op
 	const s32 sval = g_psxConstRegs[_Rs_];
-	const xRegister32 dreg((_Rt_ == _Rd_) ? eax.GetId() : EEREC_D);
+	const xRegister32 dreg((_Rt_ == _Rd_) ? eax.GetId() : PSXREC_D);
 	xMOV(dreg, sval);
 
 	if (info & PROCESS_EE_T)
-		xSUB(dreg, xRegister32(EEREC_T));
+		xSUB(dreg, xRegister32(PSXREC_T));
 	else
 		xSUB(dreg, ptr32[&psxRegs.GPR.r[_Rt_]]);
 
-	xMOV(xRegister32(EEREC_D), dreg);
+	xMOV(xRegister32(PSXREC_D), dreg);
 }
 
 static void rpsxSUBU_constt(int info)
@@ -384,7 +384,7 @@ static void rpsxSUBU_constt(int info)
 	const s32 tval = g_psxConstRegs[_Rt_];
 	rpsxMoveStoD(info);
 	if (tval != 0)
-		xSUB(xRegister32(EEREC_D), tval);
+		xSUB(xRegister32(PSXREC_D), tval);
 }
 
 static void rpsxSUBU_(int info)
@@ -392,48 +392,48 @@ static void rpsxSUBU_(int info)
 	// Rd = Rs - Rt
 	if (_Rs_ == _Rt_)
 	{
-		xXOR(xRegister32(EEREC_D), xRegister32(EEREC_D));
+		xXOR(xRegister32(PSXREC_D), xRegister32(PSXREC_D));
 		return;
 	}
 
 	// a bit messier here because it's not commutative..
 	if ((info & PROCESS_EE_S) && (info & PROCESS_EE_T))
 	{
-		if (EEREC_D == EEREC_S)
+		if (PSXREC_D == PSXREC_S)
 		{
-			xSUB(xRegister32(EEREC_D), xRegister32(EEREC_T));
+			xSUB(xRegister32(PSXREC_D), xRegister32(PSXREC_T));
 		}
-		else if (EEREC_D == EEREC_T)
+		else if (PSXREC_D == PSXREC_T)
 		{
 			// D might equal T
-			const xRegister32 dreg((_Rt_ == _Rd_) ? eax.GetId() : EEREC_D);
-			xMOV(dreg, xRegister32(EEREC_S));
-			xSUB(dreg, xRegister32(EEREC_T));
-			xMOV(xRegister32(EEREC_D), dreg);
+			const xRegister32 dreg((_Rt_ == _Rd_) ? eax.GetId() : PSXREC_D);
+			xMOV(dreg, xRegister32(PSXREC_S));
+			xSUB(dreg, xRegister32(PSXREC_T));
+			xMOV(xRegister32(PSXREC_D), dreg);
 		}
 		else
 		{
-			xMOV(xRegister32(EEREC_D), xRegister32(EEREC_S));
-			xSUB(xRegister32(EEREC_D), xRegister32(EEREC_T));
+			xMOV(xRegister32(PSXREC_D), xRegister32(PSXREC_S));
+			xSUB(xRegister32(PSXREC_D), xRegister32(PSXREC_T));
 		}
 	}
 	else if (info & PROCESS_EE_S)
 	{
-		xMOV(xRegister32(EEREC_D), xRegister32(EEREC_S));
-		xSUB(xRegister32(EEREC_D), ptr32[&psxRegs.GPR.r[_Rt_]]);
+		xMOV(xRegister32(PSXREC_D), xRegister32(PSXREC_S));
+		xSUB(xRegister32(PSXREC_D), ptr32[&psxRegs.GPR.r[_Rt_]]);
 	}
 	else if (info & PROCESS_EE_T)
 	{
 		// D might equal T
-		const xRegister32 dreg((_Rt_ == _Rd_) ? eax.GetId() : EEREC_D);
+		const xRegister32 dreg((_Rt_ == _Rd_) ? eax.GetId() : PSXREC_D);
 		xMOV(dreg, ptr32[&psxRegs.GPR.r[_Rs_]]);
-		xSUB(dreg, xRegister32(EEREC_T));
-		xMOV(xRegister32(EEREC_D), dreg);
+		xSUB(dreg, xRegister32(PSXREC_T));
+		xMOV(xRegister32(PSXREC_D), dreg);
 	}
 	else
 	{
-		xMOV(xRegister32(EEREC_D), ptr32[&psxRegs.GPR.r[_Rs_]]);
-		xSUB(xRegister32(EEREC_D), ptr32[&psxRegs.GPR.r[_Rt_]]);
+		xMOV(xRegister32(PSXREC_D), ptr32[&psxRegs.GPR.r[_Rs_]]);
+		xSUB(xRegister32(PSXREC_D), ptr32[&psxRegs.GPR.r[_Rt_]]);
 	}
 }
 
@@ -491,18 +491,18 @@ static void rpsxLogicalOp_constv(LogicalOp op, int info, int creg, u32 vreg, int
 
 	if (hasFixed && cval == fixedInput)
 	{
-		xMOV(xRegister32(EEREC_D), fixedOutput);
+		xMOV(xRegister32(PSXREC_D), fixedOutput);
 	}
 	else
 	{
 		if (regv >= 0)
-			xMOV(xRegister32(EEREC_D), xRegister32(regv));
+			xMOV(xRegister32(PSXREC_D), xRegister32(regv));
 		else
-			xMOV(xRegister32(EEREC_D), ptr32[&psxRegs.GPR.r[vreg]]);
+			xMOV(xRegister32(PSXREC_D), ptr32[&psxRegs.GPR.r[vreg]]);
 		if (cval != identityInput)
-			xOP(xRegister32(EEREC_D), cval);
+			xOP(xRegister32(PSXREC_D), cval);
 		if (op == LogicalOp::NOR)
-			xNOT(xRegister32(EEREC_D));
+			xNOT(xRegister32(PSXREC_D));
 	}
 }
 
@@ -520,7 +520,7 @@ static void rpsxLogicalOp(LogicalOp op, int info)
 
 	// swap because it's commutative and Rd might be Rt
 	u32 rs = _Rs_, rt = _Rt_;
-	int regs = (info & PROCESS_EE_S) ? EEREC_S : -1, regt = (info & PROCESS_EE_T) ? EEREC_T : -1;
+	int regs = (info & PROCESS_EE_S) ? PSXREC_S : -1, regt = (info & PROCESS_EE_T) ? PSXREC_T : -1;
 	if (_Rd_ == _Rt_)
 	{
 		std::swap(rs, rt);
@@ -529,22 +529,22 @@ static void rpsxLogicalOp(LogicalOp op, int info)
 
 	if (op == LogicalOp::XOR && rs == rt)
 	{
-		xXOR(xRegister32(EEREC_D), xRegister32(EEREC_D));
+		xXOR(xRegister32(PSXREC_D), xRegister32(PSXREC_D));
 	}
 	else
 	{
 		if (regs >= 0)
-			xMOV(xRegister32(EEREC_D), xRegister32(regs));
+			xMOV(xRegister32(PSXREC_D), xRegister32(regs));
 		else
-			xMOV(xRegister32(EEREC_D), ptr32[&psxRegs.GPR.r[rs]]);
+			xMOV(xRegister32(PSXREC_D), ptr32[&psxRegs.GPR.r[rs]]);
 
 		if (regt >= 0)
-			xOP(xRegister32(EEREC_D), xRegister32(regt));
+			xOP(xRegister32(PSXREC_D), xRegister32(regt));
 		else
-			xOP(xRegister32(EEREC_D), ptr32[&psxRegs.GPR.r[rt]]);
+			xOP(xRegister32(PSXREC_D), ptr32[&psxRegs.GPR.r[rt]]);
 
 		if (op == LogicalOp::NOR)
-			xNOT(xRegister32(EEREC_D));
+			xNOT(xRegister32(PSXREC_D));
 	}
 }
 
@@ -555,12 +555,12 @@ static void rpsxAND_const()
 
 static void rpsxAND_consts(int info)
 {
-	rpsxLogicalOp_constv(LogicalOp::AND, info, _Rs_, _Rt_, (info & PROCESS_EE_T) ? EEREC_T : -1);
+	rpsxLogicalOp_constv(LogicalOp::AND, info, _Rs_, _Rt_, (info & PROCESS_EE_T) ? PSXREC_T : -1);
 }
 
 static void rpsxAND_constt(int info)
 {
-	rpsxLogicalOp_constv(LogicalOp::AND, info, _Rt_, _Rs_, (info & PROCESS_EE_S) ? EEREC_S : -1);
+	rpsxLogicalOp_constv(LogicalOp::AND, info, _Rt_, _Rs_, (info & PROCESS_EE_S) ? PSXREC_S : -1);
 }
 
 static void rpsxAND_(int info)
@@ -577,12 +577,12 @@ static void rpsxOR_const()
 
 static void rpsxOR_consts(int info)
 {
-	rpsxLogicalOp_constv(LogicalOp::OR, info, _Rs_, _Rt_, (info & PROCESS_EE_T) ? EEREC_T : -1);
+	rpsxLogicalOp_constv(LogicalOp::OR, info, _Rs_, _Rt_, (info & PROCESS_EE_T) ? PSXREC_T : -1);
 }
 
 static void rpsxOR_constt(int info)
 {
-	rpsxLogicalOp_constv(LogicalOp::OR, info, _Rt_, _Rs_, (info & PROCESS_EE_S) ? EEREC_S : -1);
+	rpsxLogicalOp_constv(LogicalOp::OR, info, _Rt_, _Rs_, (info & PROCESS_EE_S) ? PSXREC_S : -1);
 }
 
 static void rpsxOR_(int info)
@@ -600,12 +600,12 @@ static void rpsxXOR_const()
 
 static void rpsxXOR_consts(int info)
 {
-	rpsxLogicalOp_constv(LogicalOp::XOR, info, _Rs_, _Rt_, (info & PROCESS_EE_T) ? EEREC_T : -1);
+	rpsxLogicalOp_constv(LogicalOp::XOR, info, _Rs_, _Rt_, (info & PROCESS_EE_T) ? PSXREC_T : -1);
 }
 
 static void rpsxXOR_constt(int info)
 {
-	rpsxLogicalOp_constv(LogicalOp::XOR, info, _Rt_, _Rs_, (info & PROCESS_EE_S) ? EEREC_S : -1);
+	rpsxLogicalOp_constv(LogicalOp::XOR, info, _Rt_, _Rs_, (info & PROCESS_EE_S) ? PSXREC_S : -1);
 }
 
 static void rpsxXOR_(int info)
@@ -623,12 +623,12 @@ static void rpsxNOR_const()
 
 static void rpsxNOR_consts(int info)
 {
-	rpsxLogicalOp_constv(LogicalOp::NOR, info, _Rs_, _Rt_, (info & PROCESS_EE_T) ? EEREC_T : -1);
+	rpsxLogicalOp_constv(LogicalOp::NOR, info, _Rs_, _Rt_, (info & PROCESS_EE_T) ? PSXREC_T : -1);
 }
 
 static void rpsxNOR_constt(int info)
 {
-	rpsxLogicalOp_constv(LogicalOp::NOR, info, _Rt_, _Rs_, (info & PROCESS_EE_S) ? EEREC_S : -1);
+	rpsxLogicalOp_constv(LogicalOp::NOR, info, _Rt_, _Rs_, (info & PROCESS_EE_S) ? PSXREC_S : -1);
 }
 
 static void rpsxNOR_(int info)
@@ -650,8 +650,8 @@ static void rpsxSLTs_const(int info, int sign, int st)
 
 	const xImpl_Set& SET = st ? (sign ? xSETL : xSETB) : (sign ? xSETG : xSETA);
 
-	const xRegister32 dreg((_Rd_ == (st ? _Rs_ : _Rt_)) ? _allocX86reg(X86TYPE_TEMP, 0, 0) : EEREC_D);
-	const int regs = st ? ((info & PROCESS_EE_S) ? EEREC_S : -1) : ((info & PROCESS_EE_T) ? EEREC_T : -1);
+	const xRegister32 dreg((_Rd_ == (st ? _Rs_ : _Rt_)) ? _allocX86reg(X86TYPE_TEMP, 0, 0) : PSXREC_D);
+	const int regs = st ? ((info & PROCESS_EE_S) ? PSXREC_S : -1) : ((info & PROCESS_EE_T) ? PSXREC_T : -1);
 	xXOR(dreg, dreg);
 
 	if (regs >= 0)
@@ -660,10 +660,10 @@ static void rpsxSLTs_const(int info, int sign, int st)
 		xCMP(ptr32[&psxRegs.GPR.r[st ? _Rs_ : _Rt_]], cval);
 	SET(xRegister8(dreg));
 
-	if (dreg.GetId() != EEREC_D)
+	if (dreg.GetId() != PSXREC_D)
 	{
-		std::swap(x86regs[dreg.GetId()], x86regs[EEREC_D]);
-		_freeX86reg(EEREC_D);
+		std::swap(x86regs[dreg.GetId()], x86regs[PSXREC_D]);
+		_freeX86reg(PSXREC_D);
 	}
 }
 
@@ -672,23 +672,23 @@ static void rpsxSLTs_(int info, int sign)
 	const xImpl_Set& SET = sign ? xSETL : xSETB;
 
 	// need to keep Rs/Rt around.
-	const xRegister32 dreg((_Rd_ == _Rt_ || _Rd_ == _Rs_) ? _allocX86reg(X86TYPE_TEMP, 0, 0) : EEREC_D);
+	const xRegister32 dreg((_Rd_ == _Rt_ || _Rd_ == _Rs_) ? _allocX86reg(X86TYPE_TEMP, 0, 0) : PSXREC_D);
 
 	// force Rs into a register, may as well cache it since we're loading anyway.
-	const int regs = (info & PROCESS_EE_S) ? EEREC_S : _allocX86reg(X86TYPE_PSX, _Rs_, MODE_READ);
+	const int regs = (info & PROCESS_EE_S) ? PSXREC_S : _allocX86reg(X86TYPE_PSX, _Rs_, MODE_READ);
 
 	xXOR(dreg, dreg);
 	if (info & PROCESS_EE_T)
-		xCMP(xRegister32(regs), xRegister32(EEREC_T));
+		xCMP(xRegister32(regs), xRegister32(PSXREC_T));
 	else
 		xCMP(xRegister32(regs), ptr32[&psxRegs.GPR.r[_Rt_]]);
 
 	SET(xRegister8(dreg));
 
-	if (dreg.GetId() != EEREC_D)
+	if (dreg.GetId() != PSXREC_D)
 	{
-		std::swap(x86regs[dreg.GetId()], x86regs[EEREC_D]);
-		_freeX86reg(EEREC_D);
+		std::swap(x86regs[dreg.GetId()], x86regs[PSXREC_D]);
+		_freeX86reg(PSXREC_D);
 	}
 }
 
@@ -749,7 +749,7 @@ static void rpsxWritebackHILO(int info)
 	if (EEINST_LIVETEST(PSX_LO))
 	{
 		if (info & PROCESS_EE_LO)
-			xMOV(xRegister32(EEREC_LO), eax);
+			xMOV(xRegister32(PSXREC_LO), eax);
 		else
 			xMOV(ptr32[&psxRegs.GPR.n.lo], eax);
 	}
@@ -757,7 +757,7 @@ static void rpsxWritebackHILO(int info)
 	if (EEINST_LIVETEST(PSX_HI))
 	{
 		if (info & PROCESS_EE_HI)
-			xMOV(xRegister32(EEREC_HI), edx);
+			xMOV(xRegister32(PSXREC_HI), edx);
 		else
 			xMOV(ptr32[&psxRegs.GPR.n.hi], edx);
 	}
@@ -906,14 +906,14 @@ static void rpsxDIVsuper(int info, int sign, int process = 0)
 	if (process & PROCESS_CONSTT)
 		xMOV(ecx, g_psxConstRegs[_Rt_]);
 	else if (info & PROCESS_EE_T)
-		xMOV(ecx, xRegister32(EEREC_T));
+		xMOV(ecx, xRegister32(PSXREC_T));
 	else
 		xMOV(ecx, ptr32[&psxRegs.GPR.r[_Rt_]]);
 
 	if (process & PROCESS_CONSTS)
 		xMOV(eax, g_psxConstRegs[_Rs_]);
 	else if (info & PROCESS_EE_S)
-		xMOV(eax, xRegister32(EEREC_S));
+		xMOV(eax, xRegister32(PSXREC_S));
 	else
 		xMOV(eax, ptr32[&psxRegs.GPR.r[_Rs_]]);
 
@@ -1231,7 +1231,7 @@ static void rpsxSLLs_(int info, int sa)
 {
 	rpsxMoveTtoD(info);
 	if (sa != 0)
-		xSHL(xRegister32(EEREC_D), sa);
+		xSHL(xRegister32(PSXREC_D), sa);
 }
 
 static void rpsxSLL_(int info)
@@ -1251,7 +1251,7 @@ static void rpsxSRLs_(int info, int sa)
 {
 	rpsxMoveTtoD(info);
 	if (sa != 0)
-		xSHR(xRegister32(EEREC_D), sa);
+		xSHR(xRegister32(PSXREC_D), sa);
 }
 
 static void rpsxSRL_(int info)
@@ -1271,7 +1271,7 @@ static void rpsxSRAs_(int info, int sa)
 {
 	rpsxMoveTtoD(info);
 	if (sa != 0)
-		xSAR(xRegister32(EEREC_D), sa);
+		xSAR(xRegister32(PSXREC_D), sa);
 }
 
 static void rpsxSRA_(int info)
@@ -1286,8 +1286,8 @@ static void rpsxShiftV_constt(int info, const xImpl_Group2& shift)
 {
 	pxAssert(_Rs_ != 0);
 	rpsxMoveSToECX(info);
-	xMOV(xRegister32(EEREC_D), g_psxConstRegs[_Rt_]);
-	shift(xRegister32(EEREC_D), cl);
+	xMOV(xRegister32(PSXREC_D), g_psxConstRegs[_Rt_]);
+	shift(xRegister32(PSXREC_D), cl);
 }
 
 static void rpsxShiftV(int info, const xImpl_Group2& shift)
@@ -1296,7 +1296,7 @@ static void rpsxShiftV(int info, const xImpl_Group2& shift)
 
 	rpsxMoveSToECX(info);
 	rpsxMoveTtoD(info);
-	shift(xRegister32(EEREC_D), cl);
+	shift(xRegister32(PSXREC_D), cl);
 }
 
 static void rpsxSLLV_const()

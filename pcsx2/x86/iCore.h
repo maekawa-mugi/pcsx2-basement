@@ -30,19 +30,35 @@
 #define PROCESS_EE_HI         0x80 // hi reg is valid
 #define PROCESS_EE_ACC        0x40 // acc reg is valid
 
-#define EEREC_S    (((info) >>  8) & 0xf)
-#define EEREC_T    (((info) >> 12) & 0xf)
-#define EEREC_D    (((info) >> 16) & 0xf)
-#define EEREC_LO   (((info) >> 20) & 0xf)
-#define EEREC_HI   (((info) >> 24) & 0xf)
-#define EEREC_ACC  (((info) >> 20) & 0xf)
+#include "EERecompileInfo.h"
 
-#define PROCESS_EE_SET_S(reg)   (((reg) <<  8) | PROCESS_EE_S)
-#define PROCESS_EE_SET_T(reg)   (((reg) << 12) | PROCESS_EE_T)
-#define PROCESS_EE_SET_D(reg)   (((reg) << 16) | PROCESS_EE_D)
-#define PROCESS_EE_SET_LO(reg)  (((reg) << 20) | PROCESS_EE_LO)
-#define PROCESS_EE_SET_HI(reg)  (((reg) << 24) | PROCESS_EE_HI)
-#define PROCESS_EE_SET_ACC(reg) (((reg) << 20) | PROCESS_EE_ACC)
+#define EEREC_S EEGetHostRegister(info, EERecompileInfo::S)
+#define EEREC_T EEGetHostRegister(info, EERecompileInfo::T)
+#define EEREC_D EEGetHostRegister(info, EERecompileInfo::D)
+#define EEREC_LO EEGetHostRegister(info, EERecompileInfo::LO)
+#define EEREC_HI EEGetHostRegister(info, EERecompileInfo::HI)
+#define EEREC_ACC EEGetHostRegister(info, EERecompileInfo::ACC)
+
+#define PROCESS_EE_SET_S(reg) EERecompileInfo::Operand(EERecompileInfo::S, (reg), PROCESS_EE_S)
+#define PROCESS_EE_SET_T(reg) EERecompileInfo::Operand(EERecompileInfo::T, (reg), PROCESS_EE_T)
+#define PROCESS_EE_SET_D(reg) EERecompileInfo::Operand(EERecompileInfo::D, (reg), PROCESS_EE_D)
+#define PROCESS_EE_SET_LO(reg) EERecompileInfo::Operand(EERecompileInfo::LO, (reg), PROCESS_EE_LO)
+#define PROCESS_EE_SET_HI(reg) EERecompileInfo::Operand(EERecompileInfo::HI, (reg), PROCESS_EE_HI)
+#define PROCESS_EE_SET_ACC(reg) EERecompileInfo::Operand(EERecompileInfo::ACC, (reg), PROCESS_EE_ACC)
+
+// Keep the IOP packing independent of EE vector register metadata.
+#define PROCESS_PSX_SET_S(reg) (((reg) << 8) | PROCESS_EE_S)
+#define PROCESS_PSX_SET_T(reg) (((reg) << 12) | PROCESS_EE_T)
+#define PROCESS_PSX_SET_D(reg) (((reg) << 16) | PROCESS_EE_D)
+#define PROCESS_PSX_SET_LO(reg) (((reg) << 20) | PROCESS_EE_LO)
+#define PROCESS_PSX_SET_HI(reg) (((reg) << 24) | PROCESS_EE_HI)
+#define PROCESS_PSX_SET_ACC(reg) (((reg) << 20) | PROCESS_EE_ACC)
+
+#define PSXREC_S PSXGetHostRegister(info, EERecompileInfo::S)
+#define PSXREC_T PSXGetHostRegister(info, EERecompileInfo::T)
+#define PSXREC_D PSXGetHostRegister(info, EERecompileInfo::D)
+#define PSXREC_LO PSXGetHostRegister(info, EERecompileInfo::LO)
+#define PSXREC_HI PSXGetHostRegister(info, EERecompileInfo::HI)
 
 // special info not related to above flags
 #define PROCESS_CONSTS 1
@@ -152,6 +168,25 @@ struct _xmmregs
 void _initXMMregs();
 int _getFreeXMMreg(u32 maxreg = iREGCNT_XMM);
 int _allocTempXMMreg(XMMSSEType type);
+// Explicit capability: all consumers of this temporary must support EVEX.128.
+int _allocTempXMMregEVEX(XMMSSEType type, u32 eligible = 0xffffffffu);
+void _eeCallWithHighXMM(const void* target);
+// Inline code using fixed high XMM scratch (no call boundary) declares the
+// registers it clobbers. Live high values in that set are not supported yet.
+void _eeDeclareHighXMMClobber(u32 mask);
+
+// Optional code-generation counters. These are not runtime opcode counts or
+// PS2 cycles, and enabling them does not add instructions to guest blocks.
+struct EEXMMAllocatorStats
+{
+	u64 guest_reloads = 0;
+	u64 guest_writebacks = 0;
+	u64 evictions = 0;
+	u64 temporaries = 0;
+	u64 high_temporaries = 0;
+	u64 helper_stack_spills = 0;
+};
+extern thread_local EEXMMAllocatorStats* g_eeXMMAllocatorStats;
 int _allocFPtoXMMreg(int fpreg, int mode);
 int _allocGPRtoXMMreg(int gprreg, int mode);
 int _allocFPACCtoXMMreg(int mode);
@@ -291,7 +326,7 @@ static __fi bool FPUINST_RENAMETEST(u32 reg)
 	return (!EEINST_USEDTEST(reg) || !EEINST_LIVETEST(reg));
 }
 
-extern _xmmregs xmmregs[iREGCNT_XMM], s_saveXMMregs[iREGCNT_XMM];
+extern _xmmregs xmmregs[iREGCNT_XMM_EVEX], s_saveXMMregs[iREGCNT_XMM_EVEX];
 
 extern thread_local u8* j8Ptr[32];   // depreciated item.  use local u8* vars instead.
 extern thread_local u32* j32Ptr[32]; // depreciated item.  use local u32* vars instead.

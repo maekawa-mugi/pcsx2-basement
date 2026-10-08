@@ -50,9 +50,10 @@
 
 thread_local u8* x86Ptr;
 thread_local u8* xTextPtr;
-thread_local XMMSSEType g_xmmtypes[iREGCNT_XMM] = {XMMT_INT};
+thread_local XMMSSEType g_xmmtypes[iREGCNT_XMM_EVEX] = {XMMT_INT};
 
 bool x86Emitter::use_avx;
+x86Emitter::AVX512Features x86Emitter::avx512;
 
 namespace x86Emitter
 {
@@ -97,6 +98,7 @@ namespace x86Emitter
 	// ------------------------------------------------------------------------
 
 	const xRegisterEmpty xEmptyReg = {};
+	const xRegisterK k0(0), k1(1), k2(2), k3(3), k4(4), k5(5), k6(6), k7(7);
 
 	// clang-format off
 
@@ -108,7 +110,15 @@ const xRegisterSSE
     xmm8(8), xmm9(9),
     xmm10(10), xmm11(11),
     xmm12(12), xmm13(13),
-    xmm14(14), xmm15(15);
+    xmm14(14), xmm15(15),
+    xmm16(16), xmm17(17),
+    xmm18(18), xmm19(19),
+    xmm20(20), xmm21(21),
+    xmm22(22), xmm23(23),
+    xmm24(24), xmm25(25),
+    xmm26(26), xmm27(27),
+    xmm28(28), xmm29(29),
+    xmm30(30), xmm31(31);
 
 const xRegisterSSE
     ymm0(0, xRegisterYMMTag()), ymm1(1, xRegisterYMMTag()),
@@ -229,7 +239,11 @@ const xRegister32
 		"xmm0", "xmm1", "xmm2", "xmm3",
 		"xmm4", "xmm5", "xmm6", "xmm7",
 		"xmm8", "xmm9", "xmm10", "xmm11",
-		"xmm12", "xmm13", "xmm14", "xmm15"
+		"xmm12", "xmm13", "xmm14", "xmm15",
+		"xmm16", "xmm17", "xmm18", "xmm19",
+		"xmm20", "xmm21", "xmm22", "xmm23",
+		"xmm24", "xmm25", "xmm26", "xmm27",
+		"xmm28", "xmm29", "xmm30", "xmm31"
 	};
 
 	const char* xRegisterBase::GetName()
@@ -239,9 +253,8 @@ const xRegister32
 		if (Id == xRegId_Empty)
 			return "empty";
 
-		// bad error?  Return a "big" error string.  Might break formatting of register tables
-		// but that's the least of your worries if you see this baby.
-		if (Id >= (int)iREGCNT_GPR || Id < 0)
+		// bad error? Return a "big" error string. SIMD registers have a wider EVEX namespace.
+		if (Id < 0 || (GetOperandSize() >= 16 ? Id >= static_cast<int>(iREGCNT_XMM_EVEX) : Id >= static_cast<int>(iREGCNT_GPR)))
 			return "!Register index out of range!";
 
 		switch (GetOperandSize())
@@ -479,6 +492,7 @@ const xRegister32
 
 	void EmitRex(uint reg1, const xRegisterBase& reg2)
 	{
+		pxAssert(!reg2.IsEVEXHigh());
 		bool w = reg2.IsWide();
 		bool r = false;
 		bool x = false;
@@ -488,6 +502,7 @@ const xRegister32
 
 	void EmitRex(const xRegisterBase& reg1, const xRegisterBase& reg2)
 	{
+		pxAssert(!reg1.IsEVEXHigh() && !reg2.IsEVEXHigh());
 		bool w = reg1.IsWide() || reg2.IsWide();
 		bool r = reg1.IsExtended();
 		bool x = false;
@@ -497,6 +512,7 @@ const xRegister32
 
 	void EmitRex(const xRegisterBase& reg1, const void* src)
 	{
+		pxAssert(!reg1.IsEVEXHigh());
 		pxAssert(0); //see fixme
 		bool w = reg1.IsWide();
 		bool r = reg1.IsExtended();
@@ -507,6 +523,7 @@ const xRegister32
 
 	void EmitRex(const xRegisterBase& reg1, const xIndirectVoid& sib)
 	{
+		pxAssert(!reg1.IsEVEXHigh());
 		bool w = reg1.IsWide() || sib.IsWide();
 		bool r = reg1.IsExtended();
 		bool x = sib.Index.IsExtended();
@@ -521,6 +538,7 @@ const xRegister32
 
 	void EmitRex(SIMDInstructionInfo info, const xRegisterBase& reg1, const xRegisterBase& reg2)
 	{
+		pxAssert(!reg1.IsEVEXHigh() && !reg2.IsEVEXHigh());
 		bool w = false;
 		if (info.dst_w)
 			w |= reg1.IsWide();
@@ -534,6 +552,7 @@ const xRegister32
 
 	void EmitRex(SIMDInstructionInfo info, const xRegisterBase& reg1, const xIndirectVoid& sib)
 	{
+		pxAssert(!reg1.IsEVEXHigh());
 		bool w = false;
 		if (info.dst_w)
 			w |= reg1.IsWide();
@@ -552,6 +571,7 @@ const xRegister32
 
 	void EmitRex(SIMDInstructionInfo info, uint reg1, const xRegisterBase& reg2)
 	{
+		pxAssert(!reg2.IsEVEXHigh());
 		bool w = info.src_w ? reg2.IsWide() : false;
 		bool r = false;
 		bool x = false;
@@ -614,9 +634,26 @@ const xRegister32
 	__emitinline static u8 GetVEXW(const xIndirectVoid& arg) { return arg.GetOperandSize() == 8 ? 0x80 : 0; }
 	__emitinline static u8 GetVEXW(u32 ext) { return 0; }
 
+	__emitinline static void AssertVEXOperand(u32)
+	{
+	}
+
+	__emitinline static void AssertVEXOperand(const xRegisterBase& reg)
+	{
+		pxAssert(!reg.IsEVEXHigh());
+	}
+
+	__emitinline static void AssertVEXOperand(const xIndirectVoid&)
+	{
+	}
+
 	template <typename D, typename S2>
 	__emitinline void xOpWriteVEX(SIMDInstructionInfo info, D dst, u8 src1, const S2& src2, int extraRipOffset)
 	{
+		AssertVEXOperand(dst);
+		AssertVEXOperand(src2);
+		pxAssert(src1 < 16);
+
 		u8 m = static_cast<u8>(info.map);
 		u8 p = static_cast<u8>(info.prefix);
 		u8 w = 0;
@@ -664,6 +701,203 @@ const xRegister32
 	void EmitVEX(SIMDInstructionInfo info, u32 ext, u8 dst, const xRegisterBase& src2, int extraRipOffset)
 	{
 		xOpWriteVEX(info, ext, dst, src2, extraRipOffset);
+	}
+
+	static void EmitSibMagicEVEX(uint regfield, const xIndirectVoid& info, u32 tuple_scale, int extraRIPOffset = 0)
+	{
+		pxAssertMsg(regfield < 8, "Invalid x86 register identifier.");
+
+		const bool can_compress_displacement =
+			info.Displacement != 0 && tuple_scale != 0 &&
+			(info.Displacement % static_cast<sptr>(tuple_scale)) == 0 &&
+			is_s8(info.Displacement / static_cast<sptr>(tuple_scale));
+		int displacement_size = (info.Displacement == 0) ? 0 : (can_compress_displacement ? 1 : 2);
+		sptr encoded_displacement =
+			can_compress_displacement ? info.Displacement / static_cast<sptr>(tuple_scale) : info.Displacement;
+
+		pxAssert(!info.Base.IsEmpty() || !info.Index.IsEmpty() || displacement_size == 2);
+		pxAssert(info.Displacement == static_cast<s32>(info.Displacement) ||
+			(info.Base.IsEmpty() && info.Index.IsEmpty()));
+
+		if (!NeedsSibMagic(info))
+		{
+			if (info.Index.IsEmpty())
+			{
+				// EmitSibMagic may pick [RTEXTPTR + disp8], but EVEX scales disp8 by the
+				// tuple size. Use the compressed form when it fits, else the disp32 forms.
+				const sptr textRelative = info.Displacement - reinterpret_cast<sptr>(xGetTextPtr());
+				if (xGetTextPtr() && textRelative == static_cast<s8>(textRelative))
+				{
+					if (tuple_scale != 0 && (textRelative % static_cast<sptr>(tuple_scale)) == 0 &&
+						is_s8(textRelative / static_cast<sptr>(tuple_scale)))
+					{
+						ModRM(1, regfield, RTEXTPTR.GetId());
+						xWrite<s8>(static_cast<s8>(textRelative / static_cast<sptr>(tuple_scale)));
+					}
+					else
+					{
+						ModRM(2, regfield, RTEXTPTR.GetId());
+						xWrite<s32>(static_cast<s32>(textRelative));
+					}
+					return;
+				}
+				EmitSibMagic(regfield, reinterpret_cast<void*>(info.Displacement), extraRIPOffset);
+				return;
+			}
+
+			if (info.Index == rbp && displacement_size == 0)
+			{
+				displacement_size = 1;
+				encoded_displacement = 0;
+			}
+			ModRM(displacement_size, regfield, info.Index.Id & 7);
+		}
+		else if (info.Base.IsEmpty())
+		{
+			ModRM(0, regfield, ModRm_UseSib);
+			SibSB(info.Scale, info.Index.Id, Sib_UseDisp32);
+			xWrite<s32>(info.Displacement);
+			return;
+		}
+		else
+		{
+			if (info.Base == rbp && displacement_size == 0)
+			{
+				displacement_size = 1;
+				encoded_displacement = 0;
+			}
+			ModRM(displacement_size, regfield, ModRm_UseSib);
+			SibSB(info.Scale, info.Index.Id & 7, info.Base.Id & 7);
+		}
+
+		if (displacement_size == 1)
+			xWrite<s8>(encoded_displacement);
+		else if (displacement_size == 2)
+			xWrite<s32>(info.Displacement);
+	}
+
+	static u8 GetEVEXMoveP0(const xRegisterSSE& reg, const xRegisterSSE& rm)
+	{
+		return ((~reg.GetId() & 0x08) << 4) |
+			((~rm.GetId() & 0x10) << 2) |
+			((~rm.GetId() & 0x08) << 2) |
+			(~reg.GetId() & 0x10) | 0x01;
+	}
+
+	static u8 GetEVEXMoveP0(const xRegisterSSE& reg, const xIndirectVoid& mem)
+	{
+		bool x = mem.Index.IsExtended();
+		bool b = mem.Base.IsExtended();
+		if (!NeedsSibMagic(mem))
+		{
+			b = x;
+			x = false;
+		}
+
+		return ((~reg.GetId() & 0x08) << 4) |
+			(x ? 0x00 : 0x40) |
+			(b ? 0x00 : 0x20) |
+			(~reg.GetId() & 0x10) | 0x01;
+	}
+
+	static void EmitEVEXMovePrefix(u8 p0, u8 opcode)
+	{
+		xWrite8(0x62);
+		xWrite8(p0);
+		xWrite8(0x7d);
+		xWrite8(0x08);
+		xWrite8(opcode);
+	}
+
+	void xVMOVDQA32(const xRegisterSSE& dst, const xRegisterSSE& src)
+	{
+		pxAssert(dst.GetOperandSize() == 16 && src.GetOperandSize() == 16);
+		pxAssert(dst.GetId() >= 0 && dst.GetId() < static_cast<int>(iREGCNT_XMM_EVEX));
+		pxAssert(src.GetId() >= 0 && src.GetId() < static_cast<int>(iREGCNT_XMM_EVEX));
+		EmitEVEXMovePrefix(GetEVEXMoveP0(dst, src), 0x6f);
+		EmitSibMagic(dst, src);
+	}
+
+	void xVMOVDQA32(const xRegisterSSE& dst, const xIndirectVoid& src)
+	{
+		pxAssert(dst.GetOperandSize() == 16);
+		pxAssert(dst.GetId() >= 0 && dst.GetId() < static_cast<int>(iREGCNT_XMM_EVEX));
+		EmitEVEXMovePrefix(GetEVEXMoveP0(dst, src), 0x6f);
+		EmitSibMagicEVEX(dst.GetId() & 7, src, 16);
+	}
+
+	void xVMOVDQA32(const xIndirectVoid& dst, const xRegisterSSE& src)
+	{
+		pxAssert(src.GetOperandSize() == 16);
+		pxAssert(src.GetId() >= 0 && src.GetId() < static_cast<int>(iREGCNT_XMM_EVEX));
+		EmitEVEXMovePrefix(GetEVEXMoveP0(src, dst), 0x7f);
+		EmitSibMagicEVEX(src.GetId() & 7, dst, 16);
+	}
+
+	// VPTERNLOGD xmm, xmm, m128, imm8 (EVEX.128.66.0F3A.W0 25). Memory form of the register one in simd.cpp.
+	void xVPTERNLOGD(const xRegisterSSE& dst, const xRegisterSSE& src1, const xIndirectVoid& src2, u8 imm8)
+	{
+		pxAssert(dst.GetOperandSize() == 16 && src1.GetOperandSize() == 16);
+		pxAssert(dst.GetId() >= 0 && dst.GetId() < static_cast<int>(iREGCNT_XMM_EVEX));
+		pxAssert(src1.GetId() >= 0 && src1.GetId() < static_cast<int>(iREGCNT_XMM_EVEX));
+		xWrite8(0x62);
+		xWrite8(GetEVEXMoveP0(dst, src2) | 0x02); // map 0F3A = 3 (GetEVEXMoveP0 sets map 1)
+		xWrite8(((~src1.GetId() & 0x0f) << 3) | 0x04 | 0x01); // W0, vvvv, pp = 66
+		xWrite8((~src1.GetId() & 0x10) >> 1); // L = 0, V', no mask
+		xWrite8(0x25);
+		EmitSibMagicEVEX(dst.GetId() & 7, src2, 16, 1);
+		xWrite8(imm8);
+	}
+
+	// VPTESTMD k, xmm, m128 (EVEX.128.66.0F38.W0 27). The mask destination is
+	// encoded in ModRM.reg; EVEX R/R' are reserved and memory still needs EVEX
+	// compressed-displacement handling.
+	void xVPTESTMD(const xRegisterK& dst, const xRegisterSSE& src1, const xIndirectVoid& src2,
+		const xRegisterK& writemask)
+	{
+		pxAssert(src1.GetOperandSize() == 16);
+		pxAssert(src1.GetId() >= 0 && src1.GetId() < static_cast<int>(iREGCNT_XMM_EVEX));
+		pxAssert(dst.GetId() < 8 && writemask.GetId() < 8);
+		u8 p0 = GetEVEXMoveP0(xmm0, src2);
+		p0 = static_cast<u8>((p0 & ~0x07u) | 0x02u); // map 0F38
+		xWrite8(0x62);
+		xWrite8(p0);
+		xWrite8(((~src1.GetId() & 0x0f) << 3) | 0x04 | 0x01); // W0, vvvv, pp = 66
+		xWrite8(((~src1.GetId() & 0x10) >> 1) | writemask.GetId());
+		xWrite8(0x27);
+		EmitSibMagicEVEX(dst.GetId(), src2, 16);
+	}
+
+	// VPCMPD k, xmm, m128, imm8 (EVEX.128.66.0F3A.W0 1F). Like xVPTESTMD the mask destination is in
+	// ModRM.reg; the trailing imm8 needs the RIP-relative fixup of one extra byte.
+	void xVPCMPD(const xRegisterK& dst, const xRegisterSSE& src1, const xIndirectVoid& src2, u8 imm8,
+		const xRegisterK& writemask)
+	{
+		pxAssert(src1.GetOperandSize() == 16);
+		pxAssert(src1.GetId() >= 0 && src1.GetId() < static_cast<int>(iREGCNT_XMM_EVEX));
+		pxAssert(dst.GetId() < 8 && writemask.GetId() < 8);
+		xWrite8(0x62);
+		xWrite8(GetEVEXMoveP0(xmm0, src2) | 0x02); // map 0F3A
+		xWrite8(((~src1.GetId() & 0x0f) << 3) | 0x04 | 0x01); // W0, vvvv, pp = 66
+		xWrite8(((~src1.GetId() & 0x10) >> 1) | writemask.GetId());
+		xWrite8(0x1f);
+		EmitSibMagicEVEX(dst.GetId(), src2, 16, 1);
+		xWrite8(imm8);
+	}
+
+	// 256-bit (YMM) form of the above: EVEX.256.66.0F3A.W0 25, memory operand is 32 bytes wide.
+	void xVPTERNLOGDY(const xRegisterSSE& dst, const xRegisterSSE& src1, const xIndirectVoid& src2, u8 imm8)
+	{
+		pxAssert(dst.GetOperandSize() == 16 && src1.GetOperandSize() == 16);
+		pxAssert(dst.GetId() >= 0 && dst.GetId() < static_cast<int>(iREGCNT_XMM_EVEX));
+		pxAssert(src1.GetId() >= 0 && src1.GetId() < static_cast<int>(iREGCNT_XMM_EVEX));
+		xWrite8(0x62);
+		xWrite8(GetEVEXMoveP0(dst, src2) | 0x02);
+		xWrite8(((~src1.GetId() & 0x0f) << 3) | 0x04 | 0x01);
+		xWrite8(((~src1.GetId() & 0x10) >> 1) | 0x20); // L = 1
+		xWrite8(0x25);
+		EmitSibMagicEVEX(dst.GetId() & 7, src2, 32, 1);
+		xWrite8(imm8);
 	}
 
 
@@ -1221,6 +1455,7 @@ const xRegister32
 
 	const xImpl_BitScan xBSF = {0xbc};
 	const xImpl_BitScan xBSR = {0xbd};
+	void xLZCNT(const xRegister32& to, const xRegister32& from) { xOpWrite0F(0xf3, 0xbd, to, from); }
 
 	const xImpl_IncDec xINC = {false};
 	const xImpl_IncDec xDEC = {true};

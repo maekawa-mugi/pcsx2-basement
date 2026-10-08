@@ -78,12 +78,17 @@ bool GSRasterizer::IsOneOfMyScanlines(int top) const
 	return m_scanline[top >> m_thread_height] != 0;
 }
 
+// Rows [top, bottom). m_scanline has spare rows past 2048, so bottom == 2048 is fine.
 bool GSRasterizer::IsOneOfMyScanlines(int top, int bottom) const
 {
-	pxAssert(top >= 0 && top < 2048 && bottom >= 0 && bottom < 2048);
+	pxAssert(top >= 0 && top < 2048 && bottom >= 0 && bottom <= 2048);
 
 	top = top >> m_thread_height;
 	bottom = (bottom + (1 << m_thread_height) - 1) >> m_thread_height;
+
+	// Any m_threads consecutive stripes include one of ours.
+	if (bottom - top >= m_threads)
+		return true;
 
 	while (top < bottom)
 	{
@@ -240,8 +245,6 @@ void GSRasterizer::Draw(GSRasterizerData& data)
 #if _M_SSE >= 0x501
 	_mm256_zeroupper();
 #endif
-
-	data.pixels = m_pixels.actual;
 
 	m_pixels.sum += m_pixels.actual;
 
@@ -722,6 +725,11 @@ void GSRasterizer::DrawTriangle(const GSVertexSW* vertex, const u16* index)
 	GSVector4 tbmin = tbf.min(m_fscissor_y);
 	GSVector4i tb = GSVector4i(tbmax.xzyw(tbmin)); // max(y0, t) max(y1, t) min(y1, b) min(y2, b)
 
+	// Every worker walks every primitive. Leave before the divisions when none of
+	// the rows [tb.x, tb.w) are ours. Edge AA can still draw, so it keeps the old path.
+	if (!HasEdge() && (tb.x >= tb.w || (m_threads > 1 && !IsOneOfMyScanlines(tb.x, tb.w))))
+		return;
+
 	GSVertexSW2 dv0 = v1 - v0;
 	GSVertexSW2 dv1 = v2 - v0;
 	GSVertexSW2 dv2 = v2 - v1;
@@ -924,6 +932,11 @@ void GSRasterizer::DrawTriangle(const GSVertexSW* vertex, const u16* index)
 	GSVector4 tbmin = tbf.min(m_fscissor_y);
 	GSVector4i tb = GSVector4i(tbmax.xzyw(tbmin)); // max(y0, t) max(y1, t) min(y1, b) min(y2, b)
 
+	// Every worker walks every primitive. Leave before the divisions when none of
+	// the rows [tb.x, tb.w) are ours. Edge AA can still draw, so it keeps the old path.
+	if (!HasEdge() && (tb.x >= tb.w || (m_threads > 1 && !IsOneOfMyScanlines(tb.x, tb.w))))
+		return;
+
 	GSVertexSW dv0 = v1 - v0;
 	GSVertexSW dv1 = v2 - v0;
 	GSVertexSW dv2 = v2 - v1;
@@ -1108,6 +1121,10 @@ void GSRasterizer::DrawSprite(const GSVertexSW* vertex, const u16* index)
 	r = r.rintersect(m_scissor);
 
 	if (r.rempty())
+		return;
+
+	// Skip the setup (and the per-row walk) on workers that own none of the rows.
+	if (m_threads > 1 && !IsOneOfMyScanlines(r.top, r.bottom))
 		return;
 
 	GSVertexSW scan = v[0];

@@ -635,6 +635,24 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 		PerformanceMetrics::Update(registers_written, fb_sprite_frame, false);
 	}
 
+	// Dev hook for unattended benchmark dumps: PCSX2_AUTO_GSDUMP=<vsync>,<frames> queues
+	// a GS dump of <frames> frames at the <vsync>th vsync of the process.
+	{
+		static const std::pair<u32, u32> auto_dump = []() -> std::pair<u32, u32> {
+			const char* env = std::getenv("PCSX2_AUTO_GSDUMP");
+			unsigned at = 0, frames = 0;
+			if (!env || std::sscanf(env, "%u,%u", &at, &frames) != 2)
+				return {0, 0};
+			return {at, frames};
+		}();
+		static u32 vsyncs = 0;
+		if (auto_dump.second != 0 && ++vsyncs == auto_dump.first && m_snapshot.empty() &&
+			!GSDumpReplayer::IsReplayingDump())
+		{
+			QueueSnapshot(std::string(), auto_dump.second);
+		}
+	}
+
 	// snapshot
 	if (!m_snapshot.empty())
 	{

@@ -333,9 +333,18 @@ void VifUnpackSSE_Simple::doMaskWrite(const xRegisterSSE& regX) const
 	sptr base = reinterpret_cast<sptr>(nVifMask[2]);
 	xLoadFarAddr(rax, nVifMask);
 	xPAND(regX, ptr128[rax + (reinterpret_cast<sptr>(nVifMask[0][offX]) - base)]);
-	xPAND(xmm3, ptr128[rax + (reinterpret_cast<sptr>(nVifMask[1][offX]) - base)]);
-	xPOR (regX, ptr128[rax + (reinterpret_cast<sptr>(nVifMask[2][offX]) - base)]);
-	xPOR (regX, xmm3);
+	if (x86Emitter::avx512.HasCore())
+	{
+		// regX |= old & mask1 in one instruction (4 -> 3 logic ops). Needs proper testing.
+		xPOR (regX, ptr128[rax + (reinterpret_cast<sptr>(nVifMask[2][offX]) - base)]);
+		xVPTERNLOGD(regX, xmm3, ptr128[rax + (reinterpret_cast<sptr>(nVifMask[1][offX]) - base)], 0xf8);
+	}
+	else
+	{
+		xPAND(xmm3, ptr128[rax + (reinterpret_cast<sptr>(nVifMask[1][offX]) - base)]);
+		xPOR (regX, ptr128[rax + (reinterpret_cast<sptr>(nVifMask[2][offX]) - base)]);
+		xPOR (regX, xmm3);
+	}
 	xMOVAPS(ptr[dstIndirect], regX);
 }
 
