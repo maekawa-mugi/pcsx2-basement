@@ -7,6 +7,21 @@
 #include "microVU_SoftFloatTables.h"
 #include "SoftFloatEmitter.h"
 
+// SSE4.1 PTEST replaces xor+CMPEQSS+MOVMSKPS+AND (zero) and MOVMSKPS+AND (sign) for the lane-0 DIV/SQRT/RSQRT
+// checks. ZF=1 means "is zero" / "is positive", so zero callers branch with JNZ. With DAZ the exponent-only mask
+// treats denormals as zero like CMPEQSS did; DAZ is read at JIT time. Needs proper testing.
+alignas(16) static const u32 s_eeMagMask[4] = {0x7fffffff, 0, 0, 0};
+alignas(16) static const u32 s_eeExpMask[4] = {0x7f800000, 0, 0, 0};
+alignas(16) static const u32 s_eeSignMask[4] = {0x80000000, 0, 0, 0};
+static void eeTestZeroSS(const x86Emitter::xRegisterSSE& reg)
+{
+	x86Emitter::xPTEST(reg, x86Emitter::ptr128[EmuConfig.Cpu.FPUFPCR.GetDenormalsAreZero() ? s_eeExpMask : s_eeMagMask]);
+}
+static void eeTestNegSS(const x86Emitter::xRegisterSSE& reg)
+{
+	x86Emitter::xPTEST(reg, x86Emitter::ptr128[s_eeSignMask]);
+}
+
 using namespace x86Emitter;
 
 alignas(16) const u32 g_minvals[4] = {0xff7fffff, 0xff7fffff, 0xff7fffff, 0xff7fffff};
@@ -21,27 +36,27 @@ namespace COP1 {
 namespace DOUBLE
 {
 
-	void recABS_S_xmm(int info);
-	void recADD_S_xmm(int info);
-	void recADDA_S_xmm(int info);
-	void recC_EQ_xmm(int info);
-	void recC_LE_xmm(int info);
-	void recC_LT_xmm(int info);
-	void recDIV_S_xmm(int info);
-	void recMADD_S_xmm(int info);
-	void recMADDA_S_xmm(int info);
-	void recMAX_S_xmm(int info);
-	void recMIN_S_xmm(int info);
-	void recMOV_S_xmm(int info);
-	void recMSUB_S_xmm(int info);
-	void recMSUBA_S_xmm(int info);
-	void recMUL_S_xmm(int info);
-	void recMULA_S_xmm(int info);
-	void recNEG_S_xmm(int info);
-	void recSUB_S_xmm(int info);
-	void recSUBA_S_xmm(int info);
-	void recSQRT_S_xmm(int info);
-	void recRSQRT_S_xmm(int info);
+	void recABS_S_xmm(EERecompileInfo info);
+	void recADD_S_xmm(EERecompileInfo info);
+	void recADDA_S_xmm(EERecompileInfo info);
+	void recC_EQ_xmm(EERecompileInfo info);
+	void recC_LE_xmm(EERecompileInfo info);
+	void recC_LT_xmm(EERecompileInfo info);
+	void recDIV_S_xmm(EERecompileInfo info);
+	void recMADD_S_xmm(EERecompileInfo info);
+	void recMADDA_S_xmm(EERecompileInfo info);
+	void recMAX_S_xmm(EERecompileInfo info);
+	void recMIN_S_xmm(EERecompileInfo info);
+	void recMOV_S_xmm(EERecompileInfo info);
+	void recMSUB_S_xmm(EERecompileInfo info);
+	void recMSUBA_S_xmm(EERecompileInfo info);
+	void recMUL_S_xmm(EERecompileInfo info);
+	void recMULA_S_xmm(EERecompileInfo info);
+	void recNEG_S_xmm(EERecompileInfo info);
+	void recSUB_S_xmm(EERecompileInfo info);
+	void recSUBA_S_xmm(EERecompileInfo info);
+	void recSQRT_S_xmm(EERecompileInfo info);
+	void recRSQRT_S_xmm(EERecompileInfo info);
 
 }; // namespace DOUBLE
 
@@ -291,7 +306,9 @@ void GenerateSoftFloatKernels()
 		constexpr int booth_negate = full_hi + 4;
 		constexpr int booth_data = booth_negate + 8 * 4;
 		constexpr int add3_values = booth_data + 8 * 4;
-		constexpr int mul_stack_size = (add3_values + 12 * 4 + 15) & ~15;
+		constexpr int legacy_mul_stack_size = (add3_values + 12 * 4 + 15) & ~15;
+		const bool use_avx512_scalar_booth = x86Emitter::avx512.HasCore();
+		const int mul_stack_size = use_avx512_scalar_booth ? ((full_hi + 4 + 15) & ~15) : legacy_mul_stack_size;
 		constexpr int product_underflow = 2;
 		constexpr int product_overflow = 1;
 		constexpr int t0_lo = add3_values + 0 * 4;
@@ -372,60 +389,67 @@ void GenerateSoftFloatKernels()
 		xForwardJump32 product_first_one_correction_ready;
 
 		product_requires_regular_booth_correction.SetTarget();
-			xMOV64(r11, reinterpret_cast<uptr>(X86SoftFloatEmitter::ScalarBoothDecode));
-		for (int bit = 0; bit < 8; bit++)
+		if (use_avx512_scalar_booth)
 		{
-			const u32 shift = bit * 2;
-			xMOV(edx, ptr32[rsp + mantissa_a]);
-			if (shift != 0)
-				xSHL(edx, shift);
-			xMOV(eax, r9d);
-			if (bit == 0)
-				xSHL(eax, 1);
-			else
-				xSHR(eax, shift - 1);
-			xAND(eax, 7);
-			xMOV(ecx, ptr32[xAddressVoid(r11, rax, 4)]);
-			xMOV(r10d, ecx);
-			xAND(r10d, 3);
-			xMUL(edx, r10d);
-			xSHR(ecx, 8);
-			if (shift != 0)
-				xSHL(ecx, shift);
-			xMOV(ptr32[rsp + booth_negate + bit * 4], ecx);
-			xNEG(ecx);
-			xXOR(edx, ecx);
-			xMOV(ptr32[rsp + booth_data + bit * 4], edx);
+			X86SoftFloatEmitter::EmitScalarBoothCorrectionEVEX(mantissa_a, full_lo, full_hi);
 		}
+		else
+		{
+			xMOV64(r11, reinterpret_cast<uptr>(X86SoftFloatEmitter::ScalarBoothDecode));
+			for (int bit = 0; bit < 8; bit++)
+			{
+				const u32 shift = bit * 2;
+				xMOV(edx, ptr32[rsp + mantissa_a]);
+				if (shift != 0)
+					xSHL(edx, shift);
+				xMOV(eax, r9d);
+				if (bit == 0)
+					xSHL(eax, 1);
+				else
+					xSHR(eax, shift - 1);
+				xAND(eax, 7);
+				xMOV(ecx, ptr32[xAddressVoid(r11, rax, 4)]);
+				xMOV(r10d, ecx);
+				xAND(r10d, 3);
+				xMUL(edx, r10d);
+				xSHR(ecx, 8);
+				if (shift != 0)
+					xSHL(ecx, shift);
+				xMOV(ptr32[rsp + booth_negate + bit * 4], ecx);
+				xNEG(ecx);
+				xXOR(edx, ecx);
+				xMOV(ptr32[rsp + booth_data + bit * 4], edx);
+			}
 
 			X86SoftFloatEmitter::EmitCarrySaveAdd(booth_data + 1 * 4, booth_data + 2 * 4, booth_data + 3 * 4, t0_lo, t0_hi);
-		xAND(ptr32[rsp + booth_data + 4 * 4], ~0x7ffu);
-		xMOV(eax, ptr32[rsp + booth_data + 5 * 4]);
-		xMOV(ptr32[rsp + mantissa_a], eax);
-		xAND(ptr32[rsp + booth_data + 5 * 4], ~0xfffu);
+			xAND(ptr32[rsp + booth_data + 4 * 4], ~0x7ffu);
+			xMOV(eax, ptr32[rsp + booth_data + 5 * 4]);
+			xMOV(ptr32[rsp + mantissa_a], eax);
+			xAND(ptr32[rsp + booth_data + 5 * 4], ~0xfffu);
 			X86SoftFloatEmitter::EmitCarrySaveAdd(booth_data + 4 * 4, booth_data + 5 * 4, booth_data + 6 * 4, t1_lo, t1_hi);
-		xMOV(eax, ptr32[rsp + mantissa_a]);
-		xAND(eax, 0x800);
-		xOR(eax, ptr32[rsp + booth_negate + 6 * 4]);
-		xOR(ptr32[rsp + t1_hi], eax);
-		xMOV(eax, ptr32[rsp + mantissa_a]);
-		xAND(eax, 0x400);
-		xADD(eax, ptr32[rsp + booth_negate + 5 * 4]);
-		xOR(ptr32[rsp + booth_data + 7 * 4], eax);
+			xMOV(eax, ptr32[rsp + mantissa_a]);
+			xAND(eax, 0x800);
+			xOR(eax, ptr32[rsp + booth_negate + 6 * 4]);
+			xOR(ptr32[rsp + t1_hi], eax);
+			xMOV(eax, ptr32[rsp + mantissa_a]);
+			xAND(eax, 0x400);
+			xADD(eax, ptr32[rsp + booth_negate + 5 * 4]);
+			xOR(ptr32[rsp + booth_data + 7 * 4], eax);
 			X86SoftFloatEmitter::EmitCarrySaveAdd(booth_data + 0 * 4, t0_lo, t0_hi, t2_lo, t2_hi);
 			X86SoftFloatEmitter::EmitCarrySaveAdd(booth_data + 7 * 4, t1_lo, t1_hi, t3_lo, t3_hi);
 			X86SoftFloatEmitter::EmitCarrySaveAdd(t2_hi, t3_lo, t3_hi, t4_lo, t4_hi);
 			X86SoftFloatEmitter::EmitCarrySaveAdd(t2_lo, t4_lo, t4_hi, t5_lo, t5_hi);
-		xMOV(eax, ptr32[rsp + booth_negate + 7 * 4]);
-		xADD(ptr32[rsp + t5_hi], eax);
-		xAND(ptr32[rsp + t5_lo], ~0x7fffu);
-		xAND(ptr32[rsp + t5_hi], ~0x7fffu);
-		xMOV(eax, ptr32[rsp + t5_lo]);
-		xADD(eax, ptr32[rsp + t5_hi]);
-		xXOR(eax, ptr32[rsp + full_lo]);
-		xAND(eax, 0x8000);
-		xSUB(ptr32[rsp + full_lo], eax);
-		xSBB(ptr32[rsp + full_hi], 0);
+			xMOV(eax, ptr32[rsp + booth_negate + 7 * 4]);
+			xADD(ptr32[rsp + t5_hi], eax);
+			xAND(ptr32[rsp + t5_lo], ~0x7fffu);
+			xAND(ptr32[rsp + t5_hi], ~0x7fffu);
+			xMOV(eax, ptr32[rsp + t5_lo]);
+			xADD(eax, ptr32[rsp + t5_hi]);
+			xXOR(eax, ptr32[rsp + full_lo]);
+			xAND(eax, 0x8000);
+			xSUB(ptr32[rsp + full_lo], eax);
+			xSBB(ptr32[rsp + full_hi], 0);
+		}
 
 		product_correction_not_visible.SetTarget();
 		product_first_one_correction_ready.SetTarget();
@@ -833,7 +857,8 @@ void GenerateSoftFloatKernels()
 			constexpr int sqrt_saved_rsi = sqrt_saved_rbp + 8;
 			constexpr int sqrt_saved_rdi = sqrt_saved_rsi + 8;
 			constexpr int sqrt_saved_xmm0 = sqrt_saved_rdi + 8;
-			constexpr int sqrt_stack_size = sqrt_saved_xmm0 + 16;
+			const bool use_extended_scratch = x86Emitter::avx512.HasCore();
+			const int sqrt_stack_size = sqrt_saved_xmm0 + (use_extended_scratch ? 0 : 16);
 			constexpr int sqrt_invalid = 8;
 
 			const void* const entry = xGetAlignedCallTarget();
@@ -858,11 +883,21 @@ void GenerateSoftFloatKernels()
 			xCMP(edx, 0x7f800000);
 			xForwardJZ32 sqrt_cap_extended_input;
 
-			// Preserve xmm0 because it may hold a live EE mapping at the call site.
-			xMOVUPS(ptr[rsp + sqrt_saved_xmm0], xmm0);
-			xMOVDZX(xmm0, ptr32[rsp + sqrt_raw]);
-			xMOV64(r10, reinterpret_cast<uptr>(&s_pos[0]));
-			xPAND(xmm0, ptr128[r10]);
+			// XMM16 is outside the EE allocator's live register bank. Keep the
+			// candidate and the existing residual proof in the same rounding mode.
+			if (use_extended_scratch)
+			{
+				xMOV(eax, ptr32[rsp + sqrt_raw]);
+				xAND(eax, 0x7fffffff);
+				xVMOVD(xmm16, eax);
+			}
+			else
+			{
+				xMOVUPS(ptr[rsp + sqrt_saved_xmm0], xmm0);
+				xMOVDZX(xmm0, ptr32[rsp + sqrt_raw]);
+				xMOV64(r10, reinterpret_cast<uptr>(&s_pos[0]));
+				xPAND(xmm0, ptr128[r10]);
+			}
 			const bool switch_mxcsr =
 				EmuConfig.Cpu.FPUFPCR.GetRoundMode() != FPRoundMode::ChopZero;
 			if (switch_mxcsr)
@@ -871,11 +906,19 @@ void GenerateSoftFloatKernels()
 				s_fpuSoftSqrtChopMode.SetRoundMode(FPRoundMode::ChopZero);
 				xLDMXCSR(ptr32[&s_fpuSoftSqrtChopMode.bitmask]);
 			}
-			xSQRT.SS(xmm0, xmm0);
+			if (use_extended_scratch)
+				xVSQRTSS(xmm16, xmm16, xmm16);
+			else
+				xSQRT.SS(xmm0, xmm0);
 			if (switch_mxcsr)
 				xLDMXCSR(ptr32[&EmuConfig.Cpu.FPUFPCR.bitmask]);
-			xMOVD(r9d, xmm0);
-			xMOVUPS(xmm0, ptr[rsp + sqrt_saved_xmm0]);
+			if (use_extended_scratch)
+				xVMOVD(r9d, xmm16);
+			else
+			{
+				xMOVD(r9d, xmm0);
+				xMOVUPS(xmm0, ptr[rsp + sqrt_saved_xmm0]);
+			}
 
 			xMOV(eax, r9d);
 			xAND(eax, 0x7fffff);
@@ -1354,7 +1397,7 @@ void ClampValues(int regd)
 //------------------------------------------------------------------
 // ABS XMM
 //------------------------------------------------------------------
-void recABS_S_xmm(int info)
+void recABS_S_xmm(EERecompileInfo info)
 {
 	EE::Profiler.EmitOp(eeOpcode::ABS_F);
 	if (info & PROCESS_EE_S)
@@ -1534,7 +1577,7 @@ static void (*recComOpXMM_to_XMM_REV[])(x86SSERegType, x86SSERegType) = { //reve
 //static void (*recComOpM32_to_XMM[] )(x86SSERegType, uptr) = {
 //	SSE_ADDSS_M32_to_XMM, SSE_MULSS_M32_to_XMM, SSE_MAXSS_M32_to_XMM, SSE_MINSS_M32_to_XMM };
 
-int recCommutativeOp(int info, int regd, int op)
+int recCommutativeOp(EERecompileInfo info, int regd, int op)
 {
 	int t0reg = _allocTempXMMreg(XMMT_FPS);
 
@@ -1722,7 +1765,7 @@ static void fpuUpdateNativeAccOverflow(int acc_reg)
 }
 
 static void fpuLoadSoftOperand(
-	const xRegister32& dst, int info, int process_flag, int fpureg, int xmmreg)
+	const xRegister32& dst, EERecompileInfo info, int process_flag, int fpureg, int xmmreg)
 {
 	if (info & process_flag)
 		xMOVD(dst, xRegisterSSE(xmmreg));
@@ -1731,13 +1774,13 @@ static void fpuLoadSoftOperand(
 }
 
 template <eeOpcode opcode, bool subtract, bool writes_acc>
-static void recSoftAddSub(int info)
+static void recSoftAddSub(EERecompileInfo info)
 {
 	EE::Profiler.EmitOp(opcode);
 	fpuPrepareSoftKernelCall();
 	fpuLoadSoftOperand(eax, info, PROCESS_EE_S, _Fs_, EEREC_S);
 	fpuLoadSoftOperand(edx, info, PROCESS_EE_T, _Ft_, EEREC_T);
-	xCALL(s_fpuSoftAddSubExact[subtract ? 1 : 0]);
+	_eeCallWithHighXMM(s_fpuSoftAddSubExact[subtract ? 1 : 0]);
 	const int destination = writes_acc ? EEREC_ACC : EEREC_D;
 	xMOVDZX(xRegisterSSE(destination), eax);
 	if constexpr (writes_acc)
@@ -1751,13 +1794,13 @@ static void recSoftAddSub(int info)
 
 
 template <eeOpcode opcode, bool writes_acc>
-static void recSoftMul(int info)
+static void recSoftMul(EERecompileInfo info)
 {
 	EE::Profiler.EmitOp(opcode);
 	fpuPrepareSoftKernelCall();
 	fpuLoadSoftOperand(eax, info, PROCESS_EE_S, _Fs_, EEREC_S);
 	fpuLoadSoftOperand(edx, info, PROCESS_EE_T, _Ft_, EEREC_T);
-	xCALL(s_fpuSoftMulExact);
+	_eeCallWithHighXMM(s_fpuSoftMulExact);
 	const int destination = writes_acc ? EEREC_ACC : EEREC_D;
 	xMOVDZX(xRegisterSSE(destination), eax);
 	if constexpr (writes_acc)
@@ -1770,13 +1813,13 @@ static void recSoftMul(int info)
 }
 
 template <eeOpcode opcode, bool subtract, bool writes_acc>
-static void recSoftMadd(int info)
+static void recSoftMadd(EERecompileInfo info)
 {
 	EE::Profiler.EmitOp(opcode);
 	fpuPrepareSoftKernelCall();
 	fpuLoadSoftOperand(eax, info, PROCESS_EE_S, _Fs_, EEREC_S);
 	fpuLoadSoftOperand(edx, info, PROCESS_EE_T, _Ft_, EEREC_T);
-	xCALL(s_fpuSoftMulExact);
+	_eeCallWithHighXMM(s_fpuSoftMulExact);
 	xMOV(r8d, edx);
 	xMOV(ecx, edx);
 	xMOV(edx, eax);
@@ -1785,7 +1828,7 @@ static void recSoftMadd(int info)
 	else
 		xMOV(eax, ptr32[&fpuRegs.ACC]);
 	xMOV(r9d, ptr32[&fpuRegs.ACCflag]);
-	xCALL(s_fpuSoftMaddExact[subtract ? 1 : 0]);
+	_eeCallWithHighXMM(s_fpuSoftMaddExact[subtract ? 1 : 0]);
 	const int destination = writes_acc ? EEREC_ACC : EEREC_D;
 	xMOVDZX(xRegisterSSE(destination), eax);
 	if constexpr (writes_acc)
@@ -1797,23 +1840,23 @@ static void recSoftMadd(int info)
 	fpuCommitSoftMaddFlags<writes_acc>();
 }
 
-static void recSoftDiv(int info)
+static void recSoftDiv(EERecompileInfo info)
 {
 	EE::Profiler.EmitOp(eeOpcode::DIV_F);
 	fpuPrepareSoftKernelCall();
 	fpuLoadSoftOperand(eax, info, PROCESS_EE_S, _Fs_, EEREC_S);
 	fpuLoadSoftOperand(edx, info, PROCESS_EE_T, _Ft_, EEREC_T);
-	xCALL(s_fpuSoftDivCapExact);
+	_eeCallWithHighXMM(s_fpuSoftDivCapExact);
 	xMOVDZX(xRegisterSSE(EEREC_D), eax);
 	fpuCommitSoftDivideInvalidFlags(false);
 }
 
-static void recSoftSqrt(int info)
+static void recSoftSqrt(EERecompileInfo info)
 {
 	EE::Profiler.EmitOp(eeOpcode::SQRT_F);
 	fpuPrepareSoftKernelCall();
 	fpuLoadSoftOperand(eax, info, PROCESS_EE_T, _Ft_, EEREC_T);
-	xCALL(s_fpuSoftSqrtExact);
+	_eeCallWithHighXMM(s_fpuSoftSqrtExact);
 	xMOVDZX(xRegisterSSE(EEREC_D), eax);
 	xAND(ptr32[&fpuRegs.fprc[31]], ~(FPUflagD | FPUflagI));
 	xTEST(edx, 8);
@@ -1825,18 +1868,18 @@ static void recSoftSqrt(int info)
 	sqrt_flags_ready_from_invalid.SetTarget();
 }
 
-static void recSoftRsqrt(int info)
+static void recSoftRsqrt(EERecompileInfo info)
 {
 	EE::Profiler.EmitOp(eeOpcode::RSQRT_F);
 	fpuPrepareSoftKernelCall();
 	fpuLoadSoftOperand(eax, info, PROCESS_EE_S, _Fs_, EEREC_S);
 	fpuLoadSoftOperand(edx, info, PROCESS_EE_T, _Ft_, EEREC_T);
-	xCALL(s_fpuSoftRsqrtExact);
+	_eeCallWithHighXMM(s_fpuSoftRsqrtExact);
 	xMOVDZX(xRegisterSSE(EEREC_D), eax);
 	fpuCommitSoftDivideInvalidFlags(true);
 }
 
-void recADD_S_xmm(int info)
+void recADD_S_xmm(EERecompileInfo info)
 {
 	EE::Profiler.EmitOp(eeOpcode::ADD_F);
 	//xAND(ptr32[&fpuRegs.fprc[31]], ~(FPUflagO|FPUflagU)); // Clear O and U flags
@@ -1847,7 +1890,7 @@ void recADD_S_xmm(int info)
 FPURECOMPILE_CONSTCODE_EXACT(
 	ADD_S, XMMINFO_WRITED | XMMINFO_READS | XMMINFO_READT, recSoftAddSub<eeOpcode::ADD_F, false, false>);
 
-void recADDA_S_xmm(int info)
+void recADDA_S_xmm(EERecompileInfo info)
 {
 	EE::Profiler.EmitOp(eeOpcode::ADDA_F);
 	//xAND(ptr32[&fpuRegs.fprc[31]], ~(FPUflagO|FPUflagU)); // Clear O and U flags
@@ -1916,7 +1959,7 @@ void recBC1TL()
 // C.x.S XMM
 //------------------------------------------------------------------
 static void fpuLoadSoftCompareValue(
-	const xRegister32& dst, int info, int process_flag, int fpureg, int xmmreg)
+	const xRegister32& dst, EERecompileInfo info, int process_flag, int fpureg, int xmmreg)
 {
 	fpuLoadSoftOperand(dst, info, process_flag, fpureg, xmmreg);
 
@@ -1933,7 +1976,7 @@ static void fpuLoadSoftCompareValue(
 }
 
 template <eeOpcode opcode, JccComparisonType condition>
-static void recSoftCompare(int info)
+static void recSoftCompare(EERecompileInfo info)
 {
 	EE::Profiler.EmitOp(opcode);
 	_freeX86reg(eax.GetId());
@@ -1949,7 +1992,7 @@ static void recSoftCompare(int info)
 	condition_done.SetTarget();
 }
 
-void recC_EQ_xmm(int info)
+void recC_EQ_xmm(EERecompileInfo info)
 {
 	EE::Profiler.EmitOp(eeOpcode::CEQ_F);
 
@@ -2037,7 +2080,7 @@ void recC_F()
 }
 //REC_FPUFUNC(C_F);
 
-void recC_LE_xmm(int info)
+void recC_LE_xmm(EERecompileInfo info)
 {
 	EE::Profiler.EmitOp(eeOpcode::CLE_F);
 
@@ -2118,7 +2161,7 @@ FPURECOMPILE_CONSTCODE_EXACT(
 	C_LE, XMMINFO_READS | XMMINFO_READT, recSoftCompare<eeOpcode::CLE_F, Jcc_LessOrEqual>);
 //REC_FPUFUNC(C_LE);
 
-void recC_LT_xmm(int info)
+void recC_LT_xmm(EERecompileInfo info)
 {
 	EE::Profiler.EmitOp(eeOpcode::CLT_F);
 
@@ -2204,7 +2247,7 @@ FPURECOMPILE_CONSTCODE_EXACT(
 //------------------------------------------------------------------
 // CVT.x XMM
 //------------------------------------------------------------------
-void recCVT_S_xmm(int info)
+void recCVT_S_xmm(EERecompileInfo info)
 {
 	EE::Profiler.EmitOp(eeOpcode::CVTS_F);
 	if (info & PROCESS_EE_D)
@@ -2272,23 +2315,16 @@ void recDIVhelper1(int regd, int regt) // Sets flags
 {
 	u8 *pjmp1, *pjmp2;
 	u32 *ajmp32, *bjmp32;
-	const int t1reg = _allocTempXMMreg(XMMT_FPS);
 
 	xAND(ptr32[&fpuRegs.fprc[31]], ~(FPUflagI | FPUflagD)); // Clear I and D flags
 
 	/*--- Check for divide by zero ---*/
-	xXOR.PS(xRegisterSSE(t1reg), xRegisterSSE(t1reg));
-	xCMPEQ.SS(xRegisterSSE(t1reg), xRegisterSSE(regt));
-	xMOVMSKPS(eax, xRegisterSSE(t1reg));
-	xAND(eax, 1); //Check sign (if regt == zero, sign will be set)
-	ajmp32 = JZ32(0); //Skip if not set
+	eeTestZeroSS(xRegisterSSE(regt));
+	ajmp32 = JNZ32(0); //Skip if not zero
 
 		/*--- Check for 0/0 ---*/
-		xXOR.PS(xRegisterSSE(t1reg), xRegisterSSE(t1reg));
-		xCMPEQ.SS(xRegisterSSE(t1reg), xRegisterSSE(regd));
-		xMOVMSKPS(eax, xRegisterSSE(t1reg));
-		xAND(eax, 1); //Check sign (if regd == zero, sign will be set)
-		pjmp1 = JZ8(0); //Skip if not set
+		eeTestZeroSS(xRegisterSSE(regd));
+		pjmp1 = JNZ8(0); //Skip if not zero
 			xOR(ptr32[&fpuRegs.fprc[31]], FPUflagI | FPUflagSI); // Set I and SI flags ( 0/0 )
 			pjmp2 = JMP8(0);
 		x86SetJ8(pjmp1); //x/0 but not 0/0
@@ -2311,7 +2347,6 @@ void recDIVhelper1(int regd, int regt) // Sets flags
 	ClampValues(regd);
 	x86SetJ32(bjmp32);
 
-	_freeXMMreg(t1reg);
 }
 
 void recDIVhelper2(int regd, int regt) // Doesn't sets flags
@@ -2323,7 +2358,7 @@ void recDIVhelper2(int regd, int regt) // Doesn't sets flags
 
 alignas(16) static FPControlRegister roundmode_nearest;
 
-void recDIV_S_xmm(int info)
+void recDIV_S_xmm(EERecompileInfo info)
 {
 	EE::Profiler.EmitOp(eeOpcode::DIV_F);
 	int t0reg = _allocTempXMMreg(XMMT_FPS);
@@ -2408,7 +2443,7 @@ FPURECOMPILE_CONSTCODE_EXACT(DIV_S, XMMINFO_WRITED | XMMINFO_READS | XMMINFO_REA
 //------------------------------------------------------------------
 // MADD XMM
 //------------------------------------------------------------------
-void recMADDtemp(int info, int regd)
+void recMADDtemp(EERecompileInfo info, int regd)
 {
 	const int t0reg = _allocTempXMMreg(XMMT_FPS);
 
@@ -2600,7 +2635,7 @@ void recMADDtemp(int info, int regd)
 	_freeXMMreg(t0reg);
 }
 
-void recMADD_S_xmm(int info)
+void recMADD_S_xmm(EERecompileInfo info)
 {
 	EE::Profiler.EmitOp(eeOpcode::MADD_F);
 	//xAND(ptr32[&fpuRegs.fprc[31]], ~(FPUflagO|FPUflagU)); // Clear O and U flags
@@ -2611,7 +2646,7 @@ FPURECOMPILE_CONSTCODE_EXACT(MADD_S,
 	XMMINFO_WRITED | XMMINFO_READACC | XMMINFO_READS | XMMINFO_READT,
 	recSoftMadd<eeOpcode::MADD_F, false, false>);
 
-void recMADDA_S_xmm(int info)
+void recMADDA_S_xmm(EERecompileInfo info)
 {
 	EE::Profiler.EmitOp(eeOpcode::MADDA_F);
 	//xAND(ptr32[&fpuRegs.fprc[31]], ~(FPUflagO|FPUflagU)); // Clear O and U flags
@@ -2627,7 +2662,7 @@ FPURECOMPILE_CONSTCODE_EXACT(MADDA_S,
 //------------------------------------------------------------------
 // MAX / MIN XMM
 //------------------------------------------------------------------
-void recMAX_S_xmm(int info)
+void recMAX_S_xmm(EERecompileInfo info)
 {
 	EE::Profiler.EmitOp(eeOpcode::MAX_F);
 	//xAND(ptr32[&fpuRegs.fprc[31]], ~(FPUflagO|FPUflagU)); // Clear O and U flags
@@ -2636,7 +2671,7 @@ void recMAX_S_xmm(int info)
 
 FPURECOMPILE_CONSTCODE(MAX_S, XMMINFO_WRITED | XMMINFO_READS | XMMINFO_READT);
 
-void recMIN_S_xmm(int info)
+void recMIN_S_xmm(EERecompileInfo info)
 {
 	EE::Profiler.EmitOp(eeOpcode::MIN_F);
 	//xAND(ptr32[&fpuRegs.fprc[31]], ~(FPUflagO|FPUflagU)); // Clear O and U flags
@@ -2650,7 +2685,7 @@ FPURECOMPILE_CONSTCODE(MIN_S, XMMINFO_WRITED | XMMINFO_READS | XMMINFO_READT);
 //------------------------------------------------------------------
 // MOV XMM
 //------------------------------------------------------------------
-void recMOV_S_xmm(int info)
+void recMOV_S_xmm(EERecompileInfo info)
 {
 	EE::Profiler.EmitOp(eeOpcode::MOV_F);
 	if (info & PROCESS_EE_S)
@@ -2666,7 +2701,7 @@ FPURECOMPILE_CONSTCODE(MOV_S, XMMINFO_WRITED | XMMINFO_READS);
 //------------------------------------------------------------------
 // MSUB XMM
 //------------------------------------------------------------------
-void recMSUBtemp(int info, int regd)
+void recMSUBtemp(EERecompileInfo info, int regd)
 {
 	int t0reg = _allocTempXMMreg(XMMT_FPS);
 
@@ -2826,7 +2861,7 @@ void recMSUBtemp(int info, int regd)
 	_freeXMMreg(t0reg);
 }
 
-void recMSUB_S_xmm(int info)
+void recMSUB_S_xmm(EERecompileInfo info)
 {
 	EE::Profiler.EmitOp(eeOpcode::MSUB_F);
 	//xAND(ptr32[&fpuRegs.fprc[31]], ~(FPUflagO|FPUflagU)); // Clear O and U flags
@@ -2837,7 +2872,7 @@ FPURECOMPILE_CONSTCODE_EXACT(MSUB_S,
 	XMMINFO_WRITED | XMMINFO_READACC | XMMINFO_READS | XMMINFO_READT,
 	recSoftMadd<eeOpcode::MSUB_F, true, false>);
 
-void recMSUBA_S_xmm(int info)
+void recMSUBA_S_xmm(EERecompileInfo info)
 {
 	EE::Profiler.EmitOp(eeOpcode::MSUBA_F);
 	//xAND(ptr32[&fpuRegs.fprc[31]], ~(FPUflagO|FPUflagU)); // Clear O and U flags
@@ -2853,7 +2888,7 @@ FPURECOMPILE_CONSTCODE_EXACT(MSUBA_S,
 //------------------------------------------------------------------
 // MUL XMM
 //------------------------------------------------------------------
-void recMUL_S_xmm(int info)
+void recMUL_S_xmm(EERecompileInfo info)
 {
 	EE::Profiler.EmitOp(eeOpcode::MUL_F);
 	//xAND(ptr32[&fpuRegs.fprc[31]], ~(FPUflagO|FPUflagU)); // Clear O and U flags
@@ -2863,7 +2898,7 @@ void recMUL_S_xmm(int info)
 FPURECOMPILE_CONSTCODE_EXACT(
 	MUL_S, XMMINFO_WRITED | XMMINFO_READS | XMMINFO_READT, recSoftMul<eeOpcode::MUL_F, false>);
 
-void recMULA_S_xmm(int info)
+void recMULA_S_xmm(EERecompileInfo info)
 {
 	EE::Profiler.EmitOp(eeOpcode::MULA_F);
 	//xAND(ptr32[&fpuRegs.fprc[31]], ~(FPUflagO|FPUflagU)); // Clear O and U flags
@@ -2880,7 +2915,7 @@ FPURECOMPILE_CONSTCODE_EXACT(
 //------------------------------------------------------------------
 // NEG XMM
 //------------------------------------------------------------------
-void recNEG_S_xmm(int info)
+void recNEG_S_xmm(EERecompileInfo info)
 {
 	EE::Profiler.EmitOp(eeOpcode::NEG_F);
 	if (info & PROCESS_EE_S)
@@ -2909,7 +2944,7 @@ void recSUBhelper(int regd, int regt)
 	FPU_SUB(regd, regt);
 }
 
-void recSUBop(int info, int regd)
+void recSUBop(EERecompileInfo info, int regd)
 {
 	int t0reg = _allocTempXMMreg(XMMT_FPS);
 
@@ -2964,7 +2999,7 @@ void recSUBop(int info, int regd)
 	_freeXMMreg(t0reg);
 }
 
-void recSUB_S_xmm(int info)
+void recSUB_S_xmm(EERecompileInfo info)
 {
 	EE::Profiler.EmitOp(eeOpcode::SUB_F);
 	recSUBop(info, EEREC_D);
@@ -2974,7 +3009,7 @@ FPURECOMPILE_CONSTCODE_EXACT(
 	SUB_S, XMMINFO_WRITED | XMMINFO_READS | XMMINFO_READT, recSoftAddSub<eeOpcode::SUB_F, true, false>);
 
 
-void recSUBA_S_xmm(int info)
+void recSUBA_S_xmm(EERecompileInfo info)
 {
 	EE::Profiler.EmitOp(eeOpcode::SUBA_F);
 	recSUBop(info, EEREC_ACC);
@@ -2988,7 +3023,7 @@ FPURECOMPILE_CONSTCODE_EXACT(
 //------------------------------------------------------------------
 // SQRT XMM
 //------------------------------------------------------------------
-void recSQRT_S_xmm(int info)
+void recSQRT_S_xmm(EERecompileInfo info)
 {
 	EE::Profiler.EmitOp(eeOpcode::SQRT_F);
 	bool roundmodeFlag = false;
@@ -3014,8 +3049,7 @@ void recSQRT_S_xmm(int info)
 		xAND(ptr32[&fpuRegs.fprc[31]], ~(FPUflagI | FPUflagD)); // Clear I and D flags
 
 		/*--- Check for negative SQRT ---*/
-		xMOVMSKPS(eax, xRegisterSSE(EEREC_D));
-		xAND(eax, 1); //Check sign
+		eeTestNegSS(xRegisterSSE(EEREC_D)); //ZF=1 when positive
 		u8* pjmp = JZ8(0); //Skip if none are
 			xOR(ptr32[&fpuRegs.fprc[31]], FPUflagI | FPUflagSI); // Set I and SI flags
 			xAND.PS(xRegisterSSE(EEREC_D), ptr[&s_pos[0]]); // Make EEREC_D Positive
@@ -3046,30 +3080,22 @@ void recRSQRThelper1(int regd, int t0reg) // Preforms the RSQRT function when re
 	u8 *pjmp1, *pjmp2;
 	u32 *pjmp32;
 	u8 *qjmp1, *qjmp2;
-	int t1reg = _allocTempXMMreg(XMMT_FPS);
 
 	xAND(ptr32[&fpuRegs.fprc[31]], ~(FPUflagI | FPUflagD)); // Clear I and D flags
 
 	/*--- (first) Check for negative SQRT ---*/
-	xMOVMSKPS(eax, xRegisterSSE(t0reg));
-	xAND(eax, 1); //Check sign
+	eeTestNegSS(xRegisterSSE(t0reg)); //ZF=1 when positive
 	pjmp2 = JZ8(0); //Skip if not set
 		xOR(ptr32[&fpuRegs.fprc[31]], FPUflagI | FPUflagSI); // Set I and SI flags
 		xAND.PS(xRegisterSSE(t0reg), ptr[&s_pos[0]]); // Make t0reg Positive
 	x86SetJ8(pjmp2);
 
 	/*--- Check for zero ---*/
-	xXOR.PS(xRegisterSSE(t1reg), xRegisterSSE(t1reg));
-	xCMPEQ.SS(xRegisterSSE(t1reg), xRegisterSSE(t0reg));
-	xMOVMSKPS(eax, xRegisterSSE(t1reg));
-	xAND(eax, 1); //Check sign (if t0reg == zero, sign will be set)
-	pjmp1 = JZ8(0); //Skip if not set
+	eeTestZeroSS(xRegisterSSE(t0reg));
+	pjmp1 = JNZ8(0); //Skip if not zero
 		/*--- Check for 0/0 ---*/
-		xXOR.PS(xRegisterSSE(t1reg), xRegisterSSE(t1reg));
-		xCMPEQ.SS(xRegisterSSE(t1reg), xRegisterSSE(regd));
-		xMOVMSKPS(eax, xRegisterSSE(t1reg));
-		xAND(eax, 1); //Check sign (if regd == zero, sign will be set)
-		qjmp1 = JZ8(0); //Skip if not set
+		eeTestZeroSS(xRegisterSSE(regd));
+		qjmp1 = JNZ8(0); //Skip if not zero
 			xOR(ptr32[&fpuRegs.fprc[31]], FPUflagI | FPUflagSI); // Set I and SI flags ( 0/0 )
 			qjmp2 = JMP8(0);
 		x86SetJ8(qjmp1); //x/0 but not 0/0
@@ -3094,7 +3120,6 @@ void recRSQRThelper1(int regd, int t0reg) // Preforms the RSQRT function when re
 	ClampValues(regd);
 	x86SetJ32(pjmp32);
 
-	_freeXMMreg(t1reg);
 }
 
 void recRSQRThelper2(int regd, int t0reg) // Preforms the RSQRT function when regd <- Fs and t0reg <- Ft (Doesn't set flags)
@@ -3110,7 +3135,7 @@ void recRSQRThelper2(int regd, int t0reg) // Preforms the RSQRT function when re
 	ClampValues(regd);
 }
 
-void recRSQRT_S_xmm(int info)
+void recRSQRT_S_xmm(EERecompileInfo info)
 {
 	EE::Profiler.EmitOp(eeOpcode::RSQRT_F);
 

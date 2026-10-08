@@ -137,6 +137,8 @@ void mVUmergeRegs(const xmm& dest, const xmm& src, int xyzw, bool modXYZW)
 // Backup Volatile Regs (EAX, ECX, EDX, MM0~7, XMM0~7, are all volatile according to 32bit Win/Linux ABI)
 __fi void mVUbackupRegs(microVU& mVU, bool toMemory = false, bool onlyNeeded = false)
 {
+	// Only XMM0-15 are preserved here; high copies do not survive the call.
+	mVU.regAlloc->invalidateHighCopies();
 	if (toMemory)
 	{
 		int num_xmms = 0, num_gprs = 0;
@@ -193,6 +195,9 @@ __fi void mVUbackupRegs(microVU& mVU, bool toMemory = false, bool onlyNeeded = f
 		mVU.regAlloc->flushAll(); // Flush Regalloc
 		xMOVAPS(ptr128[&mVU.xmmBackup[xmmPQ.Id][0]], xmmPQ);
 	}
+
+	// The helper may read VF memory and will clobber XMM16-31.
+	mVU.regAlloc->spillHomes();
 }
 
 // Restore Volatile Regs
@@ -259,6 +264,9 @@ __fi void mVUrestoreRegs(microVU& mVU, bool fromMemory = false, bool onlyNeeded 
 	{
 		xMOVAPS(xmmPQ, ptr128[&mVU.xmmBackup[xmmPQ.Id][0]]);
 	}
+
+	// The helper may have clobbered XMM16-31.
+	mVU.regAlloc->reloadHomes();
 }
 
 #if 0
@@ -321,7 +329,10 @@ __fi void mVUaddrFix(mV, const xAddressReg& gprReg, const xAddressReg& tmpReg)
 						mVUrestoreRegs(mVU, true, false);
 					}
 #endif
+				mVU.regAlloc->invalidateHighCopies();
+				mVU.regAlloc->spillHomes();
 				xFastCall((void*)mVU.waitMTVU);
+				mVU.regAlloc->reloadHomes(); // the stub only preserves XMM0-15
 			}
 			xAND(xRegister32(gprReg.Id), 0x3f); // ToDo: theres a potential problem if VU0 overrides VU1's VF0/VI0 regs!
 			sptr offset = (u128*)VU1.VF - (u128*)VU0.Mem;
@@ -376,11 +387,13 @@ alignas(16) static const SSEMasks sseMasks =
 };
 
 
+#include "VUMinMaxAVX512.h"
+
 // Warning: Modifies t1 and t2
 void MIN_MAX_PS(microVU& mVU, const xmm& to, const xmm& from, const xmm& t1in, const xmm& t2in, bool min)
 {
 	const xmm& t1 = t1in.IsEmpty() ? mVU.regAlloc->allocReg() : t1in;
-	const xmm& t2 = t2in.IsEmpty() ? mVU.regAlloc->allocReg() : t2in;
+	const xmm& t2 = (t2in.IsEmpty() && !x86Emitter::avx512.HasCore()) ? mVU.regAlloc->allocReg() : t2in;
 
 	if (0) // use double comparison
 	{
@@ -411,6 +424,10 @@ void MIN_MAX_PS(microVU& mVU, const xmm& to, const xmm& from, const xmm& t1in, c
 		const xmm& c1 = min ? t2 : t1;
 		const xmm& c2 = min ? t1 : t2;
 
+		if (x86Emitter::avx512.HasCore())
+			emitVUMinMaxAVX512(to, from, t1, t2, min);
+		else
+		{
 		xMOVAPS  (t1, to);
 		xPSRA.D  (t1, 31);
 		xPSRL.D  (t1,  1);
@@ -425,6 +442,7 @@ void MIN_MAX_PS(microVU& mVU, const xmm& to, const xmm& from, const xmm& t1in, c
 		xPAND    (to, c1);
 		xPANDN   (c1, from);
 		xPOR     (to, c1);
+		}
 	}
 
 	if (t1 != t1in) mVU.regAlloc->clearNeeded(t1);

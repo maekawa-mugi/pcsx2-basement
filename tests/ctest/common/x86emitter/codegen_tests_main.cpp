@@ -8,6 +8,18 @@
 
 using namespace x86Emitter;
 
+TEST(CodegenTests, EVEXScalarScratch)
+{
+	CODEGEN_TEST(xVMOVD(xmm16, eax), "62 e1 7d 08 6e c0");
+	CODEGEN_TEST(xVMOVD(xmm31, r8d), "62 41 7d 08 6e f8");
+	CODEGEN_TEST(xVMOVD(r9d, xmm16), "62 c1 7d 08 7e c1");
+	CODEGEN_TEST(xVSQRTSS(xmm16, xmm16, xmm16), "62 a1 7e 00 51 c0");
+	CODEGEN_TEST(xKMOVW(k3, eax), "c5 f8 92 d8");
+	CODEGEN_TEST(xKMOVW(k3, r11d), "c4 c1 78 92 db");
+	CODEGEN_TEST(xKMOVW(eax, k3), "c5 f8 93 c3");
+	CODEGEN_TEST(xKMOVW(r11d, k3), "c5 78 93 db");
+}
+
 TEST(CodegenTests, MOVTest)
 {
 	CODEGEN_TEST(xMOV(rax, 0), "31 c0");
@@ -470,6 +482,56 @@ TEST(CodegenTests, SSETest)
 
 	CODEGEN_TEST(xPMAX.SD(xmm2, xmm1, xmm0), "66 0f 6f d1 66 0f 38 3d d0"); // movdqa xmm2, xmm1; pmaxsd xmm2, xmm0
 	CODEGEN_TEST(xPMAX.SD(xmm0, xmm1, xmm0), "66 0f 38 3d c1");             // pmaxsd xmm0, xmm1
+}
+
+TEST(CodegenTests, AVX512Test)
+{
+	CODEGEN_TEST(xVPLZCNTD(xmm0, xmm1), "62 f2 7d 08 44 c1");
+	CODEGEN_TEST(xVPLZCNTD(xmm16, xmm17), "62 a2 7d 08 44 c1");
+	CODEGEN_TEST(xVPTERNLOGD(xmm0, xmm1, xmm2, 0x96), "62 f3 75 08 25 c2 96");
+	CODEGEN_TEST(xVPTERNLOGD(xmm16, xmm17, xmm18, 0x96), "62 a3 75 00 25 c2 96");
+	CODEGEN_TEST(xVPTERNLOGD(xmm16, xmm17, xmm18, 0x96, k1, true), "62 a3 75 81 25 c2 96");
+	CODEGEN_TEST(xVPTERNLOGQ(xmm16, xmm17, xmm18, 0xe8), "62 a3 f5 00 25 c2 e8");
+	CODEGEN_TEST(xVPCMPD(k1, xmm16, xmm17, 0), "62 b3 7d 00 1f c9 00");
+	CODEGEN_TEST(xVPCMPD(k7, xmm16, xmm17, 4), "62 b3 7d 00 1f f9 04");
+	CODEGEN_TEST(xVPCMPD(k1, xmm16, xmm4, 6, k3), "62 f3 7d 03 1f cc 06");
+	CODEGEN_TEST(xVPCMPD(k2, xmm4, xmm17, 6, k3), "62 b3 5d 0b 1f d1 06");
+	CODEGEN_TEST(xVPCMPQ(k2, xmm3, xmm4, 0), "62 f3 e5 08 1f d4 00");
+	CODEGEN_TEST(xVPCMPQ(k6, xmm31, xmm29, 4), "62 93 85 00 1f f5 04");
+	CODEGEN_TEST(xVFPCLASSPS(k1, xmm0, 0xbf, k3), "62 f3 7d 0b 66 c8 bf");
+	CODEGEN_TEST(xVFPCLASSPS(k2, xmm16, 0xbf, k3), "62 b3 7d 0b 66 d0 bf");
+	CODEGEN_TEST(xVPBLENDMD(xmm2, xmm1, xmm0, k1), "62 f2 75 09 64 d0");
+	CODEGEN_TEST(xVPBLENDMD(xmm18, xmm17, xmm31, k3), "62 82 75 03 64 d7");
+	CODEGEN_TEST(xVMOVDQA32(xmm19, xmm16), "62 a1 7d 08 6f d8");
+	CODEGEN_TEST(xVMOVDQA32(xmm16, ptr128[rsp + 32]), "62 e1 7d 08 6f 44 24 02");
+	CODEGEN_TEST(xVMOVDQA32(ptr128[rsp + 32], xmm16), "62 e1 7d 08 7f 44 24 02");
+	CODEGEN_TEST(xVMOVDQA32(xmm16, ptr128[rsp + 20]), "62 e1 7d 08 6f 84 24 14 00 00 00");
+	CODEGEN_TEST(xVMOVDQA32(ptr128[r8 + 32], xmm17), "62 c1 7d 08 7f 48 02");
+	CODEGEN_TEST(xVPSLLDImm(xmm19, xmm19, 1), "62 b1 65 00 72 f3 01");
+	CODEGEN_TEST(xVPSLLDImm(xmm3, xmm19, 1), "62 b1 65 08 72 f3 01");
+	CODEGEN_TEST(xKMOVD(k3, r11d), "c4 c1 7b 92 db");
+	CODEGEN_TEST(xKMOVD(eax, k3), "c5 fb 93 c3");
+	CODEGEN_TEST(xKORW(k1, k2, k3), "c5 ec 45 cb");
+	CODEGEN_TEST(xKANDW(k4, k5, k6), "c5 d4 41 e6");
+	CODEGEN_TEST(xKXORW(k1, k2, k3), "c5 ec 47 cb");
+	CODEGEN_TEST(xKANDNW(k3, k1, k2), "c5 f4 42 da");
+	CODEGEN_TEST(xKTESTW(k1, k1), "c5 f8 99 c9");
+	CODEGEN_TEST(xKTESTW(k7, k3), "c5 f8 99 fb");
+	CODEGEN_TEST(xKORTESTW(k1, k2), "c5 f8 98 ca");
+	EXPECT_EQ(xRegisterSSE::GetEVEXInstance(31).GetId(), 31);
+
+	for (u32 a = 0; a < 2; a++)
+	{
+		for (u32 b = 0; b < 2; b++)
+		{
+			for (u32 c = 0; c < 2; c++)
+			{
+				const u32 index = (a << 2) | (b << 1) | c;
+				EXPECT_EQ((0x96u >> index) & 1u, a ^ b ^ c);
+				EXPECT_EQ((0xe8u >> index) & 1u, (a & b) | (a & c) | (b & c));
+			}
+		}
+	}
 }
 
 TEST(CodegenTests, AVXTest)

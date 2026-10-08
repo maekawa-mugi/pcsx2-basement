@@ -791,15 +791,26 @@ if(DISABLE_ADVANCE_SIMD AND ARCH_X86)
 	if(USE_GCC)
 		target_link_options(PCSX2_FLAGS INTERFACE -Wno-odr)
 	endif()
+	# avx512 is the Ice Lake tier (VectorISA::AVX512, x86Emitter::AVX512Features::HasCore).
 	if(WIN32)
+		set(compile_options_avx512 /arch:AVX512)
+		if(USE_CLANG_CL)
+			# /arch:AVX512 alone stops at F/CD/BW/DQ/VL.
+			list(APPEND compile_options_avx512 -mavx512vbmi -mavx512vbmi2 -mavx512vnni -mavx512bitalg
+				-mavx512vpopcntdq -mvpclmulqdq -mgfni)
+		endif()
 		set(compile_options_avx2 /arch:AVX2)
 		set(compile_options_avx  /arch:AVX)
 	elseif(USE_GCC)
 		# GCC can't inline into multi-isa functions if we use march and mtune, but can if we use feature flags
+		set(compile_options_avx512 -msse4.1 -mavx -mavx2 -mbmi -mbmi2 -mfma -mavx512f -mavx512vl -mavx512bw
+			-mavx512dq -mavx512cd -mavx512vbmi -mavx512vbmi2 -mavx512vnni -mavx512bitalg -mavx512vpopcntdq
+			-mvpclmulqdq -mgfni)
 		set(compile_options_avx2 -msse4.1 -mavx -mavx2 -mbmi -mbmi2 -mfma)
 		set(compile_options_avx  -msse4.1 -mavx)
 		set(compile_options_sse4 -msse4.1)
 	else()
+		set(compile_options_avx512 -march=icelake-client -mtune=icelake-client)
 		set(compile_options_avx2 -march=haswell -mtune=haswell)
 		set(compile_options_avx  -march=sandybridge -mtune=sandybridge)
 		set(compile_options_sse4 -msse4.1 -mtune=nehalem)
@@ -810,7 +821,7 @@ if(DISABLE_ADVANCE_SIMD AND ARCH_X86)
 	# Thankfully, most linkers don't choose at random.  When presented with a bunch of .o files, most linkers seem to choose the first implementation they see, so make sure you order these from oldest to newest
 	# Note: ld64 (macOS's linker) does not act the same way when presented with .a files, unless linked with `-force_load` (cmake WHOLE_ARCHIVE).
 	set(is_first_isa "1")
-	foreach(isa "sse4" "avx" "avx2")
+	foreach(isa "sse4" "avx" "avx2" "avx512")
 		add_library(GS-${isa} STATIC ${pcsx2GSSourcesUnshared} ${pcsx2IPUSourcesUnshared} ${pcsx2SPU2SourcesUnshared})
 		target_link_libraries(GS-${isa} PRIVATE PCSX2_FLAGS)
 		target_compile_definitions(GS-${isa} PRIVATE MULTI_ISA_UNSHARED_COMPILATION=isa_${isa} MULTI_ISA_IS_FIRST=${is_first_isa} ${pcsx2_defs_${isa}})
@@ -1020,6 +1031,8 @@ set(pcsx2WindowsSources
 
 # x86 sources
 set(pcsx2x86Sources
+	x86/InterpreterAVX512.cpp
+	x86/AVX512Profile.cpp
 	x86/BaseblockEx.cpp
 	x86/iCOP0.cpp
 	x86/iCore.cpp
@@ -1075,6 +1088,9 @@ set(pcsx2x86Headers
 	x86/microVU_Tables.inl
 	x86/microVU_Upper.inl
 	x86/microVU_UpperSoft.inl
+	x86/MMIAVX512.inl
+	x86/InterpreterAVX512.h
+	x86/AVX512Profile.h
 	x86/newVif.h
 	x86/SoftFloatEmitter.h
 	x86/Vif_UnpackSSE.h
@@ -1107,6 +1123,9 @@ set(pcsx2LTOSources
 
 if(ARCH_X86)
 	list(APPEND pcsx2LTOSources ${pcsx2x86Sources} ${pcsx2x86Headers})
+	if(MSVC AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+		set_source_files_properties(x86/InterpreterAVX512.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX512")
+	endif()
 	target_link_libraries(PCSX2_FLAGS INTERFACE zydis)
 elseif(ARCH_ARM64)
 	list(APPEND pcsx2LTOSources ${pcsx2arm64Sources} ${pcsx2arm64Headers})

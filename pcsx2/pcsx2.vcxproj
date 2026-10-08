@@ -675,6 +675,13 @@
     <ClCompile Include="FPU.cpp" />
     <ClCompile Include="Interpreter.cpp" />
     <ClCompile Include="MMI.cpp" />
+    <ClCompile Include="x86\InterpreterAVX512.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'!='x64'">true</ExcludedFromBuild>
+      <EnableEnhancedInstructionSet>AdvancedVectorExtensions512</EnableEnhancedInstructionSet>
+    </ClCompile>
+    <ClCompile Include="x86\AVX512Profile.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'!='x64'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="R5900.cpp" />
     <ClCompile Include="R5900OpcodeImpl.cpp" />
     <ClCompile Include="IopBios.cpp" />
@@ -1056,6 +1063,9 @@
     <ClInclude Include="x86\microVU_SoftFloat.h" />
     <ClInclude Include="x86\microVU_SoftFloatTables.h" />
     <ClInclude Include="x86\microVU_UpperSoft.inl" />
+    <ClInclude Include="x86\MMIAVX512.inl" />
+    <ClInclude Include="x86\InterpreterAVX512.h" />
+    <ClInclude Include="x86\AVX512Profile.h" />
     <ClInclude Include="x86\SoftFloatEmitter.h" />
     <ClInclude Include="x86\R5900_Profiler.h" />
     <ClInclude Include="VUflags.h" />

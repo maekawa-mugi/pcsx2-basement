@@ -37,7 +37,7 @@ REC_FUNC_DEL(SLTU, _Rd_);
 
 #else
 
-static void recMoveStoD(int info)
+static void recMoveStoD(EERecompileInfo info)
 {
 	if (info & PROCESS_EE_S)
 		xMOV(xRegister32(EEREC_D), xRegister32(EEREC_S));
@@ -45,7 +45,7 @@ static void recMoveStoD(int info)
 		xMOV(xRegister32(EEREC_D), ptr32[&cpuRegs.GPR.r[_Rs_].UL[0]]);
 }
 
-static void recMoveStoD64(int info)
+static void recMoveStoD64(EERecompileInfo info)
 {
 	if (info & PROCESS_EE_S)
 		xMOV(xRegister64(EEREC_D), xRegister64(EEREC_S));
@@ -53,7 +53,7 @@ static void recMoveStoD64(int info)
 		xMOV(xRegister64(EEREC_D), ptr64[&cpuRegs.GPR.r[_Rs_].UD[0]]);
 }
 
-static void recMoveTtoD(int info)
+static void recMoveTtoD(EERecompileInfo info)
 {
 	if (info & PROCESS_EE_T)
 		xMOV(xRegister32(EEREC_D), xRegister32(EEREC_T));
@@ -61,7 +61,7 @@ static void recMoveTtoD(int info)
 		xMOV(xRegister32(EEREC_D), ptr32[&cpuRegs.GPR.r[_Rt_].UL[0]]);
 }
 
-static void recMoveTtoD64(int info)
+static void recMoveTtoD64(EERecompileInfo info)
 {
 	if (info & PROCESS_EE_T)
 		xMOV(xRegister64(EEREC_D), xRegister64(EEREC_T));
@@ -76,7 +76,7 @@ static void recADD_const()
 }
 
 // s is constant
-static void recADD_consts(int info)
+static void recADD_consts(EERecompileInfo info)
 {
 	pxAssert(!(info & PROCESS_EE_XMM));
 
@@ -88,7 +88,7 @@ static void recADD_consts(int info)
 }
 
 // t is constant
-static void recADD_constt(int info)
+static void recADD_constt(EERecompileInfo info)
 {
 	pxAssert(!(info & PROCESS_EE_XMM));
 
@@ -100,7 +100,7 @@ static void recADD_constt(int info)
 }
 
 // nothing is constant
-static void recADD_(int info)
+static void recADD_(EERecompileInfo info)
 {
 	pxAssert(!(info & PROCESS_EE_XMM));
 
@@ -154,7 +154,7 @@ void recDADD_const(void)
 }
 
 // s is constant
-static void recDADD_consts(int info)
+static void recDADD_consts(EERecompileInfo info)
 {
 	pxAssert(!(info & PROCESS_EE_XMM));
 
@@ -165,7 +165,7 @@ static void recDADD_consts(int info)
 }
 
 // t is constant
-static void recDADD_constt(int info)
+static void recDADD_constt(EERecompileInfo info)
 {
 	pxAssert(!(info & PROCESS_EE_XMM));
 
@@ -176,7 +176,7 @@ static void recDADD_constt(int info)
 }
 
 // nothing is constant
-static void recDADD_(int info)
+static void recDADD_(EERecompileInfo info)
 {
 	pxAssert(!(info & PROCESS_EE_XMM));
 
@@ -228,7 +228,7 @@ static void recSUB_const()
 	g_cpuConstRegs[_Rd_].SD[0] = s64(s32(g_cpuConstRegs[_Rs_].UL[0] - g_cpuConstRegs[_Rt_].UL[0]));
 }
 
-static void recSUB_consts(int info)
+static void recSUB_consts(EERecompileInfo info)
 {
 	pxAssert(!(info & PROCESS_EE_XMM));
 
@@ -243,7 +243,7 @@ static void recSUB_consts(int info)
 	xMOVSX(xRegister64(EEREC_D), eax);
 }
 
-static void recSUB_constt(int info)
+static void recSUB_constt(EERecompileInfo info)
 {
 	pxAssert(!(info & PROCESS_EE_XMM));
 
@@ -255,7 +255,7 @@ static void recSUB_constt(int info)
 	xMOVSX(xRegister64(EEREC_D), xRegister32(EEREC_D));
 }
 
-static void recSUB_(int info)
+static void recSUB_(EERecompileInfo info)
 {
 	pxAssert(!(info & PROCESS_EE_XMM));
 
@@ -322,7 +322,7 @@ static void recDSUB_const()
 	g_cpuConstRegs[_Rd_].UD[0] = g_cpuConstRegs[_Rs_].UD[0] - g_cpuConstRegs[_Rt_].UD[0];
 }
 
-static void recDSUB_consts(int info)
+static void recDSUB_consts(EERecompileInfo info)
 {
 	pxAssert(!(info & PROCESS_EE_XMM));
 
@@ -340,7 +340,7 @@ static void recDSUB_consts(int info)
 	xMOV(xRegister64(EEREC_D), regd);
 }
 
-static void recDSUB_constt(int info)
+static void recDSUB_constt(EERecompileInfo info)
 {
 	pxAssert(!(info & PROCESS_EE_XMM));
 
@@ -350,7 +350,7 @@ static void recDSUB_constt(int info)
 		xImm64Op(xSUB, xRegister64(EEREC_D), rax, tval);
 }
 
-static void recDSUB_(int info)
+static void recDSUB_(EERecompileInfo info)
 {
 	pxAssert(!(info & PROCESS_EE_XMM));
 
@@ -408,7 +408,7 @@ enum class LogicalOp
 };
 } // namespace
 
-static void recLogicalOp_constv(LogicalOp op, int info, int creg, u32 vreg, int regv)
+static void recLogicalOp_constv(LogicalOp op, EERecompileInfo info, int creg, u32 vreg, int regv)
 {
 	pxAssert(!(info & PROCESS_EE_XMM));
 
@@ -464,7 +464,7 @@ static void recLogicalOp_constv(LogicalOp op, int info, int creg, u32 vreg, int 
 	}
 }
 
-static void recLogicalOp(LogicalOp op, int info)
+static void recLogicalOp(LogicalOp op, EERecompileInfo info)
 {
 	pxAssert(!(info & PROCESS_EE_XMM));
 
@@ -512,17 +512,17 @@ static void recAND_const()
 	g_cpuConstRegs[_Rd_].UD[0] = g_cpuConstRegs[_Rs_].UD[0] & g_cpuConstRegs[_Rt_].UD[0];
 }
 
-static void recAND_consts(int info)
+static void recAND_consts(EERecompileInfo info)
 {
 	recLogicalOp_constv(LogicalOp::AND, info, _Rs_, _Rt_, (info & PROCESS_EE_T) ? EEREC_T : -1);
 }
 
-static void recAND_constt(int info)
+static void recAND_constt(EERecompileInfo info)
 {
 	recLogicalOp_constv(LogicalOp::AND, info, _Rt_, _Rs_, (info & PROCESS_EE_S) ? EEREC_S : -1);
 }
 
-static void recAND_(int info)
+static void recAND_(EERecompileInfo info)
 {
 	recLogicalOp(LogicalOp::AND, info);
 }
@@ -535,17 +535,17 @@ static void recOR_const()
 	g_cpuConstRegs[_Rd_].UD[0] = g_cpuConstRegs[_Rs_].UD[0] | g_cpuConstRegs[_Rt_].UD[0];
 }
 
-static void recOR_consts(int info)
+static void recOR_consts(EERecompileInfo info)
 {
 	recLogicalOp_constv(LogicalOp::OR, info, _Rs_, _Rt_, (info & PROCESS_EE_T) ? EEREC_T : -1);
 }
 
-static void recOR_constt(int info)
+static void recOR_constt(EERecompileInfo info)
 {
 	recLogicalOp_constv(LogicalOp::OR, info, _Rt_, _Rs_, (info & PROCESS_EE_S) ? EEREC_S : -1);
 }
 
-static void recOR_(int info)
+static void recOR_(EERecompileInfo info)
 {
 	recLogicalOp(LogicalOp::OR, info);
 }
@@ -558,17 +558,17 @@ static void recXOR_const()
 	g_cpuConstRegs[_Rd_].UD[0] = g_cpuConstRegs[_Rs_].UD[0] ^ g_cpuConstRegs[_Rt_].UD[0];
 }
 
-static void recXOR_consts(int info)
+static void recXOR_consts(EERecompileInfo info)
 {
 	recLogicalOp_constv(LogicalOp::XOR, info, _Rs_, _Rt_, (info & PROCESS_EE_T) ? EEREC_T : -1);
 }
 
-static void recXOR_constt(int info)
+static void recXOR_constt(EERecompileInfo info)
 {
 	recLogicalOp_constv(LogicalOp::XOR, info, _Rt_, _Rs_, (info & PROCESS_EE_S) ? EEREC_S : -1);
 }
 
-static void recXOR_(int info)
+static void recXOR_(EERecompileInfo info)
 {
 	recLogicalOp(LogicalOp::XOR, info);
 }
@@ -581,17 +581,17 @@ static void recNOR_const()
 	g_cpuConstRegs[_Rd_].UD[0] = ~(g_cpuConstRegs[_Rs_].UD[0] | g_cpuConstRegs[_Rt_].UD[0]);
 }
 
-static void recNOR_consts(int info)
+static void recNOR_consts(EERecompileInfo info)
 {
 	recLogicalOp_constv(LogicalOp::NOR, info, _Rs_, _Rt_, (info & PROCESS_EE_T) ? EEREC_T : -1);
 }
 
-static void recNOR_constt(int info)
+static void recNOR_constt(EERecompileInfo info)
 {
 	recLogicalOp_constv(LogicalOp::NOR, info, _Rt_, _Rs_, (info & PROCESS_EE_S) ? EEREC_S : -1);
 }
 
-static void recNOR_(int info)
+static void recNOR_(EERecompileInfo info)
 {
 	recLogicalOp(LogicalOp::NOR, info);
 }
@@ -604,7 +604,7 @@ static void recSLT_const()
 	g_cpuConstRegs[_Rd_].UD[0] = g_cpuConstRegs[_Rs_].SD[0] < g_cpuConstRegs[_Rt_].SD[0];
 }
 
-static void recSLTs_const(int info, int sign, int st)
+static void recSLTs_const(EERecompileInfo info, int sign, int st)
 {
 	pxAssert(!(info & PROCESS_EE_XMM));
 
@@ -631,7 +631,7 @@ static void recSLTs_const(int info, int sign, int st)
 	}
 }
 
-static void recSLTs_(int info, int sign)
+static void recSLTs_(EERecompileInfo info, int sign)
 {
 	pxAssert(!(info & PROCESS_EE_XMM));
 
@@ -658,17 +658,17 @@ static void recSLTs_(int info, int sign)
 	}
 }
 
-static void recSLT_consts(int info)
+static void recSLT_consts(EERecompileInfo info)
 {
 	recSLTs_const(info, 1, 0);
 }
 
-static void recSLT_constt(int info)
+static void recSLT_constt(EERecompileInfo info)
 {
 	recSLTs_const(info, 1, 1);
 }
 
-static void recSLT_(int info)
+static void recSLT_(EERecompileInfo info)
 {
 	recSLTs_(info, 1);
 }
@@ -681,17 +681,17 @@ static void recSLTU_const()
 	g_cpuConstRegs[_Rd_].UD[0] = g_cpuConstRegs[_Rs_].UD[0] < g_cpuConstRegs[_Rt_].UD[0];
 }
 
-static void recSLTU_consts(int info)
+static void recSLTU_consts(EERecompileInfo info)
 {
 	recSLTs_const(info, 0, 0);
 }
 
-static void recSLTU_constt(int info)
+static void recSLTU_constt(EERecompileInfo info)
 {
 	recSLTs_const(info, 0, 1);
 }
 
-static void recSLTU_(int info)
+static void recSLTU_(EERecompileInfo info)
 {
 	recSLTs_(info, 0);
 }

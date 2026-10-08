@@ -664,13 +664,13 @@ void psxRecompileCodeConst0(R3000AFNPTR constcode, R3000AFNPTR_INFO constscode, 
 	if (regs < 0 && ((!s_is_const && s_is_used) || _Rs_ == _Rd_))
 		regs = _allocX86reg(X86TYPE_PSX, _Rs_, MODE_READ);
 	if (regs >= 0)
-		info |= PROCESS_EE_SET_S(regs);
+		info |= PROCESS_PSX_SET_S(regs);
 
 	int regt = _checkX86reg(X86TYPE_PSX, _Rt_, MODE_READ);
 	if (regt < 0 && ((!t_is_const && t_is_used) || _Rt_ == _Rd_))
 		regt = _allocX86reg(X86TYPE_PSX, _Rt_, MODE_READ);
 	if (regt >= 0)
-		info |= PROCESS_EE_SET_T(regt);
+		info |= PROCESS_PSX_SET_T(regt);
 
 	// If S is no longer live, swap D for S. Saves the move.
 	int regd = psxTryRenameReg(_Rd_, _Rs_, regs, _Rt_, xmminfo);
@@ -680,7 +680,7 @@ void psxRecompileCodeConst0(R3000AFNPTR constcode, R3000AFNPTR_INFO constscode, 
 		regd = _allocX86reg(X86TYPE_PSX, _Rd_, MODE_WRITE);
 	}
 	if (regd >= 0)
-		info |= PROCESS_EE_SET_D(regd);
+		info |= PROCESS_PSX_SET_D(regd);
 
 	_validateRegs();
 
@@ -773,7 +773,7 @@ void psxRecompileCodeConst1(R3000AFNPTR constcode, R3000AFNPTR_INFO noconstcode,
 	const bool s_is_used = EEINST_USEDTEST(_Rs_);
 	const int regs = s_is_used ? _allocX86reg(X86TYPE_PSX, _Rs_, MODE_READ) : _checkX86reg(X86TYPE_PSX, _Rs_, MODE_READ);
 	if (regs >= 0)
-		info |= PROCESS_EE_SET_S(regs);
+		info |= PROCESS_PSX_SET_S(regs);
 
 	int regt = psxTryRenameReg(_Rt_, _Rs_, regs, 0, xmminfo);
 	if (regt < 0)
@@ -781,7 +781,7 @@ void psxRecompileCodeConst1(R3000AFNPTR constcode, R3000AFNPTR_INFO noconstcode,
 		regt = _allocX86reg(X86TYPE_PSX, _Rt_, MODE_WRITE);
 	}
 	if (regt >= 0)
-		info |= PROCESS_EE_SET_T(regt);
+		info |= PROCESS_PSX_SET_T(regt);
 
 	_validateRegs();
 
@@ -810,7 +810,7 @@ void psxRecompileCodeConst2(R3000AFNPTR constcode, R3000AFNPTR_INFO noconstcode,
 	const bool s_is_used = EEINST_USEDTEST(_Rt_);
 	const int regt = s_is_used ? _allocX86reg(X86TYPE_PSX, _Rt_, MODE_READ) : _checkX86reg(X86TYPE_PSX, _Rt_, MODE_READ);
 	if (regt >= 0)
-		info |= PROCESS_EE_SET_T(regt);
+		info |= PROCESS_PSX_SET_T(regt);
 
 	int regd = psxTryRenameReg(_Rd_, _Rt_, regt, 0, xmminfo);
 	if (regd < 0)
@@ -818,7 +818,7 @@ void psxRecompileCodeConst2(R3000AFNPTR constcode, R3000AFNPTR_INFO noconstcode,
 		regd = _allocX86reg(X86TYPE_PSX, _Rd_, MODE_WRITE);
 	}
 	if (regd >= 0)
-		info |= PROCESS_EE_SET_D(regd);
+		info |= PROCESS_PSX_SET_D(regd);
 
 	_validateRegs();
 
@@ -865,14 +865,14 @@ void psxRecompileCodeConst3(R3000AFNPTR constcode, R3000AFNPTR_INFO constscode, 
 	if (regs < 0 && !s_is_const && s_is_used)
 		regs = _allocX86reg(X86TYPE_PSX, _Rs_, MODE_READ);
 	if (regs >= 0)
-		info |= PROCESS_EE_SET_S(regs);
+		info |= PROCESS_PSX_SET_S(regs);
 
 	// need at least one in a register
 	int regt = _checkX86reg(X86TYPE_PSX, _Rt_, MODE_READ);
 	if (regs < 0 || (regt < 0 && !t_is_const && t_is_used))
 		regt = _allocX86reg(X86TYPE_PSX, _Rt_, MODE_READ);
 	if (regt >= 0)
-		info |= PROCESS_EE_SET_T(regt);
+		info |= PROCESS_PSX_SET_T(regt);
 
 	if (LOHI)
 	{
@@ -880,14 +880,14 @@ void psxRecompileCodeConst3(R3000AFNPTR constcode, R3000AFNPTR_INFO constscode, 
 		const bool lo_is_used = EEINST_USEDTEST(PSX_LO);
 		const int reglo = lo_is_used ? _allocX86reg(X86TYPE_PSX, PSX_LO, MODE_WRITE) : -1;
 		if (reglo >= 0)
-			info |= PROCESS_EE_SET_LO(reglo) | PROCESS_EE_LO;
+			info |= PROCESS_PSX_SET_LO(reglo) | PROCESS_EE_LO;
 		else
 			_deletePSXtoX86reg(PSX_LO, DELETE_REG_FREE_NO_WRITEBACK);
 
 		const bool hi_is_live = EEINST_USEDTEST(PSX_HI);
 		const int reghi = hi_is_live ? _allocX86reg(X86TYPE_PSX, PSX_HI, MODE_WRITE) : -1;
 		if (reghi >= 0)
-			info |= PROCESS_EE_SET_HI(reghi) | PROCESS_EE_HI;
+			info |= PROCESS_PSX_SET_HI(reghi) | PROCESS_EE_HI;
 		else
 			_deletePSXtoX86reg(PSX_HI, DELETE_REG_FREE_NO_WRITEBACK);
 	}

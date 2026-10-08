@@ -18,7 +18,8 @@ u16 g_xmmAllocCounter = 0;
 
 EEINST* g_pCurInstInfo = NULL;
 
-_xmmregs xmmregs[iREGCNT_XMM], s_saveXMMregs[iREGCNT_XMM];
+_xmmregs xmmregs[iREGCNT_XMM_EVEX], s_saveXMMregs[iREGCNT_XMM_EVEX];
+thread_local EEXMMAllocatorStats* g_eeXMMAllocatorStats = nullptr;
 
 // X86 caching
 _x86regs x86regs[iREGCNT_GPR], s_saveX86regs[iREGCNT_GPR];
@@ -93,6 +94,7 @@ bool _hasX86reg(int type, int reg, int required_mode /*= 0*/)
 // (i.e EEINST_USED is cleared)
 int _getFreeXMMreg(u32 maxreg)
 {
+	pxAssertRel(maxreg <= iREGCNT_XMM, "Legacy allocation cannot use high XMM registers");
 	int i, tempi;
 	u32 bestcount = 0x10000;
 
@@ -147,6 +149,8 @@ int _getFreeXMMreg(u32 maxreg)
 	}
 	if (tempi != -1)
 	{
+		if (g_eeXMMAllocatorStats)
+			g_eeXMMAllocatorStats->evictions++;
 		_freeXMMreg(tempi);
 		return tempi;
 	}
@@ -168,6 +172,8 @@ int _getFreeXMMreg(u32 maxreg)
 
 	if (tempi != -1)
 	{
+		if (g_eeXMMAllocatorStats)
+			g_eeXMMAllocatorStats->evictions++;
 		_freeXMMreg(tempi);
 		return tempi;
 	}
@@ -179,6 +185,8 @@ int _getFreeXMMreg(u32 maxreg)
 // Reserve a XMM register for temporary operation.
 int _allocTempXMMreg(XMMSSEType type)
 {
+	if (g_eeXMMAllocatorStats)
+		g_eeXMMAllocatorStats->temporaries++;
 	const int xmmreg = _getFreeXMMreg();
 	xmmregs[xmmreg].inuse = 1;
 	xmmregs[xmmreg].type = XMMTYPE_TEMP;
@@ -186,6 +194,101 @@ int _allocTempXMMreg(XMMSSEType type)
 	xmmregs[xmmreg].counter = g_xmmAllocCounter++;
 	g_xmmtypes[xmmreg] = type;
 	return xmmreg;
+}
+
+int _allocTempXMMregEVEX(XMMSSEType type, u32 eligible)
+{
+	// Keep the old encoding and allocation order when a low register is free.
+	for (u32 i = 0; i < iREGCNT_XMM; i++)
+	{
+		if ((eligible & (1u << i)) && !xmmregs[i].inuse)
+		{
+			if (g_eeXMMAllocatorStats)
+				g_eeXMMAllocatorStats->temporaries++;
+			xmmregs[i] = {};
+			xmmregs[i].inuse = 1;
+			xmmregs[i].type = XMMTYPE_TEMP;
+			xmmregs[i].needed = 1;
+			xmmregs[i].counter = g_xmmAllocCounter++;
+			g_xmmtypes[i] = type;
+			return i;
+		}
+	}
+	// High registers are opt-in per consumer, never an implicit extension of
+	// _getFreeXMMreg(). Exact helpers use this same bank as fixed scratch.
+	if (avx512.HasCore())
+	{
+		for (u32 i = iREGCNT_XMM; i < iREGCNT_XMM_EVEX; i++)
+		{
+			if (!(eligible & (1u << i)) || xmmregs[i].inuse)
+				continue;
+			if (g_eeXMMAllocatorStats)
+			{
+				g_eeXMMAllocatorStats->temporaries++;
+				g_eeXMMAllocatorStats->high_temporaries++;
+			}
+			xmmregs[i] = {};
+			xmmregs[i].inuse = 1;
+			xmmregs[i].type = XMMTYPE_TEMP;
+			xmmregs[i].needed = 1;
+			xmmregs[i].counter = g_xmmAllocCounter++;
+			g_xmmtypes[i] = type;
+			return i;
+		}
+	}
+	return _allocTempXMMreg(type);
+}
+
+void _eeCallWithHighXMM(const void* target)
+{
+	u32 live = 0;
+	u32 count = 0;
+	for (u32 i = iREGCNT_XMM; i < iREGCNT_XMM_EVEX; i++)
+	{
+		if (!xmmregs[i].inuse)
+			continue;
+		pxAssertRel(avx512.HasCore() && xmmregs[i].type == XMMTYPE_TEMP,
+			"Only explicit high XMM temporaries are supported");
+		live |= 1u << i;
+		count++;
+	}
+	// Preserve all live high values even for cache-hit paths: clobbers are the
+	// union of the helper's common, correction and nested fallback paths.
+	const u32 stack_size = count ? SHADOW_STACK_SIZE + count * 16 : 0;
+	if (g_eeXMMAllocatorStats)
+		g_eeXMMAllocatorStats->helper_stack_spills += count;
+	if (stack_size)
+		xSUB(rsp, stack_size);
+	u32 offset = SHADOW_STACK_SIZE;
+	for (u32 i = iREGCNT_XMM; i < iREGCNT_XMM_EVEX; i++)
+	{
+		if (live & (1u << i))
+		{
+			xVMOVDQA32(ptr128[rsp + offset], xRegisterSSE(i));
+			offset += 16;
+		}
+	}
+	xCALL(target);
+	offset = SHADOW_STACK_SIZE;
+	for (u32 i = iREGCNT_XMM; i < iREGCNT_XMM_EVEX; i++)
+	{
+		if (live & (1u << i))
+		{
+			xVMOVDQA32(xRegisterSSE(i), ptr128[rsp + offset]);
+			offset += 16;
+		}
+	}
+	if (stack_size)
+		xADD(rsp, stack_size);
+}
+
+void _eeDeclareHighXMMClobber(u32 mask)
+{
+	for (u32 i = iREGCNT_XMM; i < iREGCNT_XMM_EVEX; i++)
+	{
+		pxAssertRel(!(mask & (1u << i)) || !xmmregs[i].inuse,
+			"Live high XMM value across inline fixed-scratch code");
+	}
 }
 
 // Search register "reg" of type "type" which is inuse
@@ -196,7 +299,7 @@ int _allocTempXMMreg(XMMSSEType type)
 // So basically it is mostly used to set the mode of the register, and load value if we need to read it
 int _checkXMMreg(int type, int reg, int mode)
 {
-	for (size_t i = 0; i < iREGCNT_XMM; i++)
+	for (size_t i = 0; i < iREGCNT_XMM_EVEX; i++)
 	{
 		if (xmmregs[i].inuse && (xmmregs[i].type == (type & 0xff)) && (xmmregs[i].reg == reg))
 		{
@@ -224,7 +327,7 @@ int _checkXMMreg(int type, int reg, int mode)
 
 bool _hasXMMreg(int type, int reg, int required_mode /*= 0*/)
 {
-	for (uint i = 0; i < iREGCNT_XMM; i++)
+	for (uint i = 0; i < iREGCNT_XMM_EVEX; i++)
 	{
 		if (xmmregs[i].inuse && xmmregs[i].type == type && xmmregs[i].reg == reg)
 		{
@@ -244,7 +347,7 @@ bool _hasXMMreg(int type, int reg, int required_mode /*= 0*/)
 // Note: FPU are always in XMM register
 int _allocFPtoXMMreg(int fpreg, int mode)
 {
-	for (size_t i = 0; i < iREGCNT_XMM; i++)
+	for (size_t i = 0; i < iREGCNT_XMM_EVEX; i++)
 	{
 		if (xmmregs[i].inuse == 0)
 			continue;
@@ -289,7 +392,7 @@ int _allocGPRtoXMMreg(int gprreg, int mode)
 	// is this already in a gpr?
 	const int hostx86reg = _checkX86reg(X86TYPE_GPR, gprreg, MODE_READ);
 
-	for (u32 i = 0; i < iREGCNT_XMM; i++)
+	for (u32 i = 0; i < iREGCNT_XMM_EVEX; i++)
 	{
 		if (!xmmregs[i].inuse || xmmregs[i].type != XMMTYPE_GPRREG || xmmregs[i].reg != gprreg)
 			continue;
@@ -336,6 +439,8 @@ int _allocGPRtoXMMreg(int gprreg, int mode)
 
 	if (mode & MODE_READ)
 	{
+		if (gprreg != 0 && g_eeXMMAllocatorStats)
+			g_eeXMMAllocatorStats->guest_reloads++;
 		if (gprreg == 0)
 		{
 			xPXOR(xRegisterSSE(xmmreg), xRegisterSSE(xmmreg));
@@ -404,7 +509,7 @@ int _allocGPRtoXMMreg(int gprreg, int mode)
 // (seriously boy you could have factorized it)
 int _allocFPACCtoXMMreg(int mode)
 {
-	for (size_t i = 0; i < iREGCNT_XMM; i++)
+	for (size_t i = 0; i < iREGCNT_XMM_EVEX; i++)
 	{
 		if (xmmregs[i].inuse == 0)
 			continue;
@@ -444,7 +549,8 @@ int _allocFPACCtoXMMreg(int mode)
 
 void _reallocateXMMreg(int xmmreg, int newtype, int newreg, int newmode, bool writeback /*= true*/)
 {
-	pxAssert(xmmreg >= 0 && xmmreg <= static_cast<int>(iREGCNT_XMM));
+	pxAssertRel(xmmreg < static_cast<int>(iREGCNT_XMM), "High XMM guest residency is not enabled");
+	pxAssert(xmmreg >= 0 && xmmreg < static_cast<int>(iREGCNT_XMM_EVEX));
 	_xmmregs& xr = xmmregs[xmmreg];
 	if (writeback)
 		_freeXMMreg(xmmreg);
@@ -494,7 +600,7 @@ void _addNeededPSXtoX86reg(int gprreg)
 
 void _addNeededGPRtoXMMreg(int gprreg)
 {
-	for (uint i = 0; i < iREGCNT_XMM; i++)
+	for (uint i = 0; i < iREGCNT_XMM_EVEX; i++)
 	{
 		if (xmmregs[i].inuse == 0)
 			continue;
@@ -513,7 +619,7 @@ void _addNeededGPRtoXMMreg(int gprreg)
 // You must use _clearNeededXMMregs to clear the flag
 void _addNeededFPtoXMMreg(int fpreg)
 {
-	for (uint i = 0; i < iREGCNT_XMM; i++)
+	for (uint i = 0; i < iREGCNT_XMM_EVEX; i++)
 	{
 		if (xmmregs[i].inuse == 0)
 			continue;
@@ -532,7 +638,7 @@ void _addNeededFPtoXMMreg(int fpreg)
 // You must use _clearNeededXMMregs to clear the flag
 void _addNeededFPACCtoXMMreg()
 {
-	for (uint i = 0; i < iREGCNT_XMM; i++)
+	for (uint i = 0; i < iREGCNT_XMM_EVEX; i++)
 	{
 		if (xmmregs[i].inuse == 0)
 			continue;
@@ -549,7 +655,7 @@ void _addNeededFPACCtoXMMreg()
 // Written register will set MODE_READ (aka data is valid, no need to load it)
 void _clearNeededXMMregs()
 {
-	for (uint i = 0; i < iREGCNT_XMM; i++)
+	for (uint i = 0; i < iREGCNT_XMM_EVEX; i++)
 	{
 
 		if (xmmregs[i].needed)
@@ -574,7 +680,7 @@ void _clearNeededXMMregs()
 // Flush is 3: drop register content
 void _deleteGPRtoX86reg(int reg, int flush)
 {
-	for (uint i = 0; i < iREGCNT_XMM; i++)
+	for (uint i = 0; i < iREGCNT_GPR; i++)
 	{
 		if (x86regs[i].inuse && x86regs[i].type == X86TYPE_GPR && x86regs[i].reg == reg)
 		{
@@ -651,7 +757,7 @@ void _deletePSXtoX86reg(int reg, int flush)
 
 void _deleteGPRtoXMMreg(int reg, int flush)
 {
-	for (uint i = 0; i < iREGCNT_XMM; i++)
+	for (uint i = 0; i < iREGCNT_XMM_EVEX; i++)
 	{
 
 		if (xmmregs[i].inuse && xmmregs[i].type == XMMTYPE_GPRREG && xmmregs[i].reg == reg)
@@ -695,7 +801,7 @@ void _deleteGPRtoXMMreg(int reg, int flush)
 // Flush is 2: drop register content
 void _deleteFPtoXMMreg(int reg, int flush)
 {
-	for (size_t i = 0; i < iREGCNT_XMM; i++)
+	for (size_t i = 0; i < iREGCNT_XMM_EVEX; i++)
 	{
 		if (xmmregs[i].inuse && xmmregs[i].type == XMMTYPE_FPREG && xmmregs[i].reg == reg)
 		{
@@ -726,6 +832,8 @@ void _deleteFPtoXMMreg(int reg, int flush)
 
 void _writebackXMMreg(int xmmreg)
 {
+	if (g_eeXMMAllocatorStats && xmmregs[xmmreg].type != XMMTYPE_TEMP)
+		g_eeXMMAllocatorStats->guest_writebacks++;
 	switch (xmmregs[xmmreg].type)
 	{
 		case XMMTYPE_VFREG:
@@ -762,7 +870,7 @@ void _writebackXMMreg(int xmmreg)
 // Step 2: clear 'inuse' field
 void _freeXMMreg(int xmmreg)
 {
-	pxAssert(static_cast<uint>(xmmreg) < iREGCNT_XMM);
+	pxAssert(static_cast<uint>(xmmreg) < iREGCNT_XMM_EVEX);
 	if (!xmmregs[xmmreg].inuse)
 		return;
 
@@ -778,7 +886,7 @@ void _freeXMMreg(int xmmreg)
 
 void _freeXMMregWithoutWriteback(int xmmreg)
 {
-	pxAssert(static_cast<uint>(xmmreg) < iREGCNT_XMM);
+	pxAssert(static_cast<uint>(xmmreg) < iREGCNT_XMM_EVEX);
 	if (!xmmregs[xmmreg].inuse)
 		return;
 
@@ -830,7 +938,7 @@ int _allocVFtoXMMreg(int vfreg, int mode)
 
 void _flushCOP2regs()
 {
-	for (uint i = 0; i < iREGCNT_XMM; i++)
+	for (uint i = 0; i < iREGCNT_XMM_EVEX; i++)
 	{
 		if (xmmregs[i].inuse && xmmregs[i].type == XMMTYPE_VFREG)
 		{
@@ -853,7 +961,7 @@ void _flushXMMreg(int xmmreg)
 // Flush in memory all inuse registers but registers are still valid
 void _flushXMMregs()
 {
-	for (u32 i = 0; i < iREGCNT_XMM; ++i)
+	for (u32 i = 0; i < iREGCNT_XMM_EVEX; ++i)
 		_flushXMMreg(i);
 }
 

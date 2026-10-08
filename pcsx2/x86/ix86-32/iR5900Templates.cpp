@@ -128,7 +128,7 @@ void eeRecompileCodeRC0(R5900FNPTR constcode, R5900FNPTR_INFO constscode, R5900F
 		_addNeededGPRtoX86reg(_Rd_);
 
 	// when it doesn't fit in an immediate, we'll flush it to a reg early to save code
-	u32 info = 0;
+	EERecompileInfo info;
 	int regs = -1, regt = -1;
 	if (xmminfo & XMMINFO_READS)
 	{
@@ -205,7 +205,7 @@ void eeRecompileCodeRC1(R5900FNPTR constcode, R5900FNPTR_INFO noconstcode, int x
 	const bool s_is_used = EEINST_USEDTEST(_Rs_);
 	const bool s_in_xmm = _hasXMMreg(XMMTYPE_GPRREG, _Rs_);
 
-	u32 info = 0;
+	EERecompileInfo info;
 	int regs = _checkX86reg(X86TYPE_GPR, _Rs_, MODE_READ);
 	if (regs < 0 && (s_is_used || s_in_xmm || _Rt_ == _Rs_ || (xmminfo & XMMINFO_FORCEREGS)))
 		regs = _allocX86reg(X86TYPE_GPR, _Rs_, MODE_READ);
@@ -244,7 +244,7 @@ void eeRecompileCodeRC2(R5900FNPTR constcode, R5900FNPTR_INFO noconstcode, int x
 	const bool t_is_used = EEINST_USEDTEST(_Rt_);
 	const bool t_in_xmm = _hasXMMreg(XMMTYPE_GPRREG, _Rt_);
 
-	u32 info = 0;
+	EERecompileInfo info;
 	int regt = _checkX86reg(X86TYPE_GPR, _Rt_, MODE_READ);
 	if (regt < 0 && (t_is_used || t_in_xmm || (_Rd_ == _Rt_) || (xmminfo & XMMINFO_FORCEREGT)))
 		regt = _allocX86reg(X86TYPE_GPR, _Rt_, MODE_READ);
@@ -264,9 +264,9 @@ void eeRecompileCodeRC2(R5900FNPTR constcode, R5900FNPTR_INFO noconstcode, int x
 }
 
 // EE XMM allocation code
-int eeRecompileCodeXMM(int xmminfo)
+EERecompileInfo eeRecompileCodeXMM(int xmminfo)
 {
-	int info = PROCESS_EE_XMM;
+	EERecompileInfo info(PROCESS_EE_XMM);
 
 	// add needed
 	if (xmminfo & (XMMINFO_READLO | XMMINFO_WRITELO))
@@ -345,7 +345,7 @@ int eeRecompileCodeXMM(int xmminfo)
 void eeFPURecompileCode(R5900FNPTR_INFO xmmcode, R5900FNPTR fpucode, int xmminfo)
 {
 	int mmregs = -1, mmregt = -1, mmregd = -1, mmregacc = -1;
-	int info = PROCESS_EE_XMM;
+	EERecompileInfo info(PROCESS_EE_XMM);
 
 	if (xmminfo & XMMINFO_READS)
 		_addNeededFPtoXMMreg(_Fs_);

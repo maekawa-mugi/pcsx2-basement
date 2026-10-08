@@ -7,6 +7,9 @@
 #include "IPU/IPUdma.h"
 #include "IPU/yuv2rgb.h"
 #include "IPU/IPU_MultiISA.h"
+#include "common/emitter/x86types.h"
+#include "x86/InterpreterAVX512.h"
+#include "cpuinfo.h"
 
 MULTI_ISA_UNSHARED_START
 
@@ -19,6 +22,14 @@ void ipu_dither_sse2(const macroblock_rgb32 &rgb32, macroblock_rgb16 &rgb16, int
 __ri void ipu_dither(const macroblock_rgb32 &rgb32, macroblock_rgb16 &rgb16, int dte)
 {
 #if defined(_M_X86)
+    if (x86Emitter::avx512.HasCore()) {
+        InterpreterAVX512::IPUDither(&rgb32, &rgb16, dte != 0);
+        return;
+    }
+    if (cpuinfo_has_x86_avx2()) {
+        InterpreterAVX2::IPUDither(&rgb32, &rgb16, dte != 0);
+        return;
+    }
     ipu_dither_sse2(rgb32, rgb16, dte);
 #else
     ipu_dither_reference(rgb32, rgb16, dte);

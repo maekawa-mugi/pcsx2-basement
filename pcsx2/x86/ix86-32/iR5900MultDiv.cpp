@@ -35,7 +35,7 @@ REC_FUNC_DEL(MADDU1, _Rd_);
 
 #else
 
-static void recWritebackHILO(int info, bool writed, bool upper)
+static void recWritebackHILO(EERecompileInfo info, bool writed, bool upper)
 {
 	// writeback low 32 bits, sign extended to 64 bits
 	bool eax_sign_extended = false;
@@ -189,7 +189,7 @@ static void recMULT_const()
 	recWritebackConstHILO(res, 1, 0);
 }
 
-static void recMULTsuper(int info, bool sign, bool upper, int process)
+static void recMULTsuper(EERecompileInfo info, bool sign, bool upper, int process)
 {
 	// TODO(Stenzek): Use MULX where available.
 	if (process & PROCESS_CONSTS)
@@ -225,17 +225,17 @@ static void recMULTsuper(int info, bool sign, bool upper, int process)
 	recWritebackHILO(info, 1, upper);
 }
 
-static void recMULT_(int info)
+static void recMULT_(EERecompileInfo info)
 {
 	recMULTsuper(info, true, false, 0);
 }
 
-static void recMULT_consts(int info)
+static void recMULT_consts(EERecompileInfo info)
 {
 	recMULTsuper(info, true, false, PROCESS_CONSTS);
 }
 
-static void recMULT_constt(int info)
+static void recMULT_constt(EERecompileInfo info)
 {
 	recMULTsuper(info, true, false, PROCESS_CONSTT);
 }
@@ -251,17 +251,17 @@ static void recMULTU_const()
 	recWritebackConstHILO(res, 1, 0);
 }
 
-static void recMULTU_(int info)
+static void recMULTU_(EERecompileInfo info)
 {
 	recMULTsuper(info, false, false, 0);
 }
 
-static void recMULTU_consts(int info)
+static void recMULTU_consts(EERecompileInfo info)
 {
 	recMULTsuper(info, false, false, PROCESS_CONSTS);
 }
 
-static void recMULTU_constt(int info)
+static void recMULTU_constt(EERecompileInfo info)
 {
 	recMULTsuper(info, false, false, PROCESS_CONSTT);
 }
@@ -277,17 +277,17 @@ static void recMULT1_const()
 	recWritebackConstHILO((u64)res, 1, 1);
 }
 
-static void recMULT1_(int info)
+static void recMULT1_(EERecompileInfo info)
 {
 	recMULTsuper(info, true, true, 0);
 }
 
-static void recMULT1_consts(int info)
+static void recMULT1_consts(EERecompileInfo info)
 {
 	recMULTsuper(info, true, true, PROCESS_CONSTS);
 }
 
-static void recMULT1_constt(int info)
+static void recMULT1_constt(EERecompileInfo info)
 {
 	recMULTsuper(info, true, true, PROCESS_CONSTT);
 }
@@ -302,17 +302,17 @@ static void recMULTU1_const()
 	recWritebackConstHILO(res, 1, 1);
 }
 
-static void recMULTU1_(int info)
+static void recMULTU1_(EERecompileInfo info)
 {
 	recMULTsuper(info, false, true, 0);
 }
 
-static void recMULTU1_consts(int info)
+static void recMULTU1_consts(EERecompileInfo info)
 {
 	recMULTsuper(info, false, true, PROCESS_CONSTS);
 }
 
-static void recMULTU1_constt(int info)
+static void recMULTU1_constt(EERecompileInfo info)
 {
 	recMULTsuper(info, false, true, PROCESS_CONSTT);
 }
@@ -347,7 +347,7 @@ static void recDIV_const()
 	recDIVconst(0);
 }
 
-static void recDIVsuper(int info, bool sign, bool upper, int process)
+static void recDIVsuper(EERecompileInfo info, bool sign, bool upper, int process)
 {
 	const xRegister32 divisor((info & PROCESS_EE_T) ? EEREC_T : ecx.GetId());
 	if (!(info & PROCESS_EE_T))
@@ -415,17 +415,17 @@ static void recDIVsuper(int info, bool sign, bool upper, int process)
 	recWritebackHILO(info, false, upper);
 }
 
-static void recDIV_(int info)
+static void recDIV_(EERecompileInfo info)
 {
 	recDIVsuper(info, 1, 0, 0);
 }
 
-static void recDIV_consts(int info)
+static void recDIV_consts(EERecompileInfo info)
 {
 	recDIVsuper(info, 1, 0, PROCESS_CONSTS);
 }
 
-static void recDIV_constt(int info)
+static void recDIV_constt(EERecompileInfo info)
 {
 	recDIVsuper(info, 1, 0, PROCESS_CONSTT);
 }
@@ -456,17 +456,17 @@ static void recDIVU_const()
 	recDIVUconst(0);
 }
 
-static void recDIVU_(int info)
+static void recDIVU_(EERecompileInfo info)
 {
 	recDIVsuper(info, false, false, 0);
 }
 
-static void recDIVU_consts(int info)
+static void recDIVU_consts(EERecompileInfo info)
 {
 	recDIVsuper(info, false, false, PROCESS_CONSTS);
 }
 
-static void recDIVU_constt(int info)
+static void recDIVU_constt(EERecompileInfo info)
 {
 	recDIVsuper(info, false, false, PROCESS_CONSTT);
 }
@@ -478,17 +478,17 @@ static void recDIV1_const()
 	recDIVconst(1);
 }
 
-static void recDIV1_(int info)
+static void recDIV1_(EERecompileInfo info)
 {
 	recDIVsuper(info, true, true, 0);
 }
 
-static void recDIV1_consts(int info)
+static void recDIV1_consts(EERecompileInfo info)
 {
 	recDIVsuper(info, true, true, PROCESS_CONSTS);
 }
 
-static void recDIV1_constt(int info)
+static void recDIV1_constt(EERecompileInfo info)
 {
 	recDIVsuper(info, true, true, PROCESS_CONSTT);
 }
@@ -500,17 +500,17 @@ static void recDIVU1_const()
 	recDIVUconst(1);
 }
 
-static void recDIVU1_(int info)
+static void recDIVU1_(EERecompileInfo info)
 {
 	recDIVsuper(info, false, true, 0);
 }
 
-static void recDIVU1_consts(int info)
+static void recDIVU1_consts(EERecompileInfo info)
 {
 	recDIVsuper(info, false, true, PROCESS_CONSTS);
 }
 
-static void recDIVU1_constt(int info)
+static void recDIVU1_constt(EERecompileInfo info)
 {
 	recDIVsuper(info, false, true, PROCESS_CONSTT);
 }

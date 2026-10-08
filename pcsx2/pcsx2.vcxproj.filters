@@ -620,6 +620,9 @@
     <ClCompile Include="MMI.cpp">
       <Filter>System\Ps2\EmotionEngine\EE\Interpreter</Filter>
     </ClCompile>
+    <ClCompile Include="x86\InterpreterAVX512.cpp">
+      <Filter>System\Ps2\EmotionEngine\EE\Interpreter</Filter>
+    </ClCompile>
     <ClCompile Include="R5900.cpp">
       <Filter>System\Ps2\EmotionEngine\EE\Interpreter</Filter>
     </ClCompile>
@@ -1687,6 +1690,12 @@
     </ClInclude>
     <ClInclude Include="x86\microVU_SoftFloatTables.h">
       <Filter>System\Ps2\EmotionEngine\VU\Dynarec\microVU</Filter>
+    </ClInclude>
+    <ClInclude Include="x86\MMIAVX512.inl">
+      <Filter>System\Ps2\EmotionEngine\EE\Dynarec</Filter>
+    </ClInclude>
+    <ClInclude Include="x86\InterpreterAVX512.h">
+      <Filter>System\Ps2\EmotionEngine\EE\Interpreter</Filter>
     </ClInclude>
     <ClInclude Include="x86\microVU_UpperSoft.inl">
       <Filter>System\Ps2\EmotionEngine\VU\Dynarec\microVU</Filter>

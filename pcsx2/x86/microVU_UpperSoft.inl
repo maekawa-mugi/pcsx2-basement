@@ -23,6 +23,44 @@ static constexpr sptr VU_SOFT_RESULT_VALUE_OFFSET = offsetof(VuSoftFmacJitResult
 
 
 
+// Opt-in AVX-512 planning profile. Only placed where EFLAGS are dead.
+static void mVUemitSoftProfileCount(AVX512Profile::SoftCounter counter)
+{
+	if (AVX512Profile::Enabled())
+		xADD(ptr64[AVX512Profile::SoftCounterPtr(counter)], 1);
+}
+
+// Binds fallback edges. While profiling, each edge first counts its reason and
+// then rejoins; otherwise the edges bind to the same place as before.
+class mVUSoftFailureJoin
+{
+public:
+	template <typename Edge>
+	void Bind(Edge& edge, AVX512Profile::SoftCounter counter)
+	{
+		edge.SetTarget();
+		if (AVX512Profile::Enabled())
+		{
+			mVUemitSoftProfileCount(counter);
+			m_joins.emplace_back();
+		}
+	}
+	template <typename Edge>
+	void Bind(std::optional<Edge>& edge, AVX512Profile::SoftCounter counter)
+	{
+		if (edge.has_value())
+			Bind(*edge, counter);
+	}
+	~mVUSoftFailureJoin()
+	{
+		for (xForwardJump32& join : m_joins)
+			join.SetTarget();
+	}
+
+private:
+	std::deque<xForwardJump32> m_joins;
+};
+
 static VuUpperFmacSoftOperandSource mVUselectUpperSoftOperandSource(microVU& mVU, int opCase)
 {
 	if (opCase == 3)
@@ -189,9 +227,11 @@ static void mVUemitUpperInlineExtractOperand(const x32& dst, const xmm& operand,
 
 static void mVUemitUpperInlinePrepareOperand(const xmm& prepared, const xmm& operand, int variant)
 {
-	xMOVAPS(prepared, operand);
+	// Broadcast straight from the source (non-destructive PSHUFD under AVX) instead of MOVAPS + PSHUFD.
 	if (variant != 0)
-		xPSHUF.D(prepared, prepared, variant >= 3 ? (variant - 3) * 0x55 : 0);
+		xPSHUF.D(prepared, operand, variant >= 3 ? (variant - 3) * 0x55 : 0);
+	else
+		xMOVAPS(prepared, operand);
 }
 
 static void mVUemitUpperInlineCommitResult(microVU& mVU, const xmm& destination, const xmm& result)
@@ -420,6 +460,44 @@ static void mVUemitUpperInlineAddSubExactLane(microVU& mVU, int result_offset, i
 	}
 }
 
+// Pretruncate the smaller add/sub operand in place, before the host add.
+// On entry diff holds the per-lane integer exponent difference a - b; on
+// exit a and b are masked and diff, t0, t1 are clobbered.
+//
+// Rewrite of the add/sub mask from LRPS2 (libretro/ps2): 09b95ddf9 and
+// 91406b3be (mVUmaskAddSubFusedAVX512). The keep mask ~0 << (|d|-1) is built
+// directly with VPSLLVD; counts of 32 and above, including the -1 of equal
+// exponents, shift to zero. Folding |d| > 24 into the shifted value makes the
+// mask zero there, so the operand flushes to +0 as the old
+// SRLV/SLLV-by-32 did. The larger operand is passed through by OR-ing the
+// side select into the mask instead of swapping the operands with BLENDV,
+// which leaves no BLENDV or PMAXSD in the stage. Needs proper testing on the
+// AVX2-only fallback.
+static void mVUemitUpperSoftAddSubPretruncate(const xmm& a, const xmm& b, const xmm& diff,
+	const xmm& t0, const xmm& t1)
+{
+	xPABS.D(t0, diff);
+	xPSUB.D(t0, ptr128[s_vu_soft_one]);          // s = |d| - 1
+	xMOVAPS(t1, ptr128[s_vu_soft_exp_24]);
+	xPCMP.GTD(t1, t0);                           // s <= 23, i.e. |d| <= 24
+	xVPSLLVD(t1, t1, t0);                        // M = keep & ~big
+	xPCMP.GTD(t0, diff, ptr128[s_vu_soft_all_ones]); // d >= 0: a is not the smaller side
+	if (x86Emitter::avx512.HasCore())
+	{
+		xVPTERNLOGD(a, t1, t0, 0xE0);            // a &= M | ge0
+		xPCMP.GTD(diff, ptr128[s_vu_soft_zero]); // d > 0: b is the smaller side
+		xVPTERNLOGD(b, t1, diff, 0xD0);          // b &= M | ~pos
+	}
+	else
+	{
+		xPOR(t0, t1);
+		xPAND(a, t0);
+		xPCMP.GTD(diff, ptr128[s_vu_soft_zero]);
+		xPANDN(t1, t1, diff);                    // pos & ~M
+		xPANDN(b, t1, b);
+	}
+}
+
 static void mVUemitUpperInlineAddSubExactResult(microVU& mVU, VuUpperFmacSoftDescriptor op)
 {
 	{
@@ -463,12 +541,13 @@ static void mVUemitUpperInlineAddSubExactResult(microVU& mVU, VuUpperFmacSoftDes
 	                                        _XYZW_SS && (mFLAG.doFlag || sFLAG.doFlag);
 	const bool use_stackless_add = can_use_vector_native && !switch_mxcsr &&
 	                               ((!mFLAG.doFlag && !sFLAG.doFlag) || use_stackless_scalar_flags);
+	const bool use_avx512_masks = use_packed_native && x86Emitter::avx512.HasCore();
 	const bool use_vector_temporaries = use_packed_native || use_stackless_add;
 	const int scratch_base = use_packed_native ? VU_SOFT_ADD_REPAIR_CONTEXT_SIZE :
 	                                             ((sizeof(VuSoftFmacJitResult) + 15) & ~15);
 	const int packed_destination = scratch_base;
 	const int packed_shift = packed_destination + 16;
-	const int scratch_end = packed_shift + 16;
+	const int scratch_end = packed_shift + (use_avx512_masks ? 0 : 16);
 	const int stack_size = (scratch_end + 15) & ~15;
 	xmm native_source, native_operand, work, shift_mask, native_guard;
 	if (use_vector_temporaries)
@@ -531,18 +610,29 @@ static void mVUemitUpperInlineAddSubExactResult(microVU& mVU, VuUpperFmacSoftDes
 		{
 			xPCMP.EQD(native_guard, work, ptr128[s_vu_soft_exp_field]);
 			xMOVMSKPS(eax, native_guard);
+			const bool stackless_ternlog = x86Emitter::avx512.HasCore();
 			xPCMP.EQD(native_guard, work, ptr128[s_vu_soft_zero]);
-			xPAND(native_guard, ptr128[s_vu_soft_abs]);
-			xPXOR(native_guard, ptr128[s_vu_soft_all_ones]);
-			xPAND(native_source, native_guard);
+			if (stackless_ternlog)
+				xVPTERNLOGD(native_source, native_guard, ptr128[s_vu_soft_abs], 0x70); // source & ~(zero & abs); needs proper testing
+			else
+			{
+				xPAND(native_guard, ptr128[s_vu_soft_abs]);
+				xPXOR(native_guard, ptr128[s_vu_soft_all_ones]);
+				xPAND(native_source, native_guard);
+			}
 
 			xPCMP.EQD(native_guard, shift_mask, ptr128[s_vu_soft_exp_field]);
 			xMOVMSKPS(edx, native_guard);
 			xOR(eax, edx);
 			xPCMP.EQD(native_guard, shift_mask, ptr128[s_vu_soft_zero]);
-			xPAND(native_guard, ptr128[s_vu_soft_abs]);
-			xPXOR(native_guard, ptr128[s_vu_soft_all_ones]);
-			xPAND(native_operand, native_guard);
+			if (stackless_ternlog)
+				xVPTERNLOGD(native_operand, native_guard, ptr128[s_vu_soft_abs], 0x70);
+			else
+			{
+				xPAND(native_guard, ptr128[s_vu_soft_abs]);
+				xPXOR(native_guard, ptr128[s_vu_soft_all_ones]);
+				xPAND(native_operand, native_guard);
+			}
 			xTEST(eax, eax);
 			stackless_add_input_failed.emplace(Jcc_NotZero);
 		}
@@ -550,17 +640,7 @@ static void mVUemitUpperInlineAddSubExactResult(microVU& mVU, VuUpperFmacSoftDes
 		// Pretruncate the smaller operand exactly as the packed flag-producing path.
 		xPSUB.D(work, shift_mask);
 		xPSRA.D(work, 23);
-		xPABS.D(shift_mask, work);
-		xPCMP.GTD(native_guard, shift_mask, ptr128[s_vu_soft_exp_24]);
-		xPBLEND.VB(shift_mask, shift_mask, ptr128[s_vu_soft_exp_33], native_guard);
-		xPSUB.D(shift_mask, ptr128[s_vu_soft_one]);
-		xPMAX.SD(shift_mask, ptr128[s_vu_soft_zero]);
-		xPCMP.GTD(native_guard, work, ptr128[s_vu_soft_zero]);
-		xPBLEND.VB(work, native_operand, native_source, native_guard);
-		xPBLEND.VB(native_operand, native_source, native_operand, native_guard);
-		xVPSRLVD(native_operand, native_operand, shift_mask);
-		xVPSLLVD(native_operand, native_operand, shift_mask);
-		xMOVAPS(native_source, work);
+		mVUemitUpperSoftAddSubPretruncate(native_source, native_operand, work, shift_mask, native_guard);
 		if (use_stackless_scalar_flags)
 		{
 			xMOVAPS(shift_mask, native_operand);
@@ -595,10 +675,7 @@ static void mVUemitUpperInlineAddSubExactResult(microVU& mVU, VuUpperFmacSoftDes
 		}
 
 		if (_XYZW_SS)
-		{
-			xMOVD(eax, native_source);
-			xPINSR.D(destination, eax, 0);
-		}
+			xMOVSS(destination, native_source); // lane 0 only, upper lanes of destination kept
 		else if (_X_Y_Z_W == 0xf)
 			xMOVAPS(destination, native_source);
 		else
@@ -642,6 +719,7 @@ static void mVUemitUpperInlineAddSubExactResult(microVU& mVU, VuUpperFmacSoftDes
 			mVUemitSoftFlagWriteback(mVU, scalar_result_offset, op);
 			mVUemitUpperSoftStackFree(scalar_stack_size);
 		}
+		mVUemitSoftProfileCount(AVX512Profile::VuAddSubStacklessDone);
 		stackless_add_finished.emplace();
 		if (stackless_add_zero_input_failed.has_value())
 			stackless_add_zero_input_failed->SetTarget();
@@ -651,6 +729,10 @@ static void mVUemitUpperInlineAddSubExactResult(microVU& mVU, VuUpperFmacSoftDes
 			stackless_add_result_failed->SetTarget();
 	}
 
+	mVUemitSoftProfileCount(use_stackless_add ? AVX512Profile::VuAddSubStacklessFallback :
+	                                            AVX512Profile::VuAddSubFlagPath);
+	if (!use_stackless_add && switch_mxcsr)
+		mVUemitSoftProfileCount(AVX512Profile::VuAddSubMxcsrPath);
 	mVUemitUpperSoftStackAlloc(stack_size);
 	xMOV(resultPtr(offsetof(VuSoftFmacJitResult, mac_flags)), 0);
 	xMOV(resultPtr(offsetof(VuSoftFmacJitResult, status_flags)), 0);
@@ -684,14 +766,21 @@ static void mVUemitUpperInlineAddSubExactResult(microVU& mVU, VuUpperFmacSoftDes
 			xBLEND.PS(native_operand, ptr128[s_vu_soft_float_one], inactive_mask);
 		}
 
+		std::optional<xForwardJump32> use_repair_from_result;
+
 		xPSRL.D(work, native_source, 23);
 		xPAND(work, ptr128[s_vu_soft_exp_mask]);
 		xPCMP.EQD(native_guard, work, ptr128[s_vu_soft_exp_255]);
 		xMOVMSKPS(eax, native_guard);
 		xPCMP.EQD(native_guard, work, ptr128[s_vu_soft_zero]);
-		xPAND(native_guard, ptr128[s_vu_soft_abs]);
-		xPXOR(native_guard, ptr128[s_vu_soft_all_ones]);
-		xPAND(native_source, native_guard);
+		if (use_avx512_masks)
+			xVPTERNLOGD(native_source, native_guard, ptr128[s_vu_soft_abs], 0x70); // native_source & ~(zero & abs)
+		else
+		{
+			xPAND(native_guard, ptr128[s_vu_soft_abs]);
+			xPXOR(native_guard, ptr128[s_vu_soft_all_ones]);
+			xPAND(native_source, native_guard);
+		}
 
 		xPSRL.D(shift_mask, native_operand, 23);
 		xPAND(shift_mask, ptr128[s_vu_soft_exp_mask]);
@@ -699,37 +788,45 @@ static void mVUemitUpperInlineAddSubExactResult(microVU& mVU, VuUpperFmacSoftDes
 		xMOVMSKPS(edx, native_guard);
 		xOR(eax, edx);
 		xPCMP.EQD(native_guard, shift_mask, ptr128[s_vu_soft_zero]);
-		xPAND(native_guard, ptr128[s_vu_soft_abs]);
-		xPXOR(native_guard, ptr128[s_vu_soft_all_ones]);
-		xPAND(native_operand, native_guard);
+		if (use_avx512_masks)
+			xVPTERNLOGD(native_operand, native_guard, ptr128[s_vu_soft_abs], 0x70); // native_operand & ~(zero & abs)
+		else
+		{
+			xPAND(native_guard, ptr128[s_vu_soft_abs]);
+			xPXOR(native_guard, ptr128[s_vu_soft_all_ones]);
+			xPAND(native_operand, native_guard);
+		}
 
-		xPSUB.D(work, shift_mask);
-		xPABS.D(shift_mask, work);
-		xPCMP.GTD(native_guard, shift_mask, ptr128[s_vu_soft_exp_24]);
-		xPBLEND.VB(shift_mask, shift_mask, ptr128[s_vu_soft_exp_33], native_guard);
 		xAND(eax, s_vu_soft_lane_mask[_X_Y_Z_W]);
 		xForwardJNZ32 use_repair_from_input;
 
-		xPSUB.D(shift_mask, ptr128[s_vu_soft_one]);
-		xPMAX.SD(shift_mask, ptr128[s_vu_soft_zero]);
-		xPCMP.GTD(native_guard, work, ptr128[s_vu_soft_zero]);
-		xPBLEND.VB(work, native_operand, native_source, native_guard);
-		xPBLEND.VB(native_operand, native_source, native_operand, native_guard);
-		xVPSRLVD(native_operand, native_operand, shift_mask);
-		xVPSLLVD(native_operand, native_operand, shift_mask);
-		xMOVAPS(native_source, work);
+		xPSUB.D(work, shift_mask);
+		mVUemitUpperSoftAddSubPretruncate(native_source, native_operand, work, shift_mask, native_guard);
 
 		// FTZ can turn a true PS2 underflow into host zero. Only exact
 		// cancellation and two PS2-zero operands may accept a zero result.
 		xPXOR(native_guard, native_operand, ptr128[s_vu_soft_sign]);
-		xPCMP.EQD(native_guard, native_source);
+		if (use_avx512_masks)
+			xVPCMPD(k1, native_guard, native_source, 0);
+		else
+			xPCMP.EQD(native_guard, native_source);
 		xPAND(work, native_source, ptr128[s_vu_soft_abs]);
-		xPCMP.EQD(work, ptr128[s_vu_soft_zero]);
 		xPAND(shift_mask, native_operand, ptr128[s_vu_soft_abs]);
-		xPCMP.EQD(shift_mask, ptr128[s_vu_soft_zero]);
-		xPAND(work, shift_mask);
-		xPOR(native_guard, work);
-		xMOVAPS(ptr128[rsp + packed_shift], native_guard);
+		if (use_avx512_masks)
+		{
+			xVPCMPD(k2, work, ptr128[s_vu_soft_zero], 0);
+			xVPCMPD(k3, shift_mask, ptr128[s_vu_soft_zero], 0);
+			xKANDW(k2, k2, k3);
+			xKORW(k1, k1, k2);
+		}
+		else
+		{
+			xPCMP.EQD(work, ptr128[s_vu_soft_zero]);
+			xPCMP.EQD(shift_mask, ptr128[s_vu_soft_zero]);
+			xPAND(work, shift_mask);
+			xPOR(native_guard, work);
+			xMOVAPS(ptr128[rsp + packed_shift], native_guard);
+		}
 
 		if (switch_mxcsr)
 			xLDMXCSR(ptr32[&s_vu_soft_truncate_mxcsr]);
@@ -738,15 +835,27 @@ static void mVUemitUpperInlineAddSubExactResult(microVU& mVU, VuUpperFmacSoftDes
 			xLDMXCSR(ptr32[mVU.index == 0 ? &EmuConfig.Cpu.VU0FPCR.bitmask : &EmuConfig.Cpu.VU1FPCR.bitmask]);
 
 		xPAND(native_operand, native_source, ptr128[s_vu_soft_abs]);
-		xPCMP.GTD(shift_mask, native_operand, ptr128[s_vu_soft_max_safe]);
-		xMOVAPS(native_guard, ptr128[rsp + packed_shift]);
-		xMOVAPS(work, ptr128[s_vu_soft_hidden_bit]);
-		xPCMP.GTD(work, native_operand);
-		xPANDN(native_guard, work);
-		xPOR(shift_mask, native_guard);
-		xMOVMSKPS(eax, shift_mask);
-		xAND(eax, s_vu_soft_lane_mask[_X_Y_Z_W]);
-		xForwardJNZ32 use_repair_from_result;
+		if (use_avx512_masks)
+		{
+			xVPCMPD(k2, native_operand, ptr128[s_vu_soft_max_safe], 6);
+			xVPCMPD(k3, native_operand, ptr128[s_vu_soft_hidden_bit], 1);
+			xKANDNW(k3, k1, k3);
+			xKORW(k2, k2, k3);
+			xKTESTW(k2, k2);
+			use_repair_from_result.emplace(Jcc_NotZero);
+		}
+		else
+		{
+			xPCMP.GTD(shift_mask, native_operand, ptr128[s_vu_soft_max_safe]);
+			xMOVAPS(native_guard, ptr128[rsp + packed_shift]);
+			xMOVAPS(work, ptr128[s_vu_soft_hidden_bit]);
+			xPCMP.GTD(work, native_operand);
+			xPANDN(native_guard, work);
+			xPOR(shift_mask, native_guard);
+			xMOVMSKPS(eax, shift_mask);
+			xAND(eax, s_vu_soft_lane_mask[_X_Y_Z_W]);
+			use_repair_from_result.emplace(Jcc_NotZero);
+		}
 
 		if (_X_Y_Z_W == 0xf)
 		{
@@ -779,8 +888,19 @@ static void mVUemitUpperInlineAddSubExactResult(microVU& mVU, VuUpperFmacSoftDes
 		xOR(edx, eax);
 		xMOV(resultPtr(offsetof(VuSoftFmacJitResult, status_flags)), edx);
 		xForwardJump32 arithmetic_ready;
+		std::optional<xForwardJump32> result_repair_mask_ready;
+		if (use_repair_from_result.has_value())
+		{
+			use_repair_from_result->SetTarget();
+			if (use_avx512_masks)
+			{
+				xKMOVW(eax, k2);
+				result_repair_mask_ready.emplace();
+			}
+		}
 		use_repair_from_input.SetTarget();
-		use_repair_from_result.SetTarget();
+		if (result_repair_mask_ready.has_value())
+			result_repair_mask_ready->SetTarget();
 		// Both guarded edges leave an x86-lane bad mask in EAX. Convert it to
 		// the architectural XYZW bit order consumed by the shared repair helper.
 		xMOV64(rdx, reinterpret_cast<uptr>(s_vu_soft_lane_mask));
@@ -796,6 +916,7 @@ static void mVUemitUpperInlineAddSubExactResult(microVU& mVU, VuUpperFmacSoftDes
 			xPXOR(work, ptr128[s_vu_soft_sign]);
 		xMOVAPS(ptr128[rsp + VU_SOFT_ADD_REPAIR_OPERAND], work);
 		xLEA(rdx, ptr[rsp + result_offset]);
+		mVUemitSoftProfileCount(AVX512Profile::VuAddSubRepair);
 		xCALL(mVU.softAddLaneRepair);
 		xMOVAPS(native_source, ptr128[rsp + VU_SOFT_RESULT_VALUE_OFFSET]);
 		if (_X_Y_Z_W == 0xf)
@@ -835,6 +956,7 @@ static void mVUemitUpperInlineAddSubExactResult(microVU& mVU, VuUpperFmacSoftDes
 
 static void mVUGenerateSoftMulExactKernel(microVU& mVU)
 {
+	const bool use_avx512_scalar_booth = x86Emitter::avx512.HasCore();
 	constexpr sptr fs_raw = 0;
 	constexpr int operand_raw = fs_raw + 4;
 	constexpr int product_raw = operand_raw + 4;
@@ -846,7 +968,8 @@ static void mVUGenerateSoftMulExactKernel(microVU& mVU)
 	constexpr int booth_negate = full_hi + 4;
 	constexpr int booth_data = booth_negate + 8 * 4;
 	constexpr int add3_values = booth_data + 8 * 4;
-	constexpr int stack_size = (add3_values + 12 * 4 + 15) & ~15;
+	constexpr int legacy_stack_size = (add3_values + 12 * 4 + 15) & ~15;
+	const int stack_size = use_avx512_scalar_booth ? ((full_hi + 4 + 15) & ~15) : legacy_stack_size;
 	constexpr int product_underflow = 1;
 	constexpr int product_overflow = 2;
 	mVU.softMulExact = xGetAlignedCallTarget();
@@ -913,74 +1036,80 @@ static void mVUGenerateSoftMulExactKernel(microVU& mVU)
 	xSBB(ptr32[rsp + full_hi], 0);
 	xForwardJump32 product_first_one_correction_ready;
 	product_requires_regular_booth_correction.SetTarget();
-
-	xMOV64(r11, reinterpret_cast<uptr>(X86SoftFloatEmitter::ScalarBoothDecode));
-	for (int bit = 0; bit < 8; bit++)
+	if (use_avx512_scalar_booth)
 	{
-		const u32 shift = bit * 2;
-		xMOV(edx, ptr32[rsp + mantissa_a]);
-		if (shift != 0)
-			xSHL(edx, shift);
-		xMOV(eax, r9d);
-		if (bit == 0)
-			xSHL(eax, 1);
-		else
-			xSHR(eax, shift - 1);
-		xAND(eax, 7);
-		xMOV(ecx, ptr32[xAddressVoid(r11, rax, 4)]);
-		xMOV(r10d, ecx);
-		xAND(r10d, 3);
-		xMUL(edx, r10d);
-		xSHR(ecx, 8);
-		if (shift != 0)
-			xSHL(ecx, shift);
-		xMOV(ptr32[rsp + booth_negate + bit * 4], ecx);
-		xNEG(ecx);
-		xXOR(edx, ecx);
-		xMOV(ptr32[rsp + booth_data + bit * 4], edx);
+		X86SoftFloatEmitter::EmitScalarBoothCorrectionEVEX(mantissa_a, full_lo, full_hi);
 	}
+	else
+	{
+		xMOV64(r11, reinterpret_cast<uptr>(X86SoftFloatEmitter::ScalarBoothDecode));
+		for (int bit = 0; bit < 8; bit++)
+		{
+			const u32 shift = bit * 2;
+			xMOV(edx, ptr32[rsp + mantissa_a]);
+			if (shift != 0)
+				xSHL(edx, shift);
+			xMOV(eax, r9d);
+			if (bit == 0)
+				xSHL(eax, 1);
+			else
+				xSHR(eax, shift - 1);
+			xAND(eax, 7);
+			xMOV(ecx, ptr32[xAddressVoid(r11, rax, 4)]);
+			xMOV(r10d, ecx);
+			xAND(r10d, 3);
+			xMUL(edx, r10d);
+			xSHR(ecx, 8);
+			if (shift != 0)
+				xSHL(ecx, shift);
+			xMOV(ptr32[rsp + booth_negate + bit * 4], ecx);
+			xNEG(ecx);
+			xXOR(edx, ecx);
+			xMOV(ptr32[rsp + booth_data + bit * 4], edx);
+		}
 
-	constexpr int t0_lo = add3_values + 0 * 4;
-	constexpr int t0_hi = add3_values + 1 * 4;
-	constexpr int t1_lo = add3_values + 2 * 4;
-	constexpr int t1_hi = add3_values + 3 * 4;
-	constexpr int t2_lo = add3_values + 4 * 4;
-	constexpr int t2_hi = add3_values + 5 * 4;
-	constexpr int t3_lo = add3_values + 6 * 4;
-	constexpr int t3_hi = add3_values + 7 * 4;
-	constexpr int t4_lo = add3_values + 8 * 4;
-	constexpr int t4_hi = add3_values + 9 * 4;
-	constexpr int t5_lo = add3_values + 10 * 4;
-	constexpr int t5_hi = add3_values + 11 * 4;
+		constexpr int t0_lo = add3_values + 0 * 4;
+		constexpr int t0_hi = add3_values + 1 * 4;
+		constexpr int t1_lo = add3_values + 2 * 4;
+		constexpr int t1_hi = add3_values + 3 * 4;
+		constexpr int t2_lo = add3_values + 4 * 4;
+		constexpr int t2_hi = add3_values + 5 * 4;
+		constexpr int t3_lo = add3_values + 6 * 4;
+		constexpr int t3_hi = add3_values + 7 * 4;
+		constexpr int t4_lo = add3_values + 8 * 4;
+		constexpr int t4_hi = add3_values + 9 * 4;
+		constexpr int t5_lo = add3_values + 10 * 4;
+		constexpr int t5_hi = add3_values + 11 * 4;
 
-	X86SoftFloatEmitter::EmitCarrySaveAdd(booth_data + 1 * 4, booth_data + 2 * 4, booth_data + 3 * 4, t0_lo, t0_hi);
-	xAND(ptr32[rsp + booth_data + 4 * 4], ~0x7ffu);
-	xMOV(eax, ptr32[rsp + booth_data + 5 * 4]);
-	xMOV(ptr32[rsp + mantissa_a], eax);
-	xAND(ptr32[rsp + booth_data + 5 * 4], ~0xfffu);
-	X86SoftFloatEmitter::EmitCarrySaveAdd(booth_data + 4 * 4, booth_data + 5 * 4, booth_data + 6 * 4, t1_lo, t1_hi);
-	xMOV(eax, ptr32[rsp + mantissa_a]);
-	xAND(eax, 0x800);
-	xOR(eax, ptr32[rsp + booth_negate + 6 * 4]);
-	xOR(ptr32[rsp + t1_hi], eax);
-	xMOV(eax, ptr32[rsp + mantissa_a]);
-	xAND(eax, 0x400);
-	xADD(eax, ptr32[rsp + booth_negate + 5 * 4]);
-	xOR(ptr32[rsp + booth_data + 7 * 4], eax);
-	X86SoftFloatEmitter::EmitCarrySaveAdd(booth_data + 0 * 4, t0_lo, t0_hi, t2_lo, t2_hi);
-	X86SoftFloatEmitter::EmitCarrySaveAdd(booth_data + 7 * 4, t1_lo, t1_hi, t3_lo, t3_hi);
-	X86SoftFloatEmitter::EmitCarrySaveAdd(t2_hi, t3_lo, t3_hi, t4_lo, t4_hi);
-	X86SoftFloatEmitter::EmitCarrySaveAdd(t2_lo, t4_lo, t4_hi, t5_lo, t5_hi);
-	xMOV(eax, ptr32[rsp + booth_negate + 7 * 4]);
-	xADD(ptr32[rsp + t5_hi], eax);
-	xAND(ptr32[rsp + t5_lo], ~0x7fffu);
-	xAND(ptr32[rsp + t5_hi], ~0x7fffu);
-	xMOV(eax, ptr32[rsp + t5_lo]);
-	xADD(eax, ptr32[rsp + t5_hi]);
-	xXOR(eax, ptr32[rsp + full_lo]);
-	xAND(eax, 0x8000);
-	xSUB(ptr32[rsp + full_lo], eax);
-	xSBB(ptr32[rsp + full_hi], 0);
+		X86SoftFloatEmitter::EmitCarrySaveAdd(booth_data + 1 * 4, booth_data + 2 * 4, booth_data + 3 * 4, t0_lo, t0_hi);
+		xAND(ptr32[rsp + booth_data + 4 * 4], ~0x7ffu);
+		xMOV(eax, ptr32[rsp + booth_data + 5 * 4]);
+		xMOV(ptr32[rsp + mantissa_a], eax);
+		xAND(ptr32[rsp + booth_data + 5 * 4], ~0xfffu);
+		X86SoftFloatEmitter::EmitCarrySaveAdd(booth_data + 4 * 4, booth_data + 5 * 4, booth_data + 6 * 4, t1_lo, t1_hi);
+		xMOV(eax, ptr32[rsp + mantissa_a]);
+		xAND(eax, 0x800);
+		xOR(eax, ptr32[rsp + booth_negate + 6 * 4]);
+		xOR(ptr32[rsp + t1_hi], eax);
+		xMOV(eax, ptr32[rsp + mantissa_a]);
+		xAND(eax, 0x400);
+		xADD(eax, ptr32[rsp + booth_negate + 5 * 4]);
+		xOR(ptr32[rsp + booth_data + 7 * 4], eax);
+		X86SoftFloatEmitter::EmitCarrySaveAdd(booth_data + 0 * 4, t0_lo, t0_hi, t2_lo, t2_hi);
+		X86SoftFloatEmitter::EmitCarrySaveAdd(booth_data + 7 * 4, t1_lo, t1_hi, t3_lo, t3_hi);
+		X86SoftFloatEmitter::EmitCarrySaveAdd(t2_hi, t3_lo, t3_hi, t4_lo, t4_hi);
+		X86SoftFloatEmitter::EmitCarrySaveAdd(t2_lo, t4_lo, t4_hi, t5_lo, t5_hi);
+		xMOV(eax, ptr32[rsp + booth_negate + 7 * 4]);
+		xADD(ptr32[rsp + t5_hi], eax);
+		xAND(ptr32[rsp + t5_lo], ~0x7fffu);
+		xAND(ptr32[rsp + t5_hi], ~0x7fffu);
+		xMOV(eax, ptr32[rsp + t5_lo]);
+		xADD(eax, ptr32[rsp + t5_hi]);
+		xXOR(eax, ptr32[rsp + full_lo]);
+		xAND(eax, 0x8000);
+		xSUB(ptr32[rsp + full_lo], eax);
+		xSBB(ptr32[rsp + full_hi], 0);
+	}
 	product_correction_not_visible.SetTarget();
 	product_first_one_correction_ready.SetTarget();
 
@@ -1030,6 +1159,7 @@ static void mVUGenerateSoftMulExactKernel(microVU& mVU)
 
 static void mVUGenerateSoftMaddIntegratedLaneKernel(microVU& mVU)
 {
+	const bool use_avx512_scalar_booth = x86Emitter::avx512.HasCore();
 	// Internal ABI: eax = source, edx = operand, ecx = accumulator,
 	// r8d = incoming ACC overflow, r9d = subtract. Returns eax = final raw,
 	// edx = result-stage flags (overflow bit 0, underflow bit 1), and ecx =
@@ -1050,7 +1180,8 @@ static void mVUGenerateSoftMaddIntegratedLaneKernel(microVU& mVU)
 	constexpr int booth_negate = full_hi + 4;
 	constexpr int booth_data = booth_negate + 8 * 4;
 	constexpr int add3_values = booth_data + 8 * 4;
-	constexpr int stack_size = (add3_values + 12 * 4 + 15) & ~15;
+	constexpr int legacy_stack_size = (add3_values + 12 * 4 + 15) & ~15;
+	const int stack_size = use_avx512_scalar_booth ? ((full_hi + 4 + 15) & ~15) : legacy_stack_size;
 	constexpr int product_status_zero = 1;
 	constexpr int product_status_sign = 2;
 	constexpr int product_status_underflow = 4;
@@ -1127,76 +1258,82 @@ static void mVUGenerateSoftMaddIntegratedLaneKernel(microVU& mVU)
 	xSBB(ptr32[rsp + full_hi], 0);
 	xForwardJump32 product_first_one_correction_ready;
 	product_requires_regular_booth_correction.SetTarget();
-
-	xMOV64(r11, reinterpret_cast<uptr>(X86SoftFloatEmitter::ScalarBoothDecode));
-	for (int bit = 0; bit < 8; bit++)
+	if (use_avx512_scalar_booth)
 	{
-		const u32 shift = bit * 2;
-		xMOV(edx, ptr32[rsp + mantissa_a]);
-		if (shift != 0)
-			xSHL(edx, shift);
-		xMOV(eax, r9d);
-		if (bit == 0)
-			xSHL(eax, 1);
-		else
-			xSHR(eax, shift - 1);
-		xAND(eax, 7);
-		xMOV(ecx, ptr32[xAddressVoid(r11, rax, 4)]);
-		xMOV(r10d, ecx);
-		xAND(r10d, 3);
-		xMUL(edx, r10d);
-		xSHR(ecx, 8);
-		if (shift != 0)
-			xSHL(ecx, shift);
-		xMOV(ptr32[rsp + booth_negate + bit * 4], ecx);
-		xNEG(ecx);
-		xXOR(edx, ecx);
-		xMOV(ptr32[rsp + booth_data + bit * 4], edx);
+		X86SoftFloatEmitter::EmitScalarBoothCorrectionEVEX(mantissa_a, full_lo, full_hi);
 	}
+	else
+	{
+		xMOV64(r11, reinterpret_cast<uptr>(X86SoftFloatEmitter::ScalarBoothDecode));
+		for (int bit = 0; bit < 8; bit++)
+		{
+			const u32 shift = bit * 2;
+			xMOV(edx, ptr32[rsp + mantissa_a]);
+			if (shift != 0)
+				xSHL(edx, shift);
+			xMOV(eax, r9d);
+			if (bit == 0)
+				xSHL(eax, 1);
+			else
+				xSHR(eax, shift - 1);
+			xAND(eax, 7);
+			xMOV(ecx, ptr32[xAddressVoid(r11, rax, 4)]);
+			xMOV(r10d, ecx);
+			xAND(r10d, 3);
+			xMUL(edx, r10d);
+			xSHR(ecx, 8);
+			if (shift != 0)
+				xSHL(ecx, shift);
+			xMOV(ptr32[rsp + booth_negate + bit * 4], ecx);
+			xNEG(ecx);
+			xXOR(edx, ecx);
+			xMOV(ptr32[rsp + booth_data + bit * 4], edx);
+		}
 
-	constexpr int t0_lo = add3_values + 0 * 4;
-	constexpr int t0_hi = add3_values + 1 * 4;
-	constexpr int t1_lo = add3_values + 2 * 4;
-	constexpr int t1_hi = add3_values + 3 * 4;
-	constexpr int t2_lo = add3_values + 4 * 4;
-	constexpr int t2_hi = add3_values + 5 * 4;
-	constexpr int t3_lo = add3_values + 6 * 4;
-	constexpr int t3_hi = add3_values + 7 * 4;
-	constexpr int t4_lo = add3_values + 8 * 4;
-	constexpr int t4_hi = add3_values + 9 * 4;
-	constexpr int t5_lo = add3_values + 10 * 4;
-	constexpr int t5_hi = add3_values + 11 * 4;
+		constexpr int t0_lo = add3_values + 0 * 4;
+		constexpr int t0_hi = add3_values + 1 * 4;
+		constexpr int t1_lo = add3_values + 2 * 4;
+		constexpr int t1_hi = add3_values + 3 * 4;
+		constexpr int t2_lo = add3_values + 4 * 4;
+		constexpr int t2_hi = add3_values + 5 * 4;
+		constexpr int t3_lo = add3_values + 6 * 4;
+		constexpr int t3_hi = add3_values + 7 * 4;
+		constexpr int t4_lo = add3_values + 8 * 4;
+		constexpr int t4_hi = add3_values + 9 * 4;
+		constexpr int t5_lo = add3_values + 10 * 4;
+		constexpr int t5_hi = add3_values + 11 * 4;
 
-	X86SoftFloatEmitter::EmitCarrySaveAdd(booth_data + 1 * 4, booth_data + 2 * 4,
-		booth_data + 3 * 4, t0_lo, t0_hi);
-	xAND(ptr32[rsp + booth_data + 4 * 4], ~0x7ffu);
-	xMOV(eax, ptr32[rsp + booth_data + 5 * 4]);
-	xMOV(ptr32[rsp + mantissa_a], eax);
-	xAND(ptr32[rsp + booth_data + 5 * 4], ~0xfffu);
-	X86SoftFloatEmitter::EmitCarrySaveAdd(booth_data + 4 * 4, booth_data + 5 * 4,
-		booth_data + 6 * 4, t1_lo, t1_hi);
-	xMOV(eax, ptr32[rsp + mantissa_a]);
-	xAND(eax, 0x800);
-	xOR(eax, ptr32[rsp + booth_negate + 6 * 4]);
-	xOR(ptr32[rsp + t1_hi], eax);
-	xMOV(eax, ptr32[rsp + mantissa_a]);
-	xAND(eax, 0x400);
-	xADD(eax, ptr32[rsp + booth_negate + 5 * 4]);
-	xOR(ptr32[rsp + booth_data + 7 * 4], eax);
-	X86SoftFloatEmitter::EmitCarrySaveAdd(booth_data + 0 * 4, t0_lo, t0_hi, t2_lo, t2_hi);
-	X86SoftFloatEmitter::EmitCarrySaveAdd(booth_data + 7 * 4, t1_lo, t1_hi, t3_lo, t3_hi);
-	X86SoftFloatEmitter::EmitCarrySaveAdd(t2_hi, t3_lo, t3_hi, t4_lo, t4_hi);
-	X86SoftFloatEmitter::EmitCarrySaveAdd(t2_lo, t4_lo, t4_hi, t5_lo, t5_hi);
-	xMOV(eax, ptr32[rsp + booth_negate + 7 * 4]);
-	xADD(ptr32[rsp + t5_hi], eax);
-	xAND(ptr32[rsp + t5_lo], ~0x7fffu);
-	xAND(ptr32[rsp + t5_hi], ~0x7fffu);
-	xMOV(eax, ptr32[rsp + t5_lo]);
-	xADD(eax, ptr32[rsp + t5_hi]);
-	xXOR(eax, ptr32[rsp + full_lo]);
-	xAND(eax, 0x8000);
-	xSUB(ptr32[rsp + full_lo], eax);
-	xSBB(ptr32[rsp + full_hi], 0);
+		X86SoftFloatEmitter::EmitCarrySaveAdd(booth_data + 1 * 4, booth_data + 2 * 4,
+			booth_data + 3 * 4, t0_lo, t0_hi);
+		xAND(ptr32[rsp + booth_data + 4 * 4], ~0x7ffu);
+		xMOV(eax, ptr32[rsp + booth_data + 5 * 4]);
+		xMOV(ptr32[rsp + mantissa_a], eax);
+		xAND(ptr32[rsp + booth_data + 5 * 4], ~0xfffu);
+		X86SoftFloatEmitter::EmitCarrySaveAdd(booth_data + 4 * 4, booth_data + 5 * 4,
+			booth_data + 6 * 4, t1_lo, t1_hi);
+		xMOV(eax, ptr32[rsp + mantissa_a]);
+		xAND(eax, 0x800);
+		xOR(eax, ptr32[rsp + booth_negate + 6 * 4]);
+		xOR(ptr32[rsp + t1_hi], eax);
+		xMOV(eax, ptr32[rsp + mantissa_a]);
+		xAND(eax, 0x400);
+		xADD(eax, ptr32[rsp + booth_negate + 5 * 4]);
+		xOR(ptr32[rsp + booth_data + 7 * 4], eax);
+		X86SoftFloatEmitter::EmitCarrySaveAdd(booth_data + 0 * 4, t0_lo, t0_hi, t2_lo, t2_hi);
+		X86SoftFloatEmitter::EmitCarrySaveAdd(booth_data + 7 * 4, t1_lo, t1_hi, t3_lo, t3_hi);
+		X86SoftFloatEmitter::EmitCarrySaveAdd(t2_hi, t3_lo, t3_hi, t4_lo, t4_hi);
+		X86SoftFloatEmitter::EmitCarrySaveAdd(t2_lo, t4_lo, t4_hi, t5_lo, t5_hi);
+		xMOV(eax, ptr32[rsp + booth_negate + 7 * 4]);
+		xADD(ptr32[rsp + t5_hi], eax);
+		xAND(ptr32[rsp + t5_lo], ~0x7fffu);
+		xAND(ptr32[rsp + t5_hi], ~0x7fffu);
+		xMOV(eax, ptr32[rsp + t5_lo]);
+		xADD(eax, ptr32[rsp + t5_hi]);
+		xXOR(eax, ptr32[rsp + full_lo]);
+		xAND(eax, 0x8000);
+		xSUB(ptr32[rsp + full_lo], eax);
+		xSBB(ptr32[rsp + full_hi], 0);
+	}
 	product_correction_not_visible.SetTarget();
 	product_first_one_correction_ready.SetTarget();
 
@@ -1860,19 +1997,25 @@ static void mVUGenerateSoftMulExactVectorKernel(microVU& mVU)
 
 static void mVUGenerateSoftMulBoothPackedKernel(microVU& mVU)
 {
+	const bool use_avx512_booth = x86Emitter::avx512.HasCore();
 	constexpr sptr saved_xmm = 0;
-	constexpr int full_lo = saved_xmm + 5 * 16;
-	constexpr int full_hi = full_lo + 16;
-	constexpr int mantissa_a = full_hi + 16;
-	constexpr int mantissa_b = mantissa_a + 16;
-	constexpr int booth_negate = mantissa_b + 16;
-	constexpr int booth_data = booth_negate + 8 * 16;
-	constexpr int add3_values = booth_data + 8 * 16;
-	constexpr int stack_size = add3_values + 12 * 16;
+	const int full_lo = use_avx512_booth ? 0 : saved_xmm + 5 * 16;
+	const int full_hi = full_lo + 16;
+	const int mantissa_a = full_hi + 16;
+	const int mantissa_b = mantissa_a + 16;
+	const int booth_negate = mantissa_b + 16;
+	const int booth_data = booth_negate + 8 * 16;
+	const int add3_values = booth_data + 8 * 16;
+	const int stack_size = add3_values + (use_avx512_booth ? 0 : 12 * 16);
 	const void* const uncached_kernel = xGetAlignedCallTarget();
 	xSUB(rsp, stack_size);
 	for (int reg = 0; reg < 5; reg++)
-		xMOVAPS(ptr128[rsp + saved_xmm + reg * 16], xRegisterSSE(reg));
+	{
+		if (use_avx512_booth)
+			xVMOVDQA32(xRegisterSSE(27 + reg), xRegisterSSE(reg));
+		else
+			xMOVAPS(ptr128[rsp + saved_xmm + reg * 16], xRegisterSSE(reg));
+	}
 
 	xMOVAPS(xmm0, ptr128[rax]);
 	xMOVAPS(xmm1, ptr128[rdx]);
@@ -1943,20 +2086,54 @@ static void mVUGenerateSoftMulBoothPackedKernel(microVU& mVU)
 		xPSLL.D(xmm2, 1);
 		xMOVAPS(ptr128[rsp + hi], xmm2);
 	};
-	constexpr int t0_lo = add3_values + 0 * 16;
-	constexpr int t0_hi = add3_values + 1 * 16;
-	constexpr int t1_lo = add3_values + 2 * 16;
-	constexpr int t1_hi = add3_values + 3 * 16;
-	constexpr int t2_lo = add3_values + 4 * 16;
-	constexpr int t2_hi = add3_values + 5 * 16;
-	constexpr int t3_lo = add3_values + 6 * 16;
-	constexpr int t3_hi = add3_values + 7 * 16;
-	constexpr int t4_lo = add3_values + 8 * 16;
-	constexpr int t4_hi = add3_values + 9 * 16;
-	constexpr int t5_lo = add3_values + 10 * 16;
-	constexpr int t5_hi = add3_values + 11 * 16;
+	const auto emitAdd3EVEXMemory = [&](int a, int b, int c, const xRegisterSSE& sum,
+		const xRegisterSSE& carry) {
+		xVMOVDQA32(sum, ptr128[rsp + a]);
+		xVMOVDQA32(carry, sum);
+		xVMOVDQA32(xmm24, ptr128[rsp + b]);
+		xVMOVDQA32(xmm25, ptr128[rsp + c]);
+		xVPTERNLOGD(sum, xmm24, xmm25, 0x96);
+		xVPTERNLOGD(carry, xmm24, xmm25, 0xe8);
+		xVPSLLDImm(carry, carry, 1);
+	};
+	const auto emitAdd3EVEXMemoryRegs = [&](int a, const xRegisterSSE& b, const xRegisterSSE& c,
+		const xRegisterSSE& sum, const xRegisterSSE& carry) {
+		xVMOVDQA32(sum, ptr128[rsp + a]);
+		xVMOVDQA32(carry, sum);
+		xVPTERNLOGD(sum, b, c, 0x96);
+		xVPTERNLOGD(carry, b, c, 0xe8);
+		xVPSLLDImm(carry, carry, 1);
+	};
+	const auto emitAdd3EVEXRegs = [&](const xRegisterSSE& a, const xRegisterSSE& b,
+		const xRegisterSSE& c, const xRegisterSSE& sum, const xRegisterSSE& carry) {
+		xVMOVDQA32(sum, a);
+		xVMOVDQA32(carry, a);
+		xVPTERNLOGD(sum, b, c, 0x96);
+		xVPTERNLOGD(carry, b, c, 0xe8);
+		xVPSLLDImm(carry, carry, 1);
+	};
+	const int t0_lo = add3_values + 0 * 16;
+	const int t0_hi = add3_values + 1 * 16;
+	const int t1_lo = add3_values + 2 * 16;
+	const int t1_hi = add3_values + 3 * 16;
+	const int t2_lo = add3_values + 4 * 16;
+	const int t2_hi = add3_values + 5 * 16;
+	const int t3_lo = add3_values + 6 * 16;
+	const int t3_hi = add3_values + 7 * 16;
+	const int t4_lo = add3_values + 8 * 16;
+	const int t4_hi = add3_values + 9 * 16;
+	const int t5_lo = add3_values + 10 * 16;
+	const int t5_hi = add3_values + 11 * 16;
 
-	emitAdd3(booth_data + 1 * 16, booth_data + 2 * 16, booth_data + 3 * 16, t0_lo, t0_hi);
+	if (use_avx512_booth)
+	{
+		// Keep the AVX-512 path isolated until it has proper hardware performance testing.
+		emitAdd3EVEXMemory(booth_data + 1 * 16, booth_data + 2 * 16, booth_data + 3 * 16, xmm16, xmm17);
+	}
+	else
+	{
+		emitAdd3(booth_data + 1 * 16, booth_data + 2 * 16, booth_data + 3 * 16, t0_lo, t0_hi);
+	}
 	xMOVAPS(xmm0, ptr128[rsp + booth_data + 4 * 16]);
 	xPAND(xmm0, ptr128[s_vu_soft_low_11_mask]);
 	xMOVAPS(ptr128[rsp + booth_data + 4 * 16], xmm0);
@@ -1964,27 +2141,57 @@ static void mVUGenerateSoftMulBoothPackedKernel(microVU& mVU)
 	xMOVAPS(ptr128[rsp + mantissa_a], xmm0);
 	xPAND(xmm0, ptr128[s_vu_soft_low_12_mask]);
 	xMOVAPS(ptr128[rsp + booth_data + 5 * 16], xmm0);
-	emitAdd3(booth_data + 4 * 16, booth_data + 5 * 16, booth_data + 6 * 16, t1_lo, t1_hi);
+	if (use_avx512_booth)
+	{
+		emitAdd3EVEXMemory(booth_data + 4 * 16, booth_data + 5 * 16, booth_data + 6 * 16, xmm18, xmm19);
+	}
+	else
+	{
+		emitAdd3(booth_data + 4 * 16, booth_data + 5 * 16, booth_data + 6 * 16, t1_lo, t1_hi);
+	}
 	xMOVAPS(xmm0, ptr128[rsp + mantissa_a]);
 	xPAND(xmm0, ptr128[s_vu_soft_bit_11]);
 	xPOR(xmm0, ptr128[rsp + booth_negate + 6 * 16]);
-	xMOVAPS(xmm1, ptr128[rsp + t1_hi]);
-	xPOR(xmm1, xmm0);
-	xMOVAPS(ptr128[rsp + t1_hi], xmm1);
+	if (use_avx512_booth)
+	{
+		xVPTERNLOGD(xmm19, xmm0, xmm0, 0xfe);
+	}
+	else
+	{
+		xMOVAPS(xmm1, ptr128[rsp + t1_hi]);
+		xPOR(xmm1, xmm0);
+		xMOVAPS(ptr128[rsp + t1_hi], xmm1);
+	}
 	xMOVAPS(xmm0, ptr128[rsp + mantissa_a]);
 	xPAND(xmm0, ptr128[s_vu_soft_bit_10]);
 	xPADD.D(xmm0, ptr128[rsp + booth_negate + 5 * 16]);
 	xMOVAPS(xmm1, ptr128[rsp + booth_data + 7 * 16]);
 	xPOR(xmm1, xmm0);
 	xMOVAPS(ptr128[rsp + booth_data + 7 * 16], xmm1);
-	emitAdd3(booth_data + 0 * 16, t0_lo, t0_hi, t2_lo, t2_hi);
-	emitAdd3(booth_data + 7 * 16, t1_lo, t1_hi, t3_lo, t3_hi);
-	emitAdd3(t2_hi, t3_lo, t3_hi, t4_lo, t4_hi);
-	emitAdd3(t2_lo, t4_lo, t4_hi, t5_lo, t5_hi);
-	xMOVAPS(xmm0, ptr128[rsp + t5_hi]);
+	if (use_avx512_booth)
+	{
+		emitAdd3EVEXMemoryRegs(booth_data + 0 * 16, xmm16, xmm17, xmm20, xmm21);
+		emitAdd3EVEXMemoryRegs(booth_data + 7 * 16, xmm18, xmm19, xmm22, xmm23);
+		// The first two tree pairs are dead here; reuse them so XMM27-XMM31
+		// can preserve the caller's low scratch bank without stack traffic.
+		emitAdd3EVEXRegs(xmm21, xmm22, xmm23, xmm16, xmm17);
+		emitAdd3EVEXRegs(xmm20, xmm16, xmm17, xmm18, xmm19);
+		xVMOVDQA32(xmm0, xmm19);
+	}
+	else
+	{
+		emitAdd3(booth_data + 0 * 16, t0_lo, t0_hi, t2_lo, t2_hi);
+		emitAdd3(booth_data + 7 * 16, t1_lo, t1_hi, t3_lo, t3_hi);
+		emitAdd3(t2_hi, t3_lo, t3_hi, t4_lo, t4_hi);
+		emitAdd3(t2_lo, t4_lo, t4_hi, t5_lo, t5_hi);
+		xMOVAPS(xmm0, ptr128[rsp + t5_hi]);
+	}
 	xPADD.D(xmm0, ptr128[rsp + booth_negate + 7 * 16]);
 	xPAND(xmm0, ptr128[s_vu_soft_low_15_mask]);
-	xMOVAPS(xmm1, ptr128[rsp + t5_lo]);
+	if (use_avx512_booth)
+		xVMOVDQA32(xmm1, xmm18);
+	else
+		xMOVAPS(xmm1, ptr128[rsp + t5_lo]);
 	xPAND(xmm1, ptr128[s_vu_soft_low_15_mask]);
 	xPADD.D(xmm0, xmm1);
 	xPXOR(xmm0, ptr128[rsp + full_lo]);
@@ -2043,16 +2250,21 @@ static void mVUGenerateSoftMulBoothPackedKernel(microVU& mVU)
 	xMOVAPS(ptr128[rcx], xmm0);
 
 	for (int reg = 0; reg < 5; reg++)
-		xMOVAPS(xRegisterSSE(reg), ptr128[rsp + saved_xmm + reg * 16]);
+	{
+		if (use_avx512_booth)
+			xVMOVDQA32(xRegisterSSE(reg), xRegisterSSE(27 + reg));
+		else
+			xMOVAPS(xRegisterSSE(reg), ptr128[rsp + saved_xmm + reg * 16]);
+	}
 	xADD(rsp, stack_size);
 	xRET();
 
 	mVU.softMulBoothPacked = xGetAlignedCallTarget();
 	std::array<std::optional<xForwardJump32>, 8> cache_misses;
 	constexpr sptr cache_saved_r8 = 0;
-	constexpr int cache_saved_r9 = cache_saved_r8 + 8;
-	constexpr int cache_lane_mask = cache_saved_r9 + 8;
-	constexpr int cache_stack_size = 32;
+	const int cache_saved_r9 = cache_saved_r8 + 8;
+	const int cache_lane_mask = cache_saved_r9 + 8;
+	const int cache_stack_size = 32;
 	xSUB(rsp, cache_stack_size);
 	xMOV(ptr64[rsp + cache_saved_r8], r8);
 	xMOV(ptr64[rsp + cache_saved_r9], r9);
@@ -2141,6 +2353,8 @@ static void mVUGenerateSoftMaddPackedKernels(microVU& mVU)
 	constexpr int native_lane_mask = booth_lane_mask + 4;
 	constexpr int scratch_end = native_lane_mask + 4;
 	constexpr int stack_size = ((scratch_end + 15) & ~15) + 8;
+	const bool use_avx512_masks = x86Emitter::avx512.HasCore();
+	const bool use_avx512_fpclass = use_avx512_masks && x86Emitter::avx512.dq;
 	for (int subtract = 0; subtract < 2; subtract++)
 	{
 		mVU.softMaddPacked[subtract] = xGetAlignedCallTarget();
@@ -2153,6 +2367,8 @@ static void mVUGenerateSoftMaddPackedKernels(microVU& mVU)
 		// the uncommon Booth-correction helper call, which may clobber r11.
 		xTEST(r8d, r10d);
 		xForwardJNZ32 fail_acc_overflow;
+		if (use_avx512_masks)
+			xKMOVW(k3, r11d);
 
 		xMOVAPS(xmm0, ptr128[rax]);
 		xMOVAPS(ptr128[rsp + source_values], xmm0);
@@ -2163,33 +2379,46 @@ static void mVUGenerateSoftMaddPackedKernels(microVU& mVU)
 
 		// This shared entry handles only the normal packed domain. The operation-local
 		// lowering remains the exact fallback for denormals and extended exponents.
-		xMOVAPS(xmm3, xmm0);
-		xPSRL.D(xmm3, 23);
-		xPAND(xmm3, ptr128[s_vu_soft_exp_mask]);
-		xMOVAPS(xmm4, xmm3);
-		xPCMP.EQD(xmm3, ptr128[s_vu_soft_zero]);
-		xPCMP.EQD(xmm4, ptr128[s_vu_soft_exp_255]);
-		xPOR(xmm3, xmm4);
+		if (use_avx512_fpclass)
+		{
+			// Exponent 0 or 255 is exactly zero/subnormal/Inf/NaN. 0xbf selects
+			// those FPCLASS categories while excluding finite normal values.
+			xVFPCLASSPS(k1, xmm0, 0xbf, k3);
+			xVFPCLASSPS(k2, xmm1, 0xbf, k3);
+			xKORW(k1, k1, k2);
+			xVFPCLASSPS(k2, xmm2, 0xbf, k3);
+			xKORTESTW(k1, k2);
+		}
+		else
+		{
+			xMOVAPS(xmm3, xmm0);
+			xPSRL.D(xmm3, 23);
+			xPAND(xmm3, ptr128[s_vu_soft_exp_mask]);
+			xMOVAPS(xmm4, xmm3);
+			xPCMP.EQD(xmm3, ptr128[s_vu_soft_zero]);
+			xPCMP.EQD(xmm4, ptr128[s_vu_soft_exp_255]);
+			xPOR(xmm3, xmm4);
 
-		xMOVAPS(xmm4, xmm1);
-		xPSRL.D(xmm4, 23);
-		xPAND(xmm4, ptr128[s_vu_soft_exp_mask]);
-		xMOVAPS(xmm0, xmm4);
-		xPCMP.EQD(xmm4, ptr128[s_vu_soft_zero]);
-		xPCMP.EQD(xmm0, ptr128[s_vu_soft_exp_255]);
-		xPOR(xmm3, xmm4);
-		xPOR(xmm3, xmm0);
+			xMOVAPS(xmm4, xmm1);
+			xPSRL.D(xmm4, 23);
+			xPAND(xmm4, ptr128[s_vu_soft_exp_mask]);
+			xMOVAPS(xmm0, xmm4);
+			xPCMP.EQD(xmm4, ptr128[s_vu_soft_zero]);
+			xPCMP.EQD(xmm0, ptr128[s_vu_soft_exp_255]);
+			xPOR(xmm3, xmm4);
+			xPOR(xmm3, xmm0);
 
-		xMOVAPS(xmm4, xmm2);
-		xPSRL.D(xmm4, 23);
-		xPAND(xmm4, ptr128[s_vu_soft_exp_mask]);
-		xMOVAPS(xmm0, xmm4);
-		xPCMP.EQD(xmm4, ptr128[s_vu_soft_zero]);
-		xPCMP.EQD(xmm0, ptr128[s_vu_soft_exp_255]);
-		xPOR(xmm3, xmm4);
-		xPOR(xmm3, xmm0);
-		xMOVMSKPS(eax, xmm3);
-		xAND(eax, r11d);
+			xMOVAPS(xmm4, xmm2);
+			xPSRL.D(xmm4, 23);
+			xPAND(xmm4, ptr128[s_vu_soft_exp_mask]);
+			xMOVAPS(xmm0, xmm4);
+			xPCMP.EQD(xmm4, ptr128[s_vu_soft_zero]);
+			xPCMP.EQD(xmm0, ptr128[s_vu_soft_exp_255]);
+			xPOR(xmm3, xmm4);
+			xPOR(xmm3, xmm0);
+			xMOVMSKPS(eax, xmm3);
+			xAND(eax, r11d);
+		}
 		xForwardJNZ32 fail_input_domain;
 
 		// Identify products where the PS2 Booth tree can borrow into retained bit 15.
@@ -2197,14 +2426,25 @@ static void mVUGenerateSoftMaddPackedKernels(microVU& mVU)
 		xMOVAPS(xmm1, ptr128[rsp + operand_values]);
 		xMOVAPS(xmm4, xmm1);
 		xPAND(xmm4, ptr128[s_vu_soft_mantissa]);
-		xPCMP.EQD(xmm4, ptr128[s_vu_soft_zero]);
 		xMOVAPS(xmm0, ptr128[rsp + source_values]);
 		xPMUL.LD(xmm0, xmm0, ptr128[rsp + operand_values]);
 		xPAND(xmm0, ptr128[s_vu_soft_mantissa]);
-		xPCMP.GTD(xmm0, ptr128[s_vu_soft_borrow_limit]);
-		xPOR(xmm0, xmm4);
-		xMOVMSKPS(eax, xmm0);
-		xAND(eax, r11d);
+		if (use_avx512_masks)
+		{
+			xVPCMPD(k1, xmm4, ptr128[s_vu_soft_zero], 0, k3);
+			xVPCMPD(k2, xmm0, ptr128[s_vu_soft_borrow_limit], 6, k3);
+			xKORW(k1, k1, k2);
+			xKMOVW(eax, k1);
+		}
+		else
+		{
+			xPCMP.EQD(xmm4, ptr128[s_vu_soft_zero]);
+			xPCMP.GTD(xmm0, ptr128[s_vu_soft_borrow_limit]);
+			xPOR(xmm0, xmm4);
+			xMOVMSKPS(eax, xmm0);
+		}
+		if (!use_avx512_masks)
+			xAND(eax, r11d);
 		xXOR(eax, r11d);
 		xMOV(ptr32[rsp + booth_lane_mask], eax);
 
@@ -2213,12 +2453,21 @@ static void mVUGenerateSoftMaddPackedKernels(microVU& mVU)
 		xMOVAPS(ptr128[rsp + product_values], xmm0);
 		xMOVAPS(xmm4, xmm0);
 		xPAND(xmm4, ptr128[s_vu_soft_abs]);
-		xMOVAPS(xmm3, ptr128[s_vu_soft_hidden_bit]);
-		xPCMP.GTD(xmm3, xmm4);
-		xPCMP.GTD(xmm4, ptr128[s_vu_soft_max_safe]);
-		xPOR(xmm3, xmm4);
-		xMOVMSKPS(eax, xmm3);
-		xAND(eax, r11d);
+		if (use_avx512_masks)
+		{
+			xVPCMPD(k1, xmm4, ptr128[s_vu_soft_hidden_bit], 1, k3);
+			xVPCMPD(k2, xmm4, ptr128[s_vu_soft_max_safe], 6, k3);
+			xKORTESTW(k1, k2);
+		}
+		else
+		{
+			xMOVAPS(xmm3, ptr128[s_vu_soft_hidden_bit]);
+			xPCMP.GTD(xmm3, xmm4);
+			xPCMP.GTD(xmm4, ptr128[s_vu_soft_max_safe]);
+			xPOR(xmm3, xmm4);
+			xMOVMSKPS(eax, xmm3);
+			xAND(eax, r11d);
+		}
 		xForwardJNZ32 fail_product_domain;
 
 		xCMP(ptr32[rsp + booth_lane_mask], 0);
@@ -2235,17 +2484,28 @@ static void mVUGenerateSoftMaddPackedKernels(microVU& mVU)
 		xMOV64(r11, reinterpret_cast<uptr>(s_vu_soft_x86_lane_masks.data()));
 		xMOVAPS(xmm2, ptr128[xAddressVoid(r11, rax, 1)]);
 		xMOV(r11d, ptr32[rsp + native_lane_mask]);
+		if (use_avx512_masks)
+			xKMOVW(k3, r11d);
 		xPAND(xmm2, ptr128[rsp + booth_correction]);
 		xPSUB.D(xmm0, xmm2);
 		xMOVAPS(ptr128[rsp + product_values], xmm0);
 		xMOVAPS(xmm4, xmm0);
 		xPAND(xmm4, ptr128[s_vu_soft_abs]);
-		xMOVAPS(xmm3, ptr128[s_vu_soft_hidden_bit]);
-		xPCMP.GTD(xmm3, xmm4);
-		xPCMP.GTD(xmm4, ptr128[s_vu_soft_max_safe]);
-		xPOR(xmm3, xmm4);
-		xMOVMSKPS(eax, xmm3);
-		xAND(eax, r11d);
+		if (use_avx512_masks)
+		{
+			xVPCMPD(k1, xmm4, ptr128[s_vu_soft_hidden_bit], 1, k3);
+			xVPCMPD(k2, xmm4, ptr128[s_vu_soft_max_safe], 6, k3);
+			xKORTESTW(k1, k2);
+		}
+		else
+		{
+			xMOVAPS(xmm3, ptr128[s_vu_soft_hidden_bit]);
+			xPCMP.GTD(xmm3, xmm4);
+			xPCMP.GTD(xmm4, ptr128[s_vu_soft_max_safe]);
+			xPOR(xmm3, xmm4);
+			xMOVMSKPS(eax, xmm3);
+			xAND(eax, r11d);
+		}
 		xForwardJNZ32 fail_corrected_product_domain;
 		product_ready.SetTarget();
 
@@ -2270,31 +2530,57 @@ static void mVUGenerateSoftMaddPackedKernels(microVU& mVU)
 
 		xMOVAPS(xmm3, xmm2);
 		xPABS.D(xmm3, xmm3);
-		xMOVAPS(xmm4, xmm3);
-		xPCMP.GTD(xmm4, ptr128[s_vu_soft_exp_24]);
-		xMOVMSKPS(eax, xmm4);
-		xAND(eax, r11d);
+		if (use_avx512_masks)
+		{
+			xVPCMPD(k1, xmm3, ptr128[s_vu_soft_exp_24], 6, k3);
+			xKTESTW(k1, k1);
+		}
+		else
+		{
+			xMOVAPS(xmm4, xmm3);
+			xPCMP.GTD(xmm4, ptr128[s_vu_soft_exp_24]);
+			xMOVMSKPS(eax, xmm4);
+			xAND(eax, r11d);
+		}
 		xForwardJNZ32 fail_exponent_difference;
 
 		xPSUB.D(xmm3, ptr128[s_vu_soft_one]);
 		xPMAX.SD(xmm3, ptr128[s_vu_soft_zero]);
-		xMOVAPS(xmm4, xmm2);
-		xPCMP.GTD(xmm4, ptr128[s_vu_soft_zero]);
-		xMOVAPS(xmm2, xmm1);
-		xPBLEND.VB(xmm2, xmm1, xmm0, xmm4);
-		xPBLEND.VB(xmm0, xmm0, xmm1, xmm4);
+		if (use_avx512_masks)
+		{
+			xVPCMPD(k1, xmm2, ptr128[s_vu_soft_zero], 6);
+			xVPBLENDMD(xmm2, xmm1, xmm0, k1);
+			xVPBLENDMD(xmm0, xmm0, xmm1, k1);
+		}
+		else
+		{
+			xMOVAPS(xmm4, xmm2);
+			xPCMP.GTD(xmm4, ptr128[s_vu_soft_zero]);
+			xMOVAPS(xmm2, xmm1);
+			xPBLEND.VB(xmm2, xmm1, xmm0, xmm4);
+			xPBLEND.VB(xmm0, xmm0, xmm1, xmm4);
+		}
 		xVPSRLVD(xmm2, xmm2, xmm3);
 		xVPSLLVD(xmm3, xmm2, xmm3);
 		xADD.PS(xmm0, xmm3);
 
 		xMOVAPS(xmm4, xmm0);
 		xPAND(xmm4, ptr128[s_vu_soft_abs]);
-		xMOVAPS(xmm3, ptr128[s_vu_soft_hidden_bit]);
-		xPCMP.GTD(xmm3, xmm4);
-		xPCMP.GTD(xmm4, ptr128[s_vu_soft_max_safe]);
-		xPOR(xmm3, xmm4);
-		xMOVMSKPS(eax, xmm3);
-		xAND(eax, r11d);
+		if (use_avx512_masks)
+		{
+			xVPCMPD(k1, xmm4, ptr128[s_vu_soft_hidden_bit], 1, k3);
+			xVPCMPD(k2, xmm4, ptr128[s_vu_soft_max_safe], 6, k3);
+			xKORTESTW(k1, k2);
+		}
+		else
+		{
+			xMOVAPS(xmm3, ptr128[s_vu_soft_hidden_bit]);
+			xPCMP.GTD(xmm3, xmm4);
+			xPCMP.GTD(xmm4, ptr128[s_vu_soft_max_safe]);
+			xPOR(xmm3, xmm4);
+			xMOVMSKPS(eax, xmm3);
+			xAND(eax, r11d);
+		}
 		xForwardJNZ32 fail_result_domain;
 
 		xMOVAPS(ptr128[r9 + VU_SOFT_RESULT_VALUE_OFFSET], xmm0);
@@ -2573,6 +2859,14 @@ static void mVUemitUpperInlineMulExactResult(microVU& mVU, VuUpperFmacSoftDescri
 		}
 		if (!native_ps2_zero)
 			xMUL.PS(native_product, native_operand);
+		// A host product saturated to FLT_MAX by RZ overflow must not reach the
+		// result range check after the Booth correction moved it below the
+		// limit: PS2 still has finite E=255 results there.
+		xPAND(native_work, native_product, ptr128[s_vu_soft_abs]);
+		xPCMP.GTD(native_work, ptr128[s_vu_soft_max_safe]);
+		xMOVMSKPS(edx, native_work);
+		xAND(edx, s_vu_soft_lane_mask[_X_Y_Z_W]);
+		xForwardJNZ32 stackless_mul_saturated_before_correction;
 		xPSUB.D(native_product, native_invalid);
 		if (retain_broadcast_product_abs)
 			xPAND(native_power, native_product, ptr128[s_vu_soft_abs]);
@@ -2617,9 +2911,11 @@ static void mVUemitUpperInlineMulExactResult(microVU& mVU, VuUpperFmacSoftDescri
 		mVUemitUpperInlineCommitResult(mVU, destination, native_product);
 		if (op.WritesAcc())
 			xAND(ptr32[&mVU.regs().accflag], ~static_cast<u32>(_X_Y_Z_W));
+		mVUemitSoftProfileCount(AVX512Profile::VuMulStacklessDone);
 		stackless_mul_finished.emplace();
 
 		stackless_mul_booth_failed.SetTarget();
+		stackless_mul_saturated_before_correction.SetTarget();
 		stackless_mul_result_failed.SetTarget();
 		if (switch_native_mxcsr)
 			xLDMXCSR(ptr32[mVU.index == 0 ? &EmuConfig.Cpu.VU0FPCR.bitmask : &EmuConfig.Cpu.VU1FPCR.bitmask]);
@@ -2729,9 +3025,17 @@ static void mVUemitUpperInlineMulExactResult(microVU& mVU, VuUpperFmacSoftDescri
 				xMOVAPS(native_invalid, ptr128[s_vu_soft_hidden_bit]);
 				xPCMP.GTD(native_invalid, native_power);
 				xPCMP.GTD(native_power, ptr128[s_vu_soft_max_safe]);
-				xPOR(native_invalid, native_power);
-				xMOVAPS(native_power, ptr128[rsp + fast_product_zero]);
-				xPANDN(native_power, native_invalid);
+				if (x86Emitter::avx512.HasCore())
+				{
+					// ~zero & (invalid | power) in one ternlog with a memory operand. Needs proper testing.
+					xVPTERNLOGD(native_power, native_invalid, ptr128[rsp + fast_product_zero], 0x54);
+				}
+				else
+				{
+					xPOR(native_invalid, native_power);
+					xMOVAPS(native_power, ptr128[rsp + fast_product_zero]);
+					xPANDN(native_power, native_invalid);
+				}
 				xMOVMSKPS(ecx, native_power);
 				xAND(ecx, s_vu_soft_lane_mask[_X_Y_Z_W]);
 				xTEST(ecx, ecx);
@@ -2744,6 +3048,7 @@ static void mVUemitUpperInlineMulExactResult(microVU& mVU, VuUpperFmacSoftDescri
 				xLEA(rdx, ptr[rsp + fast_operand]);
 				xLEA(rcx, ptr[rsp + fast_booth_correction]);
 				xMOV(r10d, ptr32[rsp + fast_booth_lane_mask]);
+				mVUemitSoftProfileCount(AVX512Profile::VuMulBoothCall);
 				xCALL(mVU.softMulBoothPacked);
 				xMOVAPS(native_product, ptr128[rsp + fast_source]);
 				xMOVAPS(native_operand, ptr128[rsp + fast_operand]);
@@ -2753,10 +3058,18 @@ static void mVUemitUpperInlineMulExactResult(microVU& mVU, VuUpperFmacSoftDescri
 				xMOVAPS(native_invalid, ptr128[s_vu_soft_hidden_bit]);
 				xPCMP.GTD(native_invalid, native_power);
 				xPCMP.GTD(native_power, ptr128[s_vu_soft_max_safe]);
-				xPOR(native_invalid, native_power);
-				xMOVAPS(native_work, ptr128[rsp + fast_product_zero]);
-				xPANDN(native_work, native_invalid);
-				xMOVMSKPS(eax, native_work);
+				if (x86Emitter::avx512.HasCore())
+				{
+					xVPTERNLOGD(native_power, native_invalid, ptr128[rsp + fast_product_zero], 0x54);
+					xMOVMSKPS(eax, native_power);
+				}
+				else
+				{
+					xPOR(native_invalid, native_power);
+					xMOVAPS(native_work, ptr128[rsp + fast_product_zero]);
+					xPANDN(native_work, native_invalid);
+					xMOVMSKPS(eax, native_work);
+				}
 				xAND(eax, s_vu_soft_lane_mask[_X_Y_Z_W]);
 				fast_corrected_product_failed.emplace(Jcc_NotZero);
 				xMOV(eax, ptr32[rsp + fast_booth_lane_mask]);
@@ -2882,16 +3195,16 @@ static void mVUemitUpperInlineMulExactResult(microVU& mVU, VuUpperFmacSoftDescri
 		}
 		mVUemitSoftFlagWriteback(mVU, result_offset, op);
 		mVUemitUpperSoftStackFree(fast_stack_size);
+		mVUemitSoftProfileCount(AVX512Profile::VuMulFastDone);
 		fast_normal_finished.emplace();
 
-		if (fast_input_failed.has_value())
-			fast_input_failed->SetTarget();
-		if (fast_result_failed.has_value())
-			fast_result_failed->SetTarget();
-		if (fast_corrected_product_failed.has_value())
-			fast_corrected_product_failed->SetTarget();
-		if (fast_table_product_failed.has_value())
-			fast_table_product_failed->SetTarget();
+		{
+			mVUSoftFailureJoin failures;
+			failures.Bind(fast_input_failed, AVX512Profile::VuMulFailInput);
+			failures.Bind(fast_result_failed, AVX512Profile::VuMulFailResult);
+			failures.Bind(fast_corrected_product_failed, AVX512Profile::VuMulFailCorrected);
+			failures.Bind(fast_table_product_failed, AVX512Profile::VuMulFailTable);
+		}
 		if (switch_native_mxcsr)
 			xLDMXCSR(ptr32[mVU.index == 0 ? &EmuConfig.Cpu.VU0FPCR.bitmask : &EmuConfig.Cpu.VU1FPCR.bitmask]);
 		mVUemitUpperSoftStackFree(fast_stack_size);
@@ -2909,6 +3222,7 @@ static void mVUemitUpperInlineMulExactResult(microVU& mVU, VuUpperFmacSoftDescri
 		xLEA(rdx, ptr[rsp + outlined_operand]);
 		xLEA(rcx, ptr[rsp + result_offset]);
 		xMOV(r8d, _X_Y_Z_W);
+		mVUemitSoftProfileCount(AVX512Profile::VuMulExactVectorCall);
 		xCALL(mVU.softMulExactVector);
 		xMOVAPS(native_product, resultPtr(offsetof(VuSoftFmacJitResult, value)));
 		mVUemitUpperInlineCommitResult(mVU, destination, native_product);
@@ -2966,6 +3280,11 @@ static void mVUemitUpperInlineMaddExactResult(microVU& mVU, VuUpperFmacSoftDescr
 	                                   (!switch_mxcsr || switch_native_mxcsr) && !_XYZW_SS && _X_Y_Z_W != 0;
 
 	const bool emit_stackless_prefix = native_path_available && !needs_result_flags;
+	// Keep allocator-owned temporaries reserved for the shared fallback so a common-path
+	// success cannot skip spill/writeback code already reflected in regalloc state. AVX-512
+	// instead moves transient predicates into k registers and constants into XMM16+.
+	const bool use_avx512_stackless_masks =
+		emit_stackless_prefix && x86Emitter::avx512.HasCore();
 	const bool emit_identity_compact = native_path_available && _X_Y_Z_W == 0xf &&
 	                                   !emit_stackless_prefix && use_identity_stackless_madd;
 
@@ -2989,15 +3308,24 @@ static void mVUemitUpperInlineMaddExactResult(microVU& mVU, VuUpperFmacSoftDescr
 		return ptr32[rsp + result_offset + offset];
 	};
 
-	// Keep the common vector path entirely in allocator-owned registers. Extended
-	// exponents, visible Booth corrections, overflow state, and exceptional results
-	// fall through to the complete mixed-lane implementation below.
+	// Keep arithmetic values in allocator-owned registers. The AVX-512 path uses
+	// XMM16+ only for helper-local constants and k registers for transient masks;
+	// extended exponents, visible Booth corrections, overflow state, and exceptional
+	// results fall through to the complete mixed-lane implementation below.
 	if (emit_stackless_prefix)
 	{
 		if (switch_native_mxcsr)
 			xLDMXCSR(ptr32[&s_vu_soft_truncate_daz_ftz_mxcsr]);
 		xTEST(ptr32[&mVU.regs().accflag], _X_Y_Z_W);
 		xForwardJNZ32 stackless_acc_overflow_failed;
+		if (use_avx512_stackless_masks)
+		{
+			xMOV(eax, s_vu_soft_lane_mask[_X_Y_Z_W]);
+			xKMOVW(k4, eax);
+			xVMOVDQA32(xmm16, ptr128[s_vu_soft_zero]);
+			xVMOVDQA32(xmm17, ptr128[s_vu_soft_exp_field]);
+			xVMOVDQA32(xmm18, ptr128[s_vu_soft_borrow_limit]);
+		}
 
 		xMOVAPS(native_product, source);
 		if (!use_identity_stackless_madd)
@@ -3016,42 +3344,90 @@ static void mVUemitUpperInlineMaddExactResult(microVU& mVU, VuUpperFmacSoftDescr
 			// which the later add-domain boundary rejects.
 			xMUL.PS(native_product, native_operand);
 			xPAND(native_power, native_product, ptr128[s_vu_soft_abs]);
-			xPCMP.EQD(native_power, ptr128[s_vu_soft_zero]);
+			if (use_avx512_stackless_masks)
+				xVPCMPD(k1, native_power, xmm16, 0);
+			else
+				xPCMP.EQD(native_power, ptr128[s_vu_soft_zero]);
 		}
 		else
 		{
 			// A small normal operand can hide an extended source in FP modes which
 			// do not canonicalize both PS2-zero domains before multiplication.
 			xPAND(native_work, native_product, ptr128[s_vu_soft_exp_field]);
-			if (use_identity_stackless_madd)
+			if (use_avx512_stackless_masks)
 			{
-				xPCMP.EQD(native_invalid, native_work, ptr128[s_vu_soft_exp_field]);
-				xPTEST(native_invalid, native_invalid);
-				stackless_input_failed.emplace(Jcc_NotZero);
-				xMOVAPS(native_power, native_work);
+				if (use_identity_stackless_madd)
+				{
+					xVPCMPD(k2, native_work, xmm17, 0);
+					xKTESTW(k2, k2);
+					stackless_input_failed.emplace(Jcc_NotZero);
+					xVPCMPD(k1, native_work, xmm16, 0);
+				}
+				else
+				{
+					if (!operand_known_normal)
+						xPAND(native_invalid, native_operand, ptr128[s_vu_soft_exp_field]);
+					if (!source_nonextended || !operand_nonextended)
+					{
+						if (!source_nonextended && !operand_nonextended)
+						{
+							xVPCMPD(k2, native_work, xmm17, 0);
+							xVPCMPD(k3, native_invalid, xmm17, 0);
+							xKORTESTW(k2, k3);
+						}
+						else if (operand_known_normal)
+						{
+							xVPCMPD(k2, native_work, xmm17, 0);
+							xKTESTW(k2, k2);
+						}
+						else
+						{
+							const xmm& extended_input = source_nonextended ? native_invalid : native_work;
+							xVPCMPD(k2, extended_input, xmm17, 0);
+							xKTESTW(k2, k2);
+						}
+						stackless_input_failed.emplace(Jcc_NotZero);
+					}
+					xVPCMPD(k1, native_work, xmm16, 0);
+					if (!operand_known_normal)
+					{
+						xVPCMPD(k2, native_invalid, xmm16, 0);
+						xKORW(k1, k1, k2);
+					}
+				}
 			}
 			else
 			{
-				if (!operand_known_normal)
-					xPAND(native_invalid, native_operand, ptr128[s_vu_soft_exp_field]);
-				if (!source_nonextended || !operand_nonextended)
+				if (use_identity_stackless_madd)
 				{
-					if (!source_nonextended && !operand_nonextended)
-						xPMAX.UD(native_power, native_work, native_invalid);
-					else if (operand_known_normal)
+					xPCMP.EQD(native_invalid, native_work, ptr128[s_vu_soft_exp_field]);
+					xPTEST(native_invalid, native_invalid);
+					stackless_input_failed.emplace(Jcc_NotZero);
+					xMOVAPS(native_power, native_work);
+				}
+				else
+				{
+					if (!operand_known_normal)
+						xPAND(native_invalid, native_operand, ptr128[s_vu_soft_exp_field]);
+					if (!source_nonextended || !operand_nonextended)
+					{
+						if (!source_nonextended && !operand_nonextended)
+							xPMAX.UD(native_power, native_work, native_invalid);
+						else if (operand_known_normal)
+							xMOVAPS(native_power, native_work);
+						else
+							xMOVAPS(native_power, source_nonextended ? native_invalid : native_work);
+						xPCMP.EQD(native_power, ptr128[s_vu_soft_exp_field]);
+						xPTEST(native_power, native_power);
+						stackless_input_failed.emplace(Jcc_NotZero);
+					}
+					if (operand_known_normal)
 						xMOVAPS(native_power, native_work);
 					else
-						xMOVAPS(native_power, source_nonextended ? native_invalid : native_work);
-					xPCMP.EQD(native_power, ptr128[s_vu_soft_exp_field]);
-					xPTEST(native_power, native_power);
-					stackless_input_failed.emplace(Jcc_NotZero);
+						xPMIN.UD(native_power, native_work, native_invalid);
 				}
-				if (operand_known_normal)
-					xMOVAPS(native_power, native_work);
-				else
-					xPMIN.UD(native_power, native_work, native_invalid);
+				xPCMP.EQD(native_power, ptr128[s_vu_soft_zero]);
 			}
-			xPCMP.EQD(native_power, ptr128[s_vu_soft_zero]);
 		}
 		std::optional<xForwardJump32> stackless_product_failed;
 		std::optional<xForwardJump32> stackless_booth_product_failed;
@@ -3074,18 +3450,34 @@ static void mVUemitUpperInlineMaddExactResult(microVU& mVU, VuUpperFmacSoftDescr
 			else
 			{
 				xPAND(native_work, native_operand, ptr128[s_vu_soft_mantissa]);
-				xPCMP.EQD(native_invalid, native_work, ptr128[s_vu_soft_zero]);
+				if (use_avx512_stackless_masks)
+					xVPCMPD(k2, native_work, xmm16, 0);
+				else
+					xPCMP.EQD(native_invalid, native_work, ptr128[s_vu_soft_zero]);
 			}
 			xPMUL.LD(native_work, source, native_operand);
 			xPAND(native_work, ptr128[s_vu_soft_mantissa]);
-			xPCMP.GTD(native_work, ptr128[s_vu_soft_borrow_limit]);
-			if (variant < 3)
-				xPOR(native_work, native_invalid);
-			xPOR(native_work, native_power);
-			xMOVMSKPS(eax, native_work);
-			xXOR(eax, 0xf);
-			xAND(eax, s_vu_soft_lane_mask[_X_Y_Z_W]);
-			stackless_booth_product_failed.emplace(Jcc_NotZero);
+			if (use_avx512_stackless_masks)
+			{
+				xVPCMPD(k3, native_work, xmm18, 6);
+				if (variant < 3)
+					xKORW(k3, k3, k2);
+				xKORW(k3, k3, k1);
+				// KTESTW sets CF when ~k3 & k4 is zero, so this needs no AND-NOT mask (needs proper testing).
+				xKTESTW(k3, k4);
+				stackless_booth_product_failed.emplace(Jcc_NotCarry);
+			}
+			else
+			{
+				xPCMP.GTD(native_work, ptr128[s_vu_soft_borrow_limit]);
+				if (variant < 3)
+					xPOR(native_work, native_invalid);
+				xPOR(native_work, native_power);
+				xMOVMSKPS(eax, native_work);
+				xXOR(eax, 0xf);
+				xAND(eax, s_vu_soft_lane_mask[_X_Y_Z_W]);
+				stackless_booth_product_failed.emplace(Jcc_NotZero);
+			}
 			if (stackless_low_half_needs_no_booth.has_value())
 				stackless_low_half_needs_no_booth->SetTarget();
 			if (!prepare_product_before_booth)
@@ -3093,11 +3485,19 @@ static void mVUemitUpperInlineMaddExactResult(microVU& mVU, VuUpperFmacSoftDescr
 			if (!flush_to_zero)
 			{
 				xPAND(native_work, native_product, ptr128[s_vu_soft_abs]);
-				xMOVAPS(native_invalid, ptr128[s_vu_soft_hidden_bit]);
-				xPCMP.GTD(native_invalid, native_work);
-				xPANDN(native_invalid, native_power, native_invalid);
-				xPTEST(native_invalid, native_invalid);
-				stackless_product_failed.emplace(Jcc_NotZero);
+				if (use_avx512_stackless_masks)
+				{
+					xVPCMPD(k2, native_work, ptr128[s_vu_soft_hidden_bit], 1);
+					xKTESTW(k1, k2); // CF = (~k1 & k2) == 0
+				}
+				else
+				{
+					xMOVAPS(native_invalid, ptr128[s_vu_soft_hidden_bit]);
+					xPCMP.GTD(native_invalid, native_work);
+					xPANDN(native_invalid, native_power, native_invalid);
+					xPTEST(native_invalid, native_invalid);
+				}
+				stackless_product_failed.emplace(use_avx512_stackless_masks ? Jcc_NotCarry : Jcc_NotZero);
 			}
 		}
 		if (op.IsKind(VuUpperFmacSoftKind::Msub))
@@ -3110,23 +3510,42 @@ static void mVUemitUpperInlineMaddExactResult(microVU& mVU, VuUpperFmacSoftDescr
 		xPAND(native_work, native_operand, ptr128[s_vu_soft_exp_field]);
 		if (!accumulator_nonextended)
 		{
-			xPCMP.EQD(native_invalid, native_work, ptr128[s_vu_soft_exp_field]);
-			xPTEST(native_invalid, native_invalid);
+			if (use_avx512_stackless_masks)
+			{
+				xVPCMPD(k2, native_work, xmm17, 0);
+				xKTESTW(k2, k2);
+			}
+			else
+			{
+				xPCMP.EQD(native_invalid, native_work, ptr128[s_vu_soft_exp_field]);
+				xPTEST(native_invalid, native_invalid);
+			}
 			stackless_acc_input_failed.emplace(Jcc_NotZero);
 		}
 		xPAND(native_invalid, native_product, ptr128[s_vu_soft_exp_field]);
 		// Product-zero lanes preserve ACC and therefore need no exponent-gap
-		// fallback. Giving them ACC's exponent makes their alignment shift zero;
-		// native_power is still the proven PS2 product-zero mask here.
-		xPBLEND.VB(native_invalid, native_invalid, native_work, native_power);
+		// fallback. Giving them ACC's exponent makes their alignment shift zero.
+		if (use_avx512_stackless_masks)
+			xVPBLENDMD(native_invalid, native_invalid, native_work, k1);
+		else
+			xPBLEND.VB(native_invalid, native_invalid, native_work, native_power);
 		if (flush_to_zero)
 		{
 			// With both terms at exponent 253 or below, their sum cannot reach
 			// exponent 255. Prove that before the add so its result needs no
 			// dependent upper-boundary classification.
-			xPMAX.UD(native_power, native_work, native_invalid);
-			xPCMP.GTD(native_power, ptr128[s_vu_soft_exp_field_253]);
-			xPTEST(native_power, native_power);
+			if (use_avx512_stackless_masks)
+			{
+				xVPCMPD(k2, native_work, ptr128[s_vu_soft_exp_field_253], 6);
+				xVPCMPD(k3, native_invalid, ptr128[s_vu_soft_exp_field_253], 6);
+				xKORTESTW(k2, k3);
+			}
+			else
+			{
+				xPMAX.UD(native_power, native_work, native_invalid);
+				xPCMP.GTD(native_power, ptr128[s_vu_soft_exp_field_253]);
+				xPTEST(native_power, native_power);
+			}
 			stackless_result_failed.emplace(Jcc_NotZero);
 		}
 		// The complete path owns nonzero-product exponent gaps above 24 and
@@ -3134,23 +3553,48 @@ static void mVUemitUpperInlineMaddExactResult(microVU& mVU, VuUpperFmacSoftDescr
 		xPSUB.D(native_work, native_invalid);
 		xPSRA.D(native_work, 23);
 		xPABS.D(native_power, native_work);
-		xPCMP.GTD(native_invalid, native_power, ptr128[s_vu_soft_exp_24]);
-		xPTEST(native_invalid, native_invalid);
+		if (use_avx512_stackless_masks)
+		{
+			xVPCMPD(k2, native_power, ptr128[s_vu_soft_exp_24], 6);
+			xKTESTW(k2, k2);
+		}
+		else
+		{
+			xPCMP.GTD(native_invalid, native_power, ptr128[s_vu_soft_exp_24]);
+			xPTEST(native_invalid, native_invalid);
+		}
 		stackless_difference_failed.emplace(Jcc_NotZero);
 		xPSUB.D(native_power, ptr128[s_vu_soft_one]);
 		xPMAX.SD(native_power, ptr128[s_vu_soft_zero]);
-		xPCMP.GTD(native_invalid, native_work, ptr128[s_vu_soft_zero]);
-		xPBLEND.VB(native_work, native_operand, native_product, native_invalid);
-		xPBLEND.VB(native_product, native_product, native_operand, native_invalid);
+		if (use_avx512_stackless_masks)
+		{
+			xVPCMPD(k2, native_work, xmm16, 6);
+			xVPBLENDMD(native_work, native_operand, native_product, k2);
+			xVPBLENDMD(native_product, native_product, native_operand, k2);
+		}
+		else
+		{
+			xPCMP.GTD(native_invalid, native_work, ptr128[s_vu_soft_zero]);
+			xPBLEND.VB(native_work, native_operand, native_product, native_invalid);
+			xPBLEND.VB(native_product, native_product, native_operand, native_invalid);
+		}
 		xVPSRLVD(native_work, native_work, native_power);
 		xVPSLLVD(native_work, native_work, native_power);
 		xADD.PS(native_product, native_work);
 		if (use_identity_stackless_madd)
 		{
 			xPAND(native_work, source, ptr128[s_vu_soft_abs]);
-			xMOVAPS(native_invalid, ptr128[s_vu_soft_hidden_bit]);
-			xPCMP.GTD(native_invalid, native_work);
-			xPBLEND.VB(native_product, native_product, accumulator, native_invalid);
+			if (use_avx512_stackless_masks)
+			{
+				xVPCMPD(k2, native_work, ptr128[s_vu_soft_hidden_bit], 1);
+				xVPBLENDMD(native_product, native_product, accumulator, k2);
+			}
+			else
+			{
+				xMOVAPS(native_invalid, ptr128[s_vu_soft_hidden_bit]);
+				xPCMP.GTD(native_invalid, native_work);
+				xPBLEND.VB(native_product, native_product, accumulator, native_invalid);
+			}
 		}
 
 		if (!flush_to_zero)
@@ -3158,19 +3602,31 @@ static void mVUemitUpperInlineMaddExactResult(microVU& mVU, VuUpperFmacSoftDescr
 			// A computed denormal is not representable as a PS2 normal result.
 			// Exact zero and normal finite results can commit directly.
 			xPAND(native_work, native_product, ptr128[s_vu_soft_abs]);
-			xPCMP.EQD(native_invalid, native_work, ptr128[s_vu_soft_zero]);
+			if (use_avx512_stackless_masks)
+				xVPCMPD(k2, native_work, xmm16, 0);
+			else
+				xPCMP.EQD(native_invalid, native_work, ptr128[s_vu_soft_zero]);
 			xPSUB.D(native_work, ptr128[s_vu_soft_hidden_bit]);
 			xPXOR(native_work, ptr128[s_vu_soft_sign]);
-			xPCMP.GTD(native_work, ptr128[s_vu_soft_safe_range_biased_max]);
-			xPANDN(native_power, native_invalid, native_work);
-			xPTEST(native_power, native_power);
-			stackless_result_failed.emplace(Jcc_NotZero);
+			if (use_avx512_stackless_masks)
+			{
+				xVPCMPD(k3, native_work, ptr128[s_vu_soft_safe_range_biased_max], 6);
+				xKTESTW(k2, k3); // CF = (~k2 & k3) == 0
+			}
+			else
+			{
+				xPCMP.GTD(native_work, ptr128[s_vu_soft_safe_range_biased_max]);
+				xPANDN(native_power, native_invalid, native_work);
+				xPTEST(native_power, native_power);
+			}
+			stackless_result_failed.emplace(use_avx512_stackless_masks ? Jcc_NotCarry : Jcc_NotZero);
 		}
 		if (switch_native_mxcsr)
 			xLDMXCSR(ptr32[mVU.index == 0 ? &EmuConfig.Cpu.VU0FPCR.bitmask : &EmuConfig.Cpu.VU1FPCR.bitmask]);
 		mVUemitUpperInlineCommitResult(mVU, destination, native_product);
 		// The entry guard proved the active ACC overflow bits clear, and the
 		// accepted result cannot set them. Inactive masked bits remain untouched.
+		mVUemitSoftProfileCount(AVX512Profile::VuMaddStacklessDone);
 		stackless_common_finished.emplace();
 
 		stackless_acc_overflow_failed.SetTarget();
@@ -3281,6 +3737,7 @@ static void mVUemitUpperInlineMaddExactResult(microVU& mVU, VuUpperFmacSoftDescr
 			xMOV(ptr32[&mVU.regs().accflag], 0);
 		if (switch_native_mxcsr)
 			xLDMXCSR(ptr32[mVU.index == 0 ? &EmuConfig.Cpu.VU0FPCR.bitmask : &EmuConfig.Cpu.VU1FPCR.bitmask]);
+		mVUemitSoftProfileCount(AVX512Profile::VuMaddCompactDone);
 		compact_common_finished.emplace();
 
 		compact_acc_overflow_failed.SetTarget();
@@ -3390,6 +3847,7 @@ static void mVUemitUpperInlineMaddExactResult(microVU& mVU, VuUpperFmacSoftDescr
 			xLEA(rdx, ptr[rsp + register_operand]);
 			xLEA(rcx, ptr[rsp + register_booth_correction]);
 			xMOV(r10d, ptr32[rsp + register_booth_lane_mask]);
+			mVUemitSoftProfileCount(AVX512Profile::VuMulBoothCall);
 			xCALL(mVU.softMulBoothPacked);
 			if (register_booth_correction_ready.has_value())
 				register_booth_correction_ready->SetTarget();
@@ -3605,16 +4063,18 @@ static void mVUemitUpperInlineMaddExactResult(microVU& mVU, VuUpperFmacSoftDescr
 		if (switch_native_mxcsr)
 			xLDMXCSR(ptr32[mVU.index == 0 ? &EmuConfig.Cpu.VU0FPCR.bitmask : &EmuConfig.Cpu.VU1FPCR.bitmask]);
 		mVUemitUpperSoftStackFree(register_stack_size);
+		mVUemitSoftProfileCount(AVX512Profile::VuMaddRegisterDone);
 		register_common_finished.emplace();
 
-		register_acc_overflow_failed.SetTarget();
-		if (register_input_failed.has_value())
-			register_input_failed->SetTarget();
-		register_product_failed.SetTarget();
-		if (register_corrected_product_failed.has_value())
-			register_corrected_product_failed->SetTarget();
-		register_acc_input_failed.SetTarget();
-		register_result_failed.SetTarget();
+		{
+			mVUSoftFailureJoin failures;
+			failures.Bind(register_acc_overflow_failed, AVX512Profile::VuMaddFailAccOverflow);
+			failures.Bind(register_input_failed, AVX512Profile::VuMaddFailInput);
+			failures.Bind(register_product_failed, AVX512Profile::VuMaddFailProduct);
+			failures.Bind(register_corrected_product_failed, AVX512Profile::VuMaddFailCorrected);
+			failures.Bind(register_acc_input_failed, AVX512Profile::VuMaddFailAccInput);
+			failures.Bind(register_result_failed, AVX512Profile::VuMaddFailResult);
+		}
 		if (switch_native_mxcsr)
 			xLDMXCSR(ptr32[mVU.index == 0 ? &EmuConfig.Cpu.VU0FPCR.bitmask : &EmuConfig.Cpu.VU1FPCR.bitmask]);
 		mVUemitUpperSoftStackFree(register_stack_size);
@@ -3638,6 +4098,7 @@ static void mVUemitUpperInlineMaddExactResult(microVU& mVU, VuUpperFmacSoftDescr
 		xMOV(r8d, ptr32[&mVU.regs().accflag]);
 		xLEA(r9, ptr[rsp + result_offset]);
 		xMOV(r10d, _X_Y_Z_W);
+		mVUemitSoftProfileCount(AVX512Profile::VuMaddExactVectorCall);
 		xCALL(mVU.softMaddExactVector[op.IsKind(VuUpperFmacSoftKind::Msub) ? 1 : 0]
 									 [op.WritesAcc() ? 1 : 0]);
 
@@ -3717,6 +4178,7 @@ static void mVUemitUpperInlineMaddExactResult(microVU& mVU, VuUpperFmacSoftDescr
 		xLEA(r9, ptr[rsp + result_offset]);
 		xMOV(r10d, static_cast<u32>(_X_Y_Z_W));
 		xMOV(r11d, static_cast<u32>(s_vu_soft_lane_mask[_X_Y_Z_W]));
+		mVUemitSoftProfileCount(AVX512Profile::VuMaddPackedCall);
 		xCALL(mVU.softMaddPacked[op.IsKind(VuUpperFmacSoftKind::Msub) ? 1 : 0]);
 		xTEST(eax, eax);
 		xForwardJZ32 outlined_common_failed;
@@ -3739,6 +4201,7 @@ static void mVUemitUpperInlineMaddExactResult(microVU& mVU, VuUpperFmacSoftDescr
 		xMOV(r8d, ptr32[rsp + incoming_acc_overflow]);
 		xAND(r8d, lane_bit);
 		xMOV(r9d, op.IsKind(VuUpperFmacSoftKind::Msub) ? 1 : 0);
+		mVUemitSoftProfileCount(AVX512Profile::VuMaddLaneCall);
 		xCALL(mVU.softMaddIntegratedLane);
 		xMOV(resultPtr(offsetof(VuSoftFmacJitResult, value) + lane * 4), eax);
 		xMOV(ptr32[rsp + lane_flags + lane * 4], edx);
@@ -3876,6 +4339,7 @@ static void mVUemitUpperSoftExact(microVU& mVU, VuUpperFmacSoftDescriptor op)
 		mVU.regAlloc->markSoftNonExtended(op.WritesAcc() ? mVUsoftAccRegisterIndex : _Fd_, _X_Y_Z_W);
 		return;
 	}
+	mVUemitSoftProfileCount(op.IsKind(VuUpperFmacSoftKind::Mul) ? AVX512Profile::VuMul : AVX512Profile::VuMadd);
 	mVU.regAlloc->flushCallerSavedGPRs();
 	const int variant = op.OperandVariant();
 	const xmm& source = mVU.regAlloc->allocReg(_Fs_);
@@ -3915,11 +4379,8 @@ static void mVUemitUpperSoftExact(microVU& mVU, VuUpperFmacSoftDescriptor op)
 			(mVU.regAlloc->getSoftNonExtendedMask(_Fs_) & source_mask) == source_mask;
 		bool operand_nonextended = operand_mask != 0 &&
 		                           (mVU.regAlloc->getSoftNonExtendedMask(_Ft_) & operand_mask) == operand_mask;
-		// Use allocator-local facts only when they cover both inputs. Partial facts
-		// do not prove that the complete exceptional-input guard can be omitted.
-		const bool inputs_nonextended = source_nonextended && operand_nonextended;
-		source_nonextended = inputs_nonextended;
-		operand_nonextended = inputs_nonextended;
+		// "Nonextended" only means E != 255 for the covered lanes. The lowering handles
+		// a one-sided proof by checking just the other input. Needs proper testing.
 		const xmm& accumulator = mVU.regAlloc->allocReg(32);
 		const bool accumulator_nonextended =
 			mVU.regAlloc->getSoftNonExtendedMask(mVUsoftAccRegisterIndex) == 0xf;

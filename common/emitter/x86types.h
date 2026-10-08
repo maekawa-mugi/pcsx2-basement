@@ -8,6 +8,7 @@
 #include "common/Pcsx2Defs.h"
 
 static const uint iREGCNT_XMM = 16;
+static const uint iREGCNT_XMM_EVEX = 32;
 static const uint iREGCNT_GPR = 16;
 
 enum XMMSSEType
@@ -18,7 +19,7 @@ enum XMMSSEType
 };
 
 extern thread_local u8* x86Ptr;
-extern thread_local XMMSSEType g_xmmtypes[iREGCNT_XMM];
+extern thread_local XMMSSEType g_xmmtypes[iREGCNT_XMM_EVEX];
 
 namespace x86Emitter
 {
@@ -29,8 +30,35 @@ namespace x86Emitter
 	static constexpr int SHADOW_STACK_SIZE = 0;
 #endif
 
-	/// This will switch all SSE instructions to generate AVX instructions instead
+	/// This will switch all SSE instructions to generate AVX instructions instead.
 	extern bool use_avx;
+
+	struct AVX512Features
+	{
+		bool f = false;
+		bool cd = false;
+		bool vl = false;
+		bool dq = false;
+		bool bw = false;
+		bool vbmi = false;
+		bool vbmi2 = false;
+		bool vpopcntdq = false;
+		bool bitalg = false;
+		bool vnni = false;
+		bool vpclmulqdq = false;
+		bool vp2intersect = false;
+
+		// The optional backend targets the Ice Lake instruction set. Hosts with
+		// only a subset retain the existing AVX2/SSE generators and handlers.
+		constexpr bool HasCore() const
+		{
+			return f && vl && bw && dq && cd && vbmi && vbmi2 && vnni &&
+				bitalg && vpopcntdq && vpclmulqdq;
+		}
+	};
+
+	// Kept separate from use_avx because AVX-512 extensions are not a simple ISA ladder.
+	extern AVX512Features avx512;
 
 	extern void xWrite8(u8 val);
 	extern void xWrite16(u16 val);
@@ -236,7 +264,7 @@ namespace x86Emitter
 		{
 			// Note: to avoid tons of ifdef, the 32 bits build will instantiate
 			// all 16x64 bits registers.
-			pxAssert((Id >= xRegId_Empty) && (Id < 16));
+			pxAssert((Id >= xRegId_Empty) && (Id < ((operandSize >= 16) ? static_cast<int>(iREGCNT_XMM_EVEX) : 16)));
 		}
 
 	public:
@@ -251,6 +279,7 @@ namespace x86Emitter
 		bool IsEmpty() const { return Id < 0; }
 		bool IsInvalid() const { return Id == xRegId_Invalid; }
 		bool IsExtended() const { return (Id >= 0 && (Id & 0x0F) > 7); } // Register 8-15 need an extra bit to be selected
+		bool IsEVEXHigh() const { return (GetOperandSize() >= 16 && Id >= 16); }
 		bool IsExtended8Bit() const { return (Is8BitOp() && Id >= 0x10); }
 		bool IsMem() const { return false; }
 		bool IsReg() const { return true; }
@@ -438,6 +467,7 @@ namespace x86Emitter
 		bool operator!=(const xRegisterSSE& src) const { return this->Id != src.Id; }
 
 		static const inline xRegisterSSE& GetInstance(uint id);
+		static const inline xRegisterSSE& GetEVEXInstance(uint id);
 		static const inline xRegisterSSE& GetYMMInstance(uint id);
 
 		/// Returns the register to use when calling a C function.
@@ -447,6 +477,20 @@ namespace x86Emitter
 
 		/// Returns true if the specified register is caller-saved (volatile).
 		static inline bool IsCallerSaved(uint id);
+	};
+
+	class xRegisterK
+	{
+	public:
+		explicit constexpr xRegisterK(u8 regId)
+			: Id(regId)
+		{
+		}
+
+		constexpr u8 GetId() const { return Id; }
+
+	private:
+		u8 Id;
 	};
 
 	class xRegisterCL : public xRegister8
@@ -584,13 +628,18 @@ namespace x86Emitter
 	};
 
 	extern const xRegisterEmpty xEmptyReg;
+	extern const xRegisterK k0, k1, k2, k3, k4, k5, k6, k7;
 
 	// clang-format off
 	extern const xRegisterSSE
     xmm0, xmm1, xmm2, xmm3,
     xmm4, xmm5, xmm6, xmm7,
     xmm8, xmm9, xmm10, xmm11,
-    xmm12, xmm13, xmm14, xmm15;
+    xmm12, xmm13, xmm14, xmm15,
+    xmm16, xmm17, xmm18, xmm19,
+    xmm20, xmm21, xmm22, xmm23,
+    xmm24, xmm25, xmm26, xmm27,
+    xmm28, xmm29, xmm30, xmm31;
 
 	// TODO: This needs to be _M_SSE >= 0x500'ed, but we can't do it atm because common doesn't have variants.
 	extern const xRegisterSSE
@@ -683,8 +732,9 @@ static constexpr const xAddressReg& RTEXTPTR = rbx;
 	bool xRegisterSSE::IsCallerSaved(uint id)
 	{
 #ifdef _WIN32
-		// XMM6 through XMM15 are saved. Upper 128 bits is always volatile.
-		return (id < 6);
+		// XMM6 through XMM15 are nonvolatile in their low 128 bits. XMM16-XMM31
+		// are volatile when AVX-512 state is available.
+		return (id < 6 || id >= 16);
 #else
 		// All vector registers are volatile.
 		return true;
@@ -701,6 +751,24 @@ static constexpr const xAddressReg& RTEXTPTR = rbx;
 				&xmm12, &xmm13, &xmm14, &xmm15};
 
 		pxAssert(id < iREGCNT_XMM);
+		return *m_tbl_xmmRegs[id];
+	}
+
+	const xRegisterSSE& xRegisterSSE::GetEVEXInstance(uint id)
+	{
+		static const xRegisterSSE* const m_tbl_xmmRegs[] =
+		{
+			&xmm0, &xmm1, &xmm2, &xmm3,
+			&xmm4, &xmm5, &xmm6, &xmm7,
+			&xmm8, &xmm9, &xmm10, &xmm11,
+			&xmm12, &xmm13, &xmm14, &xmm15,
+			&xmm16, &xmm17, &xmm18, &xmm19,
+			&xmm20, &xmm21, &xmm22, &xmm23,
+			&xmm24, &xmm25, &xmm26, &xmm27,
+			&xmm28, &xmm29, &xmm30, &xmm31
+		};
+
+		pxAssert(id < iREGCNT_XMM_EVEX);
 		return *m_tbl_xmmRegs[id];
 	}
 

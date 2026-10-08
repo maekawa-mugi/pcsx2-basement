@@ -111,6 +111,14 @@ private:
 	void blendr(const XYm& b, const XYm& a, const XYm& mask);
 	void blend8(const XYm& a, const XYm& b);
 	void blend8r(const XYm& b, const XYm& a);
+
+	// Temps that only move as whole vectors live in YMM16+ on AVX-512 hosts instead of
+	// m_local.temp. Partially accessed ones (lod, uv_minmax) and zs/zd (VPBLENDVB has no
+	// EVEX form) stay in memory.
+	enum class HighTemp { z0, cov, vf, trb, tga, uv0, uv1 };
+	XYm highTemp(HighTemp t) const;
+	void saveTemp(HighTemp t, const Xbyak::Address& mem, const XYm& src, bool ps = false);
+	void loadTemp(const XYm& dst, HighTemp t, const Xbyak::Address& mem);
 	void split16_2x8(const XYm& l, const XYm& h, const XYm& src);
 
 	void Init();

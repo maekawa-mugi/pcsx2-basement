@@ -69,8 +69,10 @@ using namespace Xbyak;
 
 #if USING_YMM
 static constexpr const GSScanlineConstantData256B& g_const = g_const_256b;
+using GConstType = GSScanlineConstantData256B;
 #else
 static constexpr const GSScanlineConstantData128B& g_const = g_const_128b;
+using GConstType = GSScanlineConstantData128B;
 #endif
 
 template <typename A, typename B>
@@ -187,6 +189,14 @@ void GSDrawScanlineCodeGenerator::broadcastsd(const XYm& reg, const Address& mem
 
 void GSDrawScanlineCodeGenerator::broadcastGPRToVec(const XYm& vec, const Xbyak::Reg32& gpr)
 {
+#if USING_YMM
+	if (hasAVX512)
+	{
+		// EVEX GPR-source broadcast: one instruction instead of movd + broadcast. Needs proper testing.
+		actual.vpbroadcastd(vec, gpr);
+		return;
+	}
+#endif
 	movd(Xmm(vec.getIdx()), gpr);
 #if USING_YMM
 	vpbroadcastd(vec, Xmm(vec.getIdx()));
@@ -230,9 +240,10 @@ void GSDrawScanlineCodeGenerator::clamp16(const XYm& a, const XYm& temp)
 	}
 	else
 	{
+		// PSHUFB with zero-index bytes widens the low 8 bytes per lane (3 -> 2 instructions, no temp).
+		// Needs proper testing.
 		packuswb(a, a);
-		pxor(temp, temp);
-		punpcklbw(a, temp);
+		actual.vpshufb(a, a, ptr[_m_const + offsetof(GSScanlineConstantData256B, m_clamp16_shuf)]);
 	}
 }
 
@@ -246,6 +257,13 @@ void GSDrawScanlineCodeGenerator::alltrue(const XYm& test)
 
 void GSDrawScanlineCodeGenerator::blend(const XYm& a, const XYm& b, const XYm& mask)
 {
+	if (hasAVX512)
+	{
+		// a = mask ? b : a, bitwise. Leaves b and mask intact (callers treat them as destroyed).
+		vpternlogd(a, b, mask, 0xd8);
+		return;
+	}
+
 	pand(b, mask);
 	pandn(mask, a);
 	if (hasAVX)
@@ -261,6 +279,13 @@ void GSDrawScanlineCodeGenerator::blend(const XYm& a, const XYm& b, const XYm& m
 
 void GSDrawScanlineCodeGenerator::blendr(const XYm& b, const XYm& a, const XYm& mask)
 {
+	if (hasAVX512)
+	{
+		// b = mask ? b : a, bitwise.
+		vpternlogd(b, a, mask, 0xe4);
+		return;
+	}
+
 	pand(b, mask);
 	pandn(mask, a);
 	por(b, mask);
@@ -269,6 +294,29 @@ void GSDrawScanlineCodeGenerator::blendr(const XYm& b, const XYm& a, const XYm& 
 void GSDrawScanlineCodeGenerator::blend8(const XYm& a, const XYm& b)
 {
 	pblendvb(a, b /*, xym0 */);
+}
+
+GSDrawScanlineCodeGenerator::XYm GSDrawScanlineCodeGenerator::highTemp(HighTemp t) const
+{
+	return XYm(16 + static_cast<int>(t));
+}
+
+void GSDrawScanlineCodeGenerator::saveTemp(HighTemp t, const Xbyak::Address& mem, const XYm& src, bool ps)
+{
+	if (hasAVX512)
+		actual.vmovdqa32(highTemp(t), src);
+	else if (ps)
+		movaps(mem, src);
+	else
+		movdqa(mem, src);
+}
+
+void GSDrawScanlineCodeGenerator::loadTemp(const XYm& dst, HighTemp t, const Xbyak::Address& mem)
+{
+	if (hasAVX512)
+		actual.vmovdqa32(dst, highTemp(t));
+	else
+		movdqa(dst, mem);
 }
 
 void GSDrawScanlineCodeGenerator::blend8r(const XYm& b, const XYm& a)
@@ -291,22 +339,19 @@ void GSDrawScanlineCodeGenerator::split16_2x8(const XYm& l, const XYm& h, const 
 
 	if (hasAVX)
 	{
+		// l = src & 0x00ff (memory mask), h = src >> 8: 2 instructions instead of 3. Needs proper testing.
+		const Address mask = ptr[_m_const + offsetof(GConstType, m_word_lo_mask)];
 		if (src == h)
 		{
-			vpsllw(l, src, 8);
+			vpand(l, src, mask);
 			psrlw(h, 8);
-		}
-		else if (src == l)
-		{
-			vpsrlw(h, src, 8);
-			psllw(l, 8);
 		}
 		else
 		{
-			vpsllw(l, src, 8);
 			vpsrlw(h, src, 8);
+			vpand(l, src, mask);
 		}
-		psrlw(l, 8);
+		return;
 	}
 	else
 	{
@@ -754,7 +799,7 @@ void GSDrawScanlineCodeGenerator::Init()
 				broadcastsd(xym1, ptr[a3 + offsetof(GSVertexSW, p.z)]); // v.p.z
 				cvtps2pd(xym7, ptr[a1 + offsetof(GSScanlineLocalData::skip, z.I8[0])]);
 				addpd(xym7, xym1);
-				movaps(_rip_local(temp.z0), xym7);
+				saveTemp(HighTemp::z0, _rip_local(temp.z0), xym7, true);
 				cvtps2pd(_z, ptr[a1 + offsetof(GSScanlineLocalData::skip, z.I8[vecsize/2])]);
 				addpd(_z, xym1);
 			}
@@ -784,7 +829,7 @@ void GSDrawScanlineCodeGenerator::Init()
 			}
 			psrlw(xym3, 9);
 
-			movdqa(_rip_local(temp.cov), xym3);
+			saveTemp(HighTemp::cov, _rip_local(temp.cov), xym3);
 		}
 
 		if (m_sel.tfx != TFX_NONE)
@@ -822,7 +867,7 @@ void GSDrawScanlineCodeGenerator::Init()
 					pshuflw(vf, t, _MM_SHUFFLE(2, 2, 0, 0));
 					pshufhw(vf, vf, _MM_SHUFFLE(2, 2, 0, 0));
 					psrlw(vf, 12);
-					movdqa(_rip_local(temp.vf), vf);
+					saveTemp(HighTemp::vf, _rip_local(temp.vf), vf);
 				}
 			}
 			else
@@ -940,8 +985,11 @@ void GSDrawScanlineCodeGenerator::Step()
 		{
 			broadcastsd(xym7, _rip_local_d_p(z));
 			addpd(_z, xym7);
-			addpd(xym7, _rip_local(temp.z0));
-			movaps(_rip_local(temp.z0), xym7);
+			if (hasAVX512)
+				actual.vaddpd(xym7, xym7, highTemp(HighTemp::z0));
+			else
+				addpd(xym7, _rip_local(temp.z0));
+			saveTemp(HighTemp::z0, _rip_local(temp.z0), xym7, true);
 		}
 
 		// f = f.add16(m_local.d4.f);
@@ -1253,11 +1301,11 @@ void GSDrawScanlineCodeGenerator::SampleTexture()
 			pshufhw(vf, vf, _MM_SHUFFLE(2, 2, 0, 0));
 			psrlw(vf, 12);
 			if (needsMoreRegs)
-				movdqa(_rip_local(temp.vf), vf);
+				saveTemp(HighTemp::vf, _rip_local(temp.vf), vf);
 		}
 		else if (!needsMoreRegs)
 		{
-			movdqa(vf, _rip_local(temp.vf));
+			loadTemp(vf, HighTemp::vf, _rip_local(temp.vf));
 		}
 	}
 
@@ -1444,7 +1492,7 @@ void GSDrawScanlineCodeGenerator::SampleTexture_TexelReadHelper(int mip_offset)
 
 		XYm vf = xym7;
 		if (needsMoreRegs)
-			movdqa(vf, _rip_local(temp.vf));
+			loadTemp(vf, HighTemp::vf, _rip_local(temp.vf));
 
 		lerp16_4(xym5, xym0, vf);
 		lerp16_4(xym6, xym1, vf);
@@ -1758,8 +1806,8 @@ void GSDrawScanlineCodeGenerator::SampleTextureLOD()
 			vpsravd(xym2, xym2, xym0);
 			vpsravd(xym3, xym3, xym0);
 
-			movdqa(_rip_local(temp.uv[0]), xym2);
-			movdqa(_rip_local(temp.uv[1]), xym3);
+			saveTemp(HighTemp::uv0, _rip_local(temp.uv[0]), xym2);
+			saveTemp(HighTemp::uv1, _rip_local(temp.uv[1]), xym3);
 
 			// m_local.gd->t.minmax => m_local.temp.uv_minmax[0/1]
 
@@ -1816,8 +1864,8 @@ void GSDrawScanlineCodeGenerator::SampleTextureLOD()
 			THREEARG(punpckhdq, xym3, xym2, xym5);
 			punpckldq(xym2, xym5);
 
-			movdqa(_rip_local(temp.uv[0]), xym2);
-			movdqa(_rip_local(temp.uv[1]), xym3);
+			saveTemp(HighTemp::uv0, _rip_local(temp.uv[0]), xym2);
+			saveTemp(HighTemp::uv1, _rip_local(temp.uv[1]), xym3);
 
 			movdqa(xym5, _rip_local(temp.uv_minmax[0]));
 			movdqa(xym6, _rip_local(temp.uv_minmax[1]));
@@ -1852,8 +1900,8 @@ void GSDrawScanlineCodeGenerator::SampleTextureLOD()
 		psrad(xym2, Xmm(xym0.getIdx()));
 		psrad(xym3, Xmm(xym0.getIdx()));
 
-		movdqa(_rip_local(temp.uv[0]), xym2);
-		movdqa(_rip_local(temp.uv[1]), xym3);
+		saveTemp(HighTemp::uv0, _rip_local(temp.uv[0]), xym2);
+		saveTemp(HighTemp::uv1, _rip_local(temp.uv[1]), xym3);
 
 		movdqa(xym5, _rip_local(temp.uv_minmax[0]));
 		movdqa(xym6, _rip_local(temp.uv_minmax[1]));
@@ -1888,7 +1936,7 @@ void GSDrawScanlineCodeGenerator::SampleTextureLOD()
 		pshufhw(vf, vf, _MM_SHUFFLE(2, 2, 0, 0));
 		psrlw(vf, 12);
 		if (needsMoreRegs)
-			movdqa(_rip_local(temp.vf), vf);
+			saveTemp(HighTemp::vf, _rip_local(temp.vf), vf);
 	}
 
 	// GSVector4i uv0 = u.sra32(16).ps32(v.sra32(16));
@@ -1931,11 +1979,11 @@ void GSDrawScanlineCodeGenerator::SampleTextureLOD()
 
 	if (m_sel.mmin != 1) // !round-off mode
 	{
-		movdqa(_rip_local(temp.trb), xym5);
-		movdqa(_rip_local(temp.tga), xym6);
+		saveTemp(HighTemp::trb, _rip_local(temp.trb), xym5);
+		saveTemp(HighTemp::tga, _rip_local(temp.tga), xym6);
 
-		movdqa(xym2, _rip_local(temp.uv[0]));
-		movdqa(xym3, _rip_local(temp.uv[1]));
+		loadTemp(xym2, HighTemp::uv0, _rip_local(temp.uv[0]));
+		loadTemp(xym3, HighTemp::uv1, _rip_local(temp.uv[1]));
 
 		psrad(xym2, 1);
 		psrad(xym3, 1);
@@ -1970,7 +2018,7 @@ void GSDrawScanlineCodeGenerator::SampleTextureLOD()
 			pshufhw(vf, vf, _MM_SHUFFLE(2, 2, 0, 0));
 			psrlw(vf, 12);
 			if (needsMoreRegs)
-				movdqa(_rip_local(temp.vf), vf);
+				saveTemp(HighTemp::vf, _rip_local(temp.vf), vf);
 		}
 
 		// GSVector4i uv0 = u.sra32(16).ps32(v.sra32(16));
@@ -2013,8 +2061,8 @@ void GSDrawScanlineCodeGenerator::SampleTextureLOD()
 		movdqa(xym0, m_sel.lcm ? _rip_global(lod.f) : _rip_local(temp.lod.f));
 		psrlw(xym0, 1);
 
-		movdqa(xym2, _rip_local(temp.trb));
-		movdqa(xym3, _rip_local(temp.tga));
+		loadTemp(xym2, HighTemp::trb, _rip_local(temp.trb));
+		loadTemp(xym3, HighTemp::tga, _rip_local(temp.tga));
 
 		lerp16(xym5, xym2, xym0, 0);
 		lerp16(xym6, xym3, xym0, 0);
@@ -2244,7 +2292,7 @@ void GSDrawScanlineCodeGenerator::AlphaTFX()
 
 			if (m_sel.edge)
 			{
-				movdqa(xym0, _rip_local(temp.cov));
+				loadTemp(xym0, HighTemp::cov, _rip_local(temp.cov));
 			}
 			else
 			{
@@ -2265,7 +2313,7 @@ void GSDrawScanlineCodeGenerator::AlphaTFX()
 
 			if (m_sel.edge)
 			{
-				movdqa(xym1, _rip_local(temp.cov));
+				loadTemp(xym1, HighTemp::cov, _rip_local(temp.cov));
 			}
 			else
 			{
@@ -2663,6 +2711,20 @@ void GSDrawScanlineCodeGenerator::AlphaBlend()
 				// c[2] = ((fd & 0x7c00) << 9) | ((fd & 0x001f) << 3);
 				// c[3] = ((fd & 0x8000) << 8) | ((fd & 0x03e0) >> 2);
 
+#if USING_YMM
+				if (hasAVX512)
+				{
+					// VPMULTISHIFTQB puts [R<<3, G<<3, B<<3, A<<7] in each dword, then rb = x & mask,
+					// ga = (x >> 8) & mask (15 -> 5 instructions). Needs proper testing.
+					movdqa(_dst_ga, ptr[_m_const + offsetof(GSScanlineConstantData256B, m_c5_expand_ctrl)]);
+					actual.vpmultishiftqb(_dst_ga, _dst_ga, _fd);
+					actual.vpand(_dst_rb, _dst_ga, ptr[_m_const + offsetof(GSScanlineConstantData256B, m_c5_rb_mask)]);
+					psrlw(_dst_ga, 8);
+					pand(_dst_ga, ptr[_m_const + offsetof(GSScanlineConstantData256B, m_c5_ga_mask)]);
+					break;
+				}
+#endif
+
 				pcmpeqd(tmp1, tmp1);
 
 				psrld(tmp1, 27); // 0x0000001f
@@ -2927,17 +2989,27 @@ void GSDrawScanlineCodeGenerator::WriteFrame()
 		// c[0] &= 0x00ff00ff;
 		// c[1] &= 0x00ff00ff;
 
-		pcmpeqd(tmp, tmp);
-		psrlw(tmp, 8);
-		pand(xym5, tmp);
-		pand(xym6, tmp);
+		pand(xym5, ptr[_m_const + offsetof(GConstType, m_word_lo_mask)]);
+		pand(xym6, ptr[_m_const + offsetof(GConstType, m_word_lo_mask)]);
 	}
 
 	// GSVector4i fs = c[0].upl16(c[1]).pu16(c[0].uph16(c[1]));
 
-	THREEARG(punpckhwd, tmp, xym5, xym6);
-	punpcklwd(xym5, xym6);
-	packuswb(xym5, tmp);
+#if USING_YMM
+	if (isYmm)
+	{
+		// PACKUSWB first, then one PSHUFB puts the bytes in RGBA order (3 -> 2 instructions, AVX2).
+		// Needs proper testing.
+		packuswb(xym5, xym6);
+		actual.vpshufb(xym5, xym5, ptr[_m_const + offsetof(GSScanlineConstantData256B, m_rgba_shuf)]);
+	}
+	else
+#endif
+	{
+		THREEARG(punpckhwd, tmp, xym5, xym6);
+		punpcklwd(xym5, xym6);
+		packuswb(xym5, tmp);
+	}
 
 	if (m_sel.fba && m_sel.fpsm != 1)
 	{
@@ -2952,6 +3024,19 @@ void GSDrawScanlineCodeGenerator::WriteFrame()
 	// xym4 = fm
 	// xym6 = fd
 
+#if USING_YMM
+	if (m_sel.fpsm == 2 && hasAVX512)
+	{
+		// Same VPMULTISHIFTQB + PAND + PMADDUBSW + PMADDWD packing as MMI PPAC5 (11 -> 5 instructions).
+		// Needs proper testing, including fba.
+		movdqa(tmp, ptr[_m_const + offsetof(GSScanlineConstantData256B, m_c5_pack_ctrl)]);
+		actual.vpmultishiftqb(xym5, tmp, xym5);
+		pand(xym5, ptr[_m_const + offsetof(GSScanlineConstantData256B, m_c5_pack_mask)]);
+		actual.vpmaddubsw(xym5, xym5, ptr[_m_const + offsetof(GSScanlineConstantData256B, m_c5_pack_w8)]); // xym5 is the unsigned operand
+		actual.vpmaddwd(xym5, xym5, ptr[_m_const + offsetof(GSScanlineConstantData256B, m_c5_pack_w16)]);
+	}
+	else
+#endif
 	if (m_sel.fpsm == 2)
 	{
 		// GSVector4i rb = fs & 0x00f800f8;
@@ -3026,6 +3111,26 @@ void GSDrawScanlineCodeGenerator::WritePixel(const XYm& src_, const AddressReg& 
 	int shift = fz * 8;
 #endif
 	RegExp base = _m_local__gd__vm + addr * 2;
+
+#if USING_YMM
+	if (hasAVX512 && !m_sel.notest && psm < 2)
+	{
+		// One byte-masked store instead of a test + branch + store per pixel (or pixel pair).
+		// Pixels outside fzm are skipped; for the fast (rfb) case they hold fd anyway.
+		// Needs proper testing on more dumps.
+		const Xbyak::Zmm data(src_.getIdx()), bytes(31), index(30);
+		const Xbyak::Opmask k(1);
+		actual.kmovd(k, mask);
+		actual.vpmovm2b(bytes, k);
+		actual.vmovdqa64(index, ptr[_m_const + offsetof(GSScanlineConstantData256B, m_wp_bytes) + (fz * 2 + psm) * 64]);
+		actual.vpermb(bytes, index, bytes);
+		actual.vpmovb2m(k, bytes);
+		actual.vmovdqa64(index, ptr[_m_const + offsetof(GSScanlineConstantData256B, m_wp_dwords)]);
+		actual.vpermd(data, index, data);
+		actual.vmovdqu8(ptr[base] | k, data);
+		return;
+	}
+#endif
 
 	if (m_sel.notest)
 	{

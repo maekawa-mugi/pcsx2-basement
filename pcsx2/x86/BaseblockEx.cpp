@@ -14,22 +14,7 @@ BASEBLOCKEX* BaseBlocks::New(u32 startpc, uptr fnptr)
 
 int BaseBlocks::LastIndex(u32 startpc) const
 {
-	if (0 == blocks.size())
-		return -1;
-
-	int imin = 0, imax = blocks.size() - 1;
-
-	while (imin != imax)
-	{
-		const int imid = (imin + imax + 1) >> 1;
-
-		if (blocks[imid].startpc > startpc)
-			imax = imid - 1;
-		else
-			imin = imid;
-	}
-
-	return imin;
+	return blocks.lastIndex(startpc);
 }
 
 #if 0

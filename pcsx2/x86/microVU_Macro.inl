@@ -22,6 +22,10 @@ using namespace R5900::Dynarec;
 
 void setupMacroOp(int mode, const char* opName)
 {
+	// COP2 exact paths are emitted inline and use fixed high XMM and k scratch
+	// without a call boundary, so no EE high value may be live here.
+	_eeDeclareHighXMMClobber(~0u);
+
 	// Set up reg allocation
 	microVU0.regAlloc->reset(true);
 
@@ -550,8 +554,15 @@ static void recCTC2()
 
 			//Need to update the sticky flags for microVU
 			mVUallocSFLAGd(&vu0Regs.VI[REG_STATUS_FLAG].UL);
-			xMOVDZX(xRegisterSSE(xmmtemp), eax); // TODO(Stenzek): This can be a broadcast.
-			xSHUF.PS(xRegisterSSE(xmmtemp), xRegisterSSE(xmmtemp), 0);
+			if (x86Emitter::avx512.HasCore())
+			{
+				xVPBROADCASTD(xRegisterSSE(xmmtemp), eax); // MOVD + SHUFPS -> 1 instruction. Needs proper testing.
+			}
+			else
+			{
+				xMOVDZX(xRegisterSSE(xmmtemp), eax); // TODO(Stenzek): This can be a broadcast.
+				xSHUF.PS(xRegisterSSE(xmmtemp), xRegisterSSE(xmmtemp), 0);
+			}
 			// Make sure the values are everywhere the need to be
 			xMOVAPS(ptr128[&vu0Regs.micro_statusflags], xRegisterSSE(xmmtemp));
 			_freeXMMreg(xmmtemp);
@@ -670,11 +681,18 @@ static void recCTC2()
 						else
 						{
 							const int gprreg = _allocX86reg(X86TYPE_GPR, _Rt_, MODE_READ);
-							if (gprreg >= 0)
-								xMOVDZX(xRegisterSSE(xmmreg), xRegister32(gprreg));
+							if (gprreg >= 0 && x86Emitter::avx512.HasCore())
+							{
+								xVPBROADCASTD(xRegisterSSE(xmmreg), xRegister32(gprreg));
+							}
 							else
-								xMOVSSZX(xRegisterSSE(xmmreg), ptr32[&cpuRegs.GPR.r[_Rt_].SD[0]]);
-							xSHUF.PS(xRegisterSSE(xmmreg), xRegisterSSE(xmmreg), 0);
+							{
+								if (gprreg >= 0)
+									xMOVDZX(xRegisterSSE(xmmreg), xRegister32(gprreg));
+								else
+									xMOVSSZX(xRegisterSSE(xmmreg), ptr32[&cpuRegs.GPR.r[_Rt_].SD[0]]);
+								xSHUF.PS(xRegisterSSE(xmmreg), xRegisterSSE(xmmreg), 0);
+							}
 						}
 					}
 				}

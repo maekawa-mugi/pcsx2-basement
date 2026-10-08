@@ -18,10 +18,10 @@ static ProcessorFeatures::VectorISA getCurrentISA()
 	// For debugging
 	if (const char* over = getenv("OVERRIDE_VECTOR_ISA"))
 	{
-		if (strcasecmp(over, "avx512f") == 0)
+		if (strcasecmp(over, "avx512") == 0 || strcasecmp(over, "avx512f") == 0)
 		{
-			fprintf(stderr, "Vector ISA Override: AVX512F\n");
-			return ProcessorFeatures::VectorISA::AVX512F;
+			fprintf(stderr, "Vector ISA Override: AVX512 (Ice Lake)\n");
+			return ProcessorFeatures::VectorISA::AVX512;
 		}
 		if (strcasecmp(over, "avx2") == 0)
 		{
@@ -44,9 +44,13 @@ static ProcessorFeatures::VectorISA getCurrentISA()
 		return ProcessorFeatures::VectorISA::SSE4;
 	if (!cpuinfo_has_x86_avx2())
 		return ProcessorFeatures::VectorISA::AVX;
-	if (!cpuinfo_has_x86_avx512f())
+	// The isa_avx512 build targets Ice Lake, so plain AVX-512F (Skylake-X) stays on AVX2.
+	if (!(cpuinfo_has_x86_avx512f() && cpuinfo_has_x86_avx512vl() && cpuinfo_has_x86_avx512bw() &&
+			cpuinfo_has_x86_avx512dq() && cpuinfo_has_x86_avx512cd() && cpuinfo_has_x86_avx512vbmi() &&
+			cpuinfo_has_x86_avx512vbmi2() && cpuinfo_has_x86_avx512vnni() && cpuinfo_has_x86_avx512bitalg() &&
+			cpuinfo_has_x86_avx512vpopcntdq() && cpuinfo_has_x86_vpclmulqdq() && cpuinfo_has_x86_gfni()))
 		return ProcessorFeatures::VectorISA::AVX2;
-	return ProcessorFeatures::VectorISA::AVX512F;
+	return ProcessorFeatures::VectorISA::AVX512;
 }
 
 #endif
@@ -83,7 +87,7 @@ static ProcessorFeatures getProcessorFeatures()
 		features.hasSlowGather = over[0] == 'Y' || over[0] == 'y' || over[0] == '1';
 		fprintf(stderr, "Processor gather override: %s\n", features.hasSlowGather ? "Slow" : "Fast");
 	}
-	else if (features.vectorISA == ProcessorFeatures::VectorISA::AVX2)
+	else if (features.vectorISA >= ProcessorFeatures::VectorISA::AVX2)
 	{
 		if (cpuinfo_get_cores_count() > 0 && cpuinfo_get_core(0)->vendor == cpuinfo_vendor_intel)
 		{

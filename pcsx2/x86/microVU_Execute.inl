@@ -43,22 +43,25 @@ void mVUdispatcherAB(mV)
 				(isVU0 ? &EmuConfig.Cpu.VU0FPCR.bitmask : &EmuConfig.Cpu.VU1FPCR.bitmask)]);
 
 		// Load Regs
-		xMOVAPS (xmmT1, ptr128[&mVU.regs().VI[REG_P].UL]);
-		xMOVAPS (xmmPQ, ptr128[&mVU.regs().VI[REG_Q].UL]);
-		xMOVDZX (xmmT2, ptr32[&mVU.regs().pending_q]);
-		xSHUF.PS(xmmPQ, xmmT1, 0); // wzyx = PPQQ
-		//Load in other Q instance
-		xPSHUF.D(xmmPQ, xmmPQ, 0xe1);
-		xMOVSS(xmmPQ, xmmT2);
-		xPSHUF.D(xmmPQ, xmmPQ, 0xe1);
-
 		if (isVU1)
 		{
-			//Load in other P instance
-			xMOVDZX(xmmT2, ptr32[&mVU.regs().pending_p]);
-			xPSHUF.D(xmmPQ, xmmPQ, 0x1B);
+			// xmmPQ = {Q, pending Q, P, pending P}: one scalar load + 3 memory INSERTPS
+			// (was 11 instructions with lane rotations). Needs proper testing.
+			xMOVDZX(xmmPQ, ptr32[&mVU.regs().VI[REG_Q].UL]);
+			xINSERTPS(xmmPQ, ptr32[&mVU.regs().pending_q], _MM_MK_INSERTPS_NDX(0, 1, 0));
+			xINSERTPS(xmmPQ, ptr32[&mVU.regs().VI[REG_P].UL], _MM_MK_INSERTPS_NDX(0, 2, 0));
+			xINSERTPS(xmmPQ, ptr32[&mVU.regs().pending_p], _MM_MK_INSERTPS_NDX(0, 3, 0));
+		}
+		else
+		{
+			xMOVAPS (xmmT1, ptr128[&mVU.regs().VI[REG_P].UL]);
+			xMOVAPS (xmmPQ, ptr128[&mVU.regs().VI[REG_Q].UL]);
+			xMOVDZX (xmmT2, ptr32[&mVU.regs().pending_q]);
+			xSHUF.PS(xmmPQ, xmmT1, 0); // wzyx = PPQQ
+			//Load in other Q instance
+			xPSHUF.D(xmmPQ, xmmPQ, 0xe1);
 			xMOVSS(xmmPQ, xmmT2);
-			xPSHUF.D(xmmPQ, xmmPQ, 0x1B);
+			xPSHUF.D(xmmPQ, xmmPQ, 0xe1);
 		}
 
 		xMOVAPS(xmmT1, ptr128[&mVU.regs().micro_macflags]);
@@ -72,6 +75,13 @@ void mVUdispatcherAB(mV)
 		xMOV(gprF1, ptr32[&mVU.regs().micro_statusflags[1]]);
 		xMOV(gprF2, ptr32[&mVU.regs().micro_statusflags[2]]);
 		xMOV(gprF3, ptr32[&mVU.regs().micro_statusflags[3]]);
+
+		// AVX-512 VF home registers (see microVFHomeMap). Loaded unconditionally when
+		// the host supports them, so a later SoftFloat toggle cannot leave stale homes.
+		mVUloadVFHomes(mVU.index);
+
+		if (AVX512Profile::Enabled())
+			xADD(ptr64[AVX512Profile::SoftCounterPtr(isVU1 ? AVX512Profile::VuProgramRuns1 : AVX512Profile::VuProgramRuns0)], 1);
 
 		// Jump to Recompiled Code Block
 		xJMP(rax);
@@ -108,6 +118,7 @@ void mVUdispatcherCD(mV)
 				(isVU0 ? &EmuConfig.Cpu.VU0FPCR.bitmask : &EmuConfig.Cpu.VU1FPCR.bitmask)]);
 
 		mVUrestoreRegs(mVU);
+		mVUloadVFHomes(mVU.index); // regAlloc state at generation time may not enable homes
 		xMOV(gprF0, ptr32[&mVU.regs().micro_statusflags[0]]);
 		xMOV(gprF1, ptr32[&mVU.regs().micro_statusflags[1]]);
 		xMOV(gprF2, ptr32[&mVU.regs().micro_statusflags[2]]);

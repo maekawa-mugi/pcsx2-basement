@@ -16,6 +16,7 @@ enum class TestISA
 	isa_sse4,
 	isa_avx,
 	isa_avx2,
+	isa_avx512,
 	isa_native,
 };
 
@@ -25,6 +26,8 @@ static bool CheckCapabilities(TestISA required_caps)
 	if (required_caps == TestISA::isa_avx && !cpuinfo_has_x86_avx())
 		return false;
 	if (required_caps == TestISA::isa_avx2 && !cpuinfo_has_x86_avx2())
+		return false;
+	if (required_caps == TestISA::isa_avx512 && g_cpu.vectorISA < ProcessorFeatures::VectorISA::AVX512)
 		return false;
 
 	return true;

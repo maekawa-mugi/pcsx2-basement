@@ -29,6 +29,7 @@ void mVUDTendProgram(mV, microFlagCycles* mFC, int isEbit)
 	memcpy(&stateBackup, &mVUregs, sizeof(mVUregs)); //backup the state, it's about to get screwed with.
 
 	mVU.regAlloc->TDwritebackAll(); //Writing back ok, invalidating early kills the rec, so don't do it :P
+	mVU.regAlloc->spillHomes(); // program ends: lazy homes back to memory
 
 	if (isEbit)
 	{
@@ -59,23 +60,15 @@ void mVUDTendProgram(mV, microFlagCycles* mFC, int isEbit)
 			xFastCall((void*)mVU1clearlpStateJIT);
 	}
 
-	// Save P/Q Regs
-	if (qInst)
-		xPSHUF.D(xmmPQ, xmmPQ, 0xe1);
-	xMOVSS(ptr32[&mVU.regs().VI[REG_Q].UL], xmmPQ);
-	xPSHUF.D(xmmPQ, xmmPQ, 0xe1);
-	xMOVSS(ptr32[&mVU.regs().pending_q], xmmPQ);
-	xPSHUF.D(xmmPQ, xmmPQ, 0xe1);
+	// Save P/Q Regs. xmmPQ lanes are {Q0, Q1, P0, P1}; qInst/pInst pick which instance is active.
+	// Direct EXTRACTPS stores, no lane rotation (needs proper testing).
+	xEXTRACTPS(ptr32[&mVU.regs().VI[REG_Q].UL], xmmPQ, qInst ? 1 : 0);
+	xEXTRACTPS(ptr32[&mVU.regs().pending_q], xmmPQ, qInst ? 0 : 1);
 
 	if (isVU1)
 	{
-		if (pInst)
-			xPSHUF.D(xmmPQ, xmmPQ, 0xb4); // Swap Pending/Active P
-		xPSHUF.D(xmmPQ, xmmPQ, 0xC6); // 3 0 1 2
-		xMOVSS(ptr32[&mVU.regs().VI[REG_P].UL], xmmPQ);
-		xPSHUF.D(xmmPQ, xmmPQ, 0x87); // 0 2 1 3
-		xMOVSS(ptr32[&mVU.regs().pending_p], xmmPQ);
-		xPSHUF.D(xmmPQ, xmmPQ, 0x27); // 3 2 1 0
+		xEXTRACTPS(ptr32[&mVU.regs().VI[REG_P].UL], xmmPQ, pInst ? 3 : 2);
+		xEXTRACTPS(ptr32[&mVU.regs().pending_p], xmmPQ, pInst ? 2 : 3);
 	}
 
 	// Save MAC, Status and CLIP Flag Instances
@@ -151,6 +144,7 @@ void mVUendProgram(mV, microFlagCycles* mFC, int isEbit)
 		mVU.regAlloc->TDwritebackAll(); //Writing back ok, invalidating early kills the rec, so don't do it :P
 	else
 		mVU.regAlloc->flushAll();
+	mVU.regAlloc->spillHomes(); // program ends: lazy homes back to memory
 
 	if (isEbit && isEbit != 3)
 	{
@@ -182,23 +176,15 @@ void mVUendProgram(mV, microFlagCycles* mFC, int isEbit)
 			xFastCall((void*)mVU1clearlpStateJIT);
 	}
 
-	// Save P/Q Regs
-	if (qInst)
-		xPSHUF.D(xmmPQ, xmmPQ, 0xe1);
-	xMOVSS(ptr32[&mVU.regs().VI[REG_Q].UL], xmmPQ);
-	xPSHUF.D(xmmPQ, xmmPQ, 0xe1);
-	xMOVSS(ptr32[&mVU.regs().pending_q], xmmPQ);
-	xPSHUF.D(xmmPQ, xmmPQ, 0xe1);
+	// Save P/Q Regs. xmmPQ lanes are {Q0, Q1, P0, P1}; qInst/pInst pick which instance is active.
+	// Direct EXTRACTPS stores, no lane rotation (needs proper testing).
+	xEXTRACTPS(ptr32[&mVU.regs().VI[REG_Q].UL], xmmPQ, qInst ? 1 : 0);
+	xEXTRACTPS(ptr32[&mVU.regs().pending_q], xmmPQ, qInst ? 0 : 1);
 
 	if (isVU1)
 	{
-		if (pInst)
-			xPSHUF.D(xmmPQ, xmmPQ, 0xb4); // Swap Pending/Active P
-		xPSHUF.D(xmmPQ, xmmPQ, 0xC6); // 3 0 1 2
-		xMOVSS(ptr32[&mVU.regs().VI[REG_P].UL], xmmPQ);
-		xPSHUF.D(xmmPQ, xmmPQ, 0x87); // 0 2 1 3
-		xMOVSS(ptr32[&mVU.regs().pending_p], xmmPQ);
-		xPSHUF.D(xmmPQ, xmmPQ, 0x27); // 3 2 1 0
+		xEXTRACTPS(ptr32[&mVU.regs().VI[REG_P].UL], xmmPQ, pInst ? 3 : 2);
+		xEXTRACTPS(ptr32[&mVU.regs().pending_p], xmmPQ, pInst ? 2 : 3);
 	}
 
 	// Save MAC, Status and CLIP Flag Instances

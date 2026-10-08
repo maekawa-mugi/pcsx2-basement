@@ -13,6 +13,11 @@
 #include "IPU/IPUdma.h"
 #include "IPU/yuv2rgb.h"
 #include "IPU/IPU_MultiISA.h"
+#ifdef _M_X86
+#include "common/emitter/x86types.h"
+#include "x86/InterpreterAVX512.h"
+#include "cpuinfo.h"
+#endif
 
 // the IPU is fixed to 16 byte strides (128-bit / QWC resolution):
 static const uint decoder_stride = 16;
@@ -326,6 +331,20 @@ __ri static void IDCT_Copy(s16* block, u8* dest, const int stride)
 {
 	IDCT_Block(block);
 
+#ifdef _M_X86
+	// PACKUSWB clamps each s16 to 0..255 directly, replacing the 8 LUT loads per row (the clip LUT is
+	// only valid for -384..639 anyway). Needs proper testing against the LUT path on FMV content.
+	const __m128i zero = _mm_setzero_si128();
+	for (int i = 0; i < 8; i++)
+	{
+		const __m128i row = _mm_loadu_si128(reinterpret_cast<const __m128i*>(block));
+		_mm_storel_epi64(reinterpret_cast<__m128i*>(dest), _mm_packus_epi16(row, row));
+		_mm_storeu_si128(reinterpret_cast<__m128i*>(block), zero);
+
+		dest += stride;
+		block += 8;
+	}
+#else
 	for (int i = 0; i < 8; i++)
 	{
 		dest[0] = (g_idct_clip_lut.data() + 384)[block[0]];
@@ -342,6 +361,7 @@ __ri static void IDCT_Copy(s16* block, u8* dest, const int stride)
 		dest += stride;
 		block += 8;
 	}
+#endif
 }
 
 
@@ -1375,6 +1395,16 @@ __fi static bool mpeg2_slice()
 				//Cb bias	- 8 * 8
 
 #if defined(ARCH_X86)
+				if (x86Emitter::avx512.HasCore())
+				{
+					InterpreterAVX512::IPUExpandU8ToU16(s, d, 256 + 64 + 64);
+				}
+				else if (cpuinfo_has_x86_avx2())
+				{
+					InterpreterAVX2::IPUExpandU8ToU16(s, d, 256 + 64 + 64);
+				}
+				else
+				{
 				__m128i zeroreg = _mm_setzero_si128();
 
 				for (uint i = 0; i < (256+64+64) / 32; ++i)
@@ -1388,6 +1418,7 @@ __fi static bool mpeg2_slice()
 					_mm_store_si128((__m128i*)d+3,	_mm_unpackhi_epi8(woot2, zeroreg));
 					s += 32;
 					d += 32;
+				}
 				}
 #elif defined(ARCH_ARM64)
 				uint8x16_t zeroreg = vmovq_n_u8(0);
@@ -1880,7 +1911,33 @@ __fi static void ipu_csc(macroblock_8& mb8, macroblock_rgb32& rgb32, int sgn)
 	int i;
 	u8* p = (u8*)&rgb32;
 
-	yuv2rgb();
+#ifdef _M_X86
+	if (x86Emitter::avx512.HasCore())
+	{
+		// FMV workloads still need proper testing beyond the exact kernel tests.
+		InterpreterAVX512::YUVToRGB(&decoder.mb8.Y[0][0], &decoder.mb8.Cb[0][0],
+			&decoder.mb8.Cr[0][0], &decoder.rgb32);
+		if (g_ipu_thresh[0] > 0 || g_ipu_thresh[1] > 0 || sgn)
+			InterpreterAVX512::CSCThresholdSign(&rgb32, g_ipu_thresh[0], g_ipu_thresh[1], sgn != 0);
+		return;
+	}
+#endif
+#ifdef _M_X86
+	const bool has_avx2 = cpuinfo_has_x86_avx2();
+	if (has_avx2)
+		InterpreterAVX2::YUVToRGB(&decoder.mb8.Y[0][0], &decoder.mb8.Cb[0][0], &decoder.mb8.Cr[0][0], &decoder.rgb32);
+	else
+#endif
+		yuv2rgb();
+
+#ifdef _M_X86
+	if (has_avx2)
+	{
+		if (g_ipu_thresh[0] > 0 || g_ipu_thresh[1] > 0 || sgn)
+			InterpreterAVX2::CSCThresholdSign(&rgb32, g_ipu_thresh[0], g_ipu_thresh[1], sgn != 0);
+		return;
+	}
+#endif
 
 	if (g_ipu_thresh[0] > 0)
 	{
@@ -1902,6 +1959,9 @@ __fi static void ipu_csc(macroblock_8& mb8, macroblock_rgb32& rgb32, int sgn)
 	}
 	if (sgn)
 	{
+		// The threshold loops above leave p past the end of rgb32. Without this the
+		// XOR missed the pixels and hit rgb16 and the decoder state after it.
+		p = (u8*)&rgb32;
 		for (i = 0; i < 16*16; i++, p += 4)
 		{
 			*(u32*)p ^= 0x808080;
@@ -1911,6 +1971,19 @@ __fi static void ipu_csc(macroblock_8& mb8, macroblock_rgb32& rgb32, int sgn)
 
 __fi static void ipu_vq(macroblock_rgb16& rgb16, u8* indx4)
 {
+#ifdef _M_X86
+	if (x86Emitter::avx512.HasCore())
+	{
+		InterpreterAVX512::VQ(&rgb16, g_ipu_vqclut, indx4);
+		return;
+	}
+	if (cpuinfo_has_x86_avx2())
+	{
+		InterpreterAVX2::VQ(&rgb16, g_ipu_vqclut, indx4);
+		return;
+	}
+#endif
+
 	const auto closest_index = [&](int i, int j) {
 		u8 index = 0;
 		int min_distance = std::numeric_limits<int>::max();

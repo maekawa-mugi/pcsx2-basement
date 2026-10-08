@@ -224,7 +224,65 @@ void ConvertVertexBuffer(const GSDrawingContext* RESTRICT ctx, GSVertexSW* RESTR
 	GSVector4 tsize = GSVector4(0x10000 << ctx->TEX0.TW, 0x10000 << ctx->TEX0.TH, 1, 0);
 	GSVector4i z_max = GSVector4i::xffffffff().srl32(GSLocalMemory::m_psm[ctx->ZBUF.PSM].fmt * 8);
 
-	for (int i = (int)count; i > 0; i--, src++, dst++)
+	int i = (int)count;
+
+#if defined(__AVX512F__) && defined(__AVX512BW__) && defined(__AVX512VL__) && defined(__AVX512DQ__)
+	// Four vertices per ZMM, one per 128-bit lane, with the same lane operations as the
+	// loop below. Sprites (which pair up vertices) stay on the scalar loop.
+	// Needs proper testing beyond matching dumps.
+	if constexpr (primclass != GS_SPRITE_CLASS)
+	{
+		const __m512i zoff = _mm512_broadcast_i32x4(off.m);
+		const __m512 ztsize = _mm512_broadcast_f32x4(tsize.m);
+		const __m512 zscale = _mm512_broadcast_f32x4(s_pos_scale.m);
+		const __m512i rgba_to_dwords = _mm512_broadcast_i32x4(_mm_setr_epi8(
+			8, -1, -1, -1, 9, -1, -1, -1, 10, -1, -1, -1, 11, -1, -1, -1));
+		// Z (dword 1 of each lane) into odd dwords, so cvtepu32_pd puts it in qword 1 of each lane.
+		const __m512i z_index = _mm512_setr_epi32(0, 1, 0, 5, 0, 9, 0, 13, 0, 0, 0, 0, 0, 0, 0, 0);
+
+		for (; i >= 4; i -= 4, src += 4, dst += 4)
+		{
+			const __m512i l0 = _mm512_loadu_si512(&src[0]);
+			const __m512i l1 = _mm512_loadu_si512(&src[2]);
+			const __m512i stcq_i = _mm512_shuffle_i32x4(l0, l1, _MM_SHUFFLE(2, 0, 2, 0));
+			const __m512i xyz = _mm512_shuffle_i32x4(l0, l1, _MM_SHUFFLE(3, 1, 3, 1));
+			const __m512 stcq = _mm512_castsi512_ps(stcq_i);
+
+			const __m512 c = _mm512_cvtepi32_ps(_mm512_slli_epi32(_mm512_shuffle_epi8(stcq_i, rgba_to_dwords), 7));
+
+			__m512 t = _mm512_setzero_ps();
+			if (tme)
+			{
+				if (fst)
+					t = _mm512_cvtepi32_ps(_mm512_slli_epi32(_mm512_unpackhi_epi16(xyz, _mm512_setzero_si512()), 16 - 4));
+				else if (q_div)
+					t = _mm512_mul_ps(_mm512_div_ps(stcq, _mm512_permute_ps(stcq, _MM_SHUFFLE(3, 3, 3, 3))), ztsize);
+				else
+					t = _mm512_mul_ps(_mm512_permute_ps(stcq, _MM_SHUFFLE(3, 3, 1, 0)), ztsize);
+			}
+			t = _mm512_mask_blend_ps(0x8888, t, _mm512_cvtepi32_ps(_mm512_slli_epi32(xyz, 7)));
+
+			const __m512i xy = _mm512_sub_epi32(_mm512_unpacklo_epi16(xyz, _mm512_setzero_si512()), zoff);
+			const __m512d z = _mm512_cvtepu32_pd(_mm512_castsi512_si256(_mm512_permutexvar_epi32(z_index, xyz)));
+			const __m512d pd = _mm512_mask_blend_pd(0xaa, _mm512_castps_pd(_mm512_mul_ps(_mm512_cvtepi32_ps(xy), zscale)), z);
+			const __m512i p = _mm512_castpd_si512(pd);
+			const __m512i ti = _mm512_castps_si512(t);
+			const __m512i ci = _mm512_castps_si512(c);
+
+			// GSVertexSW is p, _pad, t, c. _pad is left untouched like the scalar loop.
+			for (int k = 0; k < 4; k++)
+			{
+				const __m512i pt = _mm512_permutex2var_epi64(p,
+					_mm512_setr_epi64(2 * k, 2 * k + 1, 0, 0, 8 + 2 * k, 9 + 2 * k, 0, 0), ti);
+				const __m512i ptc = _mm512_mask_permutexvar_epi64(pt, 0xc0,
+					_mm512_setr_epi64(0, 0, 0, 0, 0, 0, 2 * k, 2 * k + 1), ci);
+				_mm512_mask_storeu_epi32(&dst[k], 0xff0f, ptc);
+			}
+		}
+	}
+#endif
+
+	for (; i > 0; i--, src++, dst++)
 	{
 		GSVector4 stcq = GSVector4::load<true>(&src->m[0]); // s t rgba q
 
@@ -1453,9 +1511,9 @@ GSRendererSW::SharedData::~SharedData()
 
 	if constexpr (LOG)
 	{
-		fprintf(s_fp, "[%d] done t=%" PRId64 " p=%d | %d %d %d | %08x_%08x\n",
+		fprintf(s_fp, "[%d] done t=%" PRId64 " | %d %d %d | %08x_%08x\n",
 			counter,
-			GetCPUTicks() - start, pixels,
+			GetCPUTicks() - start,
 			primclass, vertex_count, index_count,
 			global.sel.hi, global.sel.lo);
 		fflush(s_fp);

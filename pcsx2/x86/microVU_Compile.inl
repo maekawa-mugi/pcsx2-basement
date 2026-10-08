@@ -701,6 +701,7 @@ void* mVUcompile(microVU& mVU, u32 startPC, uptr pState)
 	iPC = startPC / 4;
 	mVUsetupRange(mVU, startPC, 1); // Setup Program Bounds/Range
 	mVU.regAlloc->reset(false);          // Reset regAlloc
+	mVU.regAlloc->profileBlock = nullptr;
 	mVUinitFirstPass(mVU, pState, thisPtr);
 	mVUbranch = 0;
 	for (int branch = 0; mVUcount < endCount;)
@@ -861,6 +862,16 @@ void* mVUcompile(microVU& mVU, u32 startPC, uptr pState)
 	mVUsetFlags(mVU, mFC);           // Sets Up Flag instances
 	mVUoptimizePipeState(mVU);       // Optimize the End Pipeline State for nicer Block Linking
 	mVUdebugPrintBlocks(mVU, false); // Prints Start/End PC of blocks executed, for debugging...
+
+	// Opt-in AVX-512 planning profile; emits nothing unless enabled.
+	if (AVX512Profile::VUBlock* const profile_block = AVX512Profile::NewVUBlock(mVU.index, startPC))
+	{
+		xADD(ptr64[AVX512Profile::Counter(profile_block->counter)], 1);
+		mVU.regAlloc->profileBlock = profile_block;
+#ifndef mVUprofileProg
+		mVU.profiler.block = profile_block;
+#endif
+	}
 	mVUtestCycles(mVU, mFC);         // Update VU Cycles and Exit Early if Necessary
 
 	// Second Pass
@@ -1003,6 +1014,10 @@ void* mVUcompile(microVU& mVU, u32 startPC, uptr pState)
 	mVUendProgram(mVU, &mFC, 1);
 
 perf_and_return:
+	mVU.regAlloc->profileBlock = nullptr;
+#ifndef mVUprofileProg
+	mVU.profiler.block = nullptr;
+#endif
 
 	if (mVU.regs().start_pc == startPC)
 	{

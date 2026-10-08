@@ -7,7 +7,7 @@
 
 // For multiple-isa compilation
 #ifdef MULTI_ISA_UNSHARED_COMPILATION
-	// Preprocessor should have MULTI_ISA_UNSHARED_COMPILATION defined to `isa_sse4`, `isa_avx`, or `isa_avx2`
+	// Preprocessor should have MULTI_ISA_UNSHARED_COMPILATION defined to `isa_sse4`, `isa_avx`, `isa_avx2` or `isa_avx512`
 	#define CURRENT_ISA MULTI_ISA_UNSHARED_COMPILATION
 #else
 	// Define to isa_native in shared section in addition to multi-isa-off so if someone tries to use it they'll hopefully get a linker error and notice
@@ -44,7 +44,8 @@
 struct ProcessorFeatures
 {
 #ifdef _M_X86
-	enum class VectorISA { SSE4, AVX, AVX2, AVX512F };
+	// AVX512 is the Ice Lake tier (same feature set as x86Emitter::AVX512Features::HasCore).
+	enum class VectorISA { SSE4, AVX, AVX2, AVX512 };
 	VectorISA vectorISA;
 	bool hasFMA;
 	bool hasBMI2;
@@ -59,17 +60,20 @@ extern const ProcessorFeatures g_cpu;
 	#define MULTI_ISA_DEF(...) \
 		namespace isa_sse4 { __VA_ARGS__ } \
 		namespace isa_avx  { __VA_ARGS__ } \
-		namespace isa_avx2 { __VA_ARGS__ }
+		namespace isa_avx2 { __VA_ARGS__ } \
+		namespace isa_avx512 { __VA_ARGS__ }
 
 	#define MULTI_ISA_FRIEND(klass) \
 		friend class isa_sse4::klass; \
 		friend class isa_avx ::klass; \
-		friend class isa_avx2::klass;
+		friend class isa_avx2::klass; \
+		friend class isa_avx512::klass;
 
 	#define MULTI_ISA_SELECT(fn) (\
-		::g_cpu.vectorISA == ProcessorFeatures::VectorISA::AVX2 ? isa_avx2::fn : \
-		::g_cpu.vectorISA == ProcessorFeatures::VectorISA::AVX  ? isa_avx ::fn : \
-		                                                          isa_sse4::fn)
+		::g_cpu.vectorISA >= ProcessorFeatures::VectorISA::AVX512 ? isa_avx512::fn : \
+		::g_cpu.vectorISA >= ProcessorFeatures::VectorISA::AVX2   ? isa_avx2  ::fn : \
+		::g_cpu.vectorISA >= ProcessorFeatures::VectorISA::AVX    ? isa_avx   ::fn : \
+		                                                             isa_sse4  ::fn)
 #else
 	#define MULTI_ISA_DEF(...) namespace isa_native { __VA_ARGS__ }
 	#define MULTI_ISA_FRIEND(klass) friend class isa_native::klass;

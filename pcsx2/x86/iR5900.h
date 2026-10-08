@@ -142,7 +142,7 @@ int _eeTryRenameReg(int to, int from, int fromx86, int other, int xmminfo);
 //////////////////////////////////////
 
 typedef void (*R5900FNPTR)();
-typedef void (*R5900FNPTR_INFO)(int info);
+typedef void (*R5900FNPTR_INFO)(EERecompileInfo info);
 
 #define EERECOMPILE_CODE0(fn, xmminfo) \
 	void rec##fn(void) \
@@ -192,5 +192,5 @@ void eeRecompileCodeRC2(R5900FNPTR constcode, R5900FNPTR_INFO noconstcode, int x
 	}
 
 // rd = rs op rt (all regs need to be in xmm)
-int eeRecompileCodeXMM(int xmminfo);
+EERecompileInfo eeRecompileCodeXMM(int xmminfo);
 void eeFPURecompileCode(R5900FNPTR_INFO xmmcode, R5900FNPTR fpucode, int xmminfo);

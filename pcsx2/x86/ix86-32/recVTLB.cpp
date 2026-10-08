@@ -43,7 +43,7 @@ static u32 GetAllocatedGPRBitmask()
 static u32 GetAllocatedXMMBitmask()
 {
 	u32 mask = 0;
-	for (u32 i = 0; i < iREGCNT_XMM; i++)
+	for (u32 i = 0; i < iREGCNT_XMM_EVEX; i++)
 	{
 		if (xmmregs[i].inuse)
 			mask |= (1u << i);
@@ -54,7 +54,7 @@ static u32 GetAllocatedXMMBitmask()
 struct FullTLBCompilerState
 {
 	std::array<_x86regs, iREGCNT_GPR> x86;
-	std::array<_xmmregs, iREGCNT_XMM> xmm;
+	std::array<_xmmregs, iREGCNT_XMM_EVEX> xmm;
 	std::array<GPR_reg64, 32> constants;
 	u32 has_const = 0;
 	u32 flushed_const = 0;
@@ -309,7 +309,7 @@ static void EmitFullTLBFastmemReadSlowpath(FullTLBFastmemReadSlowpath& slowpath)
 		if (slowpath.state.x86[i].inuse && xRegisterBase::IsCallerSaved(i))
 			num_gprs++;
 	}
-	for (u32 i = 0; i < iREGCNT_XMM; i++)
+	for (u32 i = 0; i < iREGCNT_XMM_EVEX; i++)
 	{
 		if (slowpath.state.xmm[i].inuse && xRegisterSSE::IsCallerSaved(i))
 			num_fprs++;
@@ -321,11 +321,14 @@ static void EmitFullTLBFastmemReadSlowpath(FullTLBFastmemReadSlowpath& slowpath)
 		xSUB(rsp, stack_size);
 
 	u32 stack_offset = SHADOW_SIZE + RESULT_SIZE;
-	for (u32 i = 0; i < iREGCNT_XMM; i++)
+	for (u32 i = 0; i < iREGCNT_XMM_EVEX; i++)
 	{
 		if (slowpath.state.xmm[i].inuse && xRegisterSSE::IsCallerSaved(i))
 		{
-			xMOVAPS(ptr128[rsp + stack_offset], xRegisterSSE(i));
+			if (i >= iREGCNT_XMM)
+				xVMOVDQA32(ptr128[rsp + stack_offset], xRegisterSSE(i));
+			else
+				xMOVAPS(ptr128[rsp + stack_offset], xRegisterSSE(i));
 			stack_offset += 16;
 		}
 	}
@@ -347,11 +350,14 @@ static void EmitFullTLBFastmemReadSlowpath(FullTLBFastmemReadSlowpath& slowpath)
 	xMOV(ptr64[rsp + SHADOW_SIZE], rax);
 
 	stack_offset = SHADOW_SIZE + RESULT_SIZE;
-	for (u32 i = 0; i < iREGCNT_XMM; i++)
+	for (u32 i = 0; i < iREGCNT_XMM_EVEX; i++)
 	{
 		if (slowpath.state.xmm[i].inuse && xRegisterSSE::IsCallerSaved(i))
 		{
-			xMOVAPS(xRegisterSSE(i), ptr128[rsp + stack_offset]);
+			if (i >= iREGCNT_XMM)
+				xVMOVDQA32(xRegisterSSE(i), ptr128[rsp + stack_offset]);
+			else
+				xMOVAPS(xRegisterSSE(i), ptr128[rsp + stack_offset]);
 			stack_offset += 16;
 		}
 	}
@@ -2321,7 +2327,7 @@ void vtlb_DynBackpatchLoadStore(uptr code_address, u32 code_size, u32 guest_pc, 
 		if ((gpr_bitmask & (1u << i)) && (i == arg1id || i == arg2id || xRegisterBase::IsCallerSaved(i)) && (!is_load || is_xmm || data_register != i))
 			num_gprs++;
 	}
-	for (u32 i = 0; i < iREGCNT_XMM; i++)
+	for (u32 i = 0; i < iREGCNT_XMM_EVEX; i++)
 	{
 		if (fpr_bitmask & (1u << i) && xRegisterSSE::IsCallerSaved(i) && (!is_load || !is_xmm || data_register != i))
 			num_fprs++;
@@ -2334,11 +2340,14 @@ void vtlb_DynBackpatchLoadStore(uptr code_address, u32 code_size, u32 guest_pc, 
 		xSUB(rsp, stack_size);
 
 		u32 stack_offset = SHADOW_SIZE;
-		for (u32 i = 0; i < iREGCNT_XMM; i++)
+		for (u32 i = 0; i < iREGCNT_XMM_EVEX; i++)
 		{
 			if (fpr_bitmask & (1u << i) && xRegisterSSE::IsCallerSaved(i) && (!is_load || !is_xmm || data_register != i))
 			{
-				xMOVAPS(ptr128[rsp + stack_offset], xRegisterSSE(i));
+				if (i >= iREGCNT_XMM)
+					xVMOVDQA32(ptr128[rsp + stack_offset], xRegisterSSE(i));
+				else
+					xMOVAPS(ptr128[rsp + stack_offset], xRegisterSSE(i));
 				stack_offset += XMM_SIZE;
 			}
 		}
@@ -2408,11 +2417,14 @@ void vtlb_DynBackpatchLoadStore(uptr code_address, u32 code_size, u32 guest_pc, 
 	if (stack_size > 0)
 	{
 		u32 stack_offset = SHADOW_SIZE;
-		for (u32 i = 0; i < iREGCNT_XMM; i++)
+		for (u32 i = 0; i < iREGCNT_XMM_EVEX; i++)
 		{
 			if (fpr_bitmask & (1u << i) && xRegisterSSE::IsCallerSaved(i) && (!is_load || !is_xmm || data_register != i))
 			{
-				xMOVAPS(xRegisterSSE(i), ptr128[rsp + stack_offset]);
+				if (i >= iREGCNT_XMM)
+					xVMOVDQA32(xRegisterSSE(i), ptr128[rsp + stack_offset]);
+				else
+					xMOVAPS(xRegisterSSE(i), ptr128[rsp + stack_offset]);
 				stack_offset += XMM_SIZE;
 			}
 		}

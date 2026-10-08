@@ -3,6 +3,9 @@
 
 #include "Common.h"
 #include "common/BitUtils.h"
+#ifdef _M_X86
+#include "x86/InterpreterAVX512.h"
+#endif
 
 namespace R5900 {
 namespace Interpreter {
@@ -129,6 +132,43 @@ namespace OpcodeImpl {
 	}
 
 namespace MMI {
+
+#ifdef _M_X86
+void QFSRV();
+void PLZCW_AVX512()
+{
+	if (_Rd_)
+		InterpreterAVX512::PLZCW(&cpuRegs.GPR.r[_Rd_], &cpuRegs.GPR.r[_Rs_]);
+}
+void PNOR_AVX512()
+{
+	if (_Rd_)
+		InterpreterAVX512::PNOR(&cpuRegs.GPR.r[_Rd_], &cpuRegs.GPR.r[_Rs_], &cpuRegs.GPR.r[_Rt_]);
+}
+void QFSRV_AVX512()
+{
+	if (!_Rd_)
+		return;
+	// The manual leaves invalid MTSA values undefined; preserve the old path
+	// for those inputs instead of introducing the permutation's modulo wrap.
+	if (cpuRegs.sa >= 16)
+	{
+		QFSRV();
+		return;
+	}
+	InterpreterAVX512::QFSRV(&cpuRegs.GPR.r[_Rd_], &cpuRegs.GPR.r[_Rs_], &cpuRegs.GPR.r[_Rt_], cpuRegs.sa);
+}
+void PEXT5_AVX512()
+{
+	if (_Rd_)
+		InterpreterAVX512::PEXT5(&cpuRegs.GPR.r[_Rd_], &cpuRegs.GPR.r[_Rt_]);
+}
+void PPAC5_AVX512()
+{
+	if (_Rd_)
+		InterpreterAVX512::PPAC5(&cpuRegs.GPR.r[_Rd_], &cpuRegs.GPR.r[_Rt_]);
+}
+#endif
 
 //*****************MMI OPCODES*********************************
 

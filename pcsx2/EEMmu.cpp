@@ -9,6 +9,9 @@
 
 #if defined(_M_X64) || defined(__x86_64__)
 #include <emmintrin.h>
+#include <immintrin.h>
+#include <cpuinfo.h>
+#include "common/emitter/x86types.h"
 #endif
 
 namespace EEMmu
@@ -85,10 +88,19 @@ namespace EEMmu
 	static bool s_fast_lookup_enabled = false;
 	static constexpr u64 ALL_TLB_ENTRIES = (1ULL << TLB_ENTRY_COUNT) - 1;
 	static u64 s_fast_lookup_dirty = ALL_TLB_ENTRIES;
-	alignas(16) static u32 s_fast_vaddr_mask[TLB_ENTRY_COUNT];
-	alignas(16) static u32 s_fast_vaddr_base[TLB_ENTRY_COUNT];
+	alignas(64) static u32 s_fast_vaddr_mask[TLB_ENTRY_COUNT];
+	alignas(64) static u32 s_fast_vaddr_base[TLB_ENTRY_COUNT];
 	alignas(16) static u32 s_fast_asid_mask[TLB_ENTRY_COUNT];
 	alignas(16) static u32 s_fast_asid_value[TLB_ENTRY_COUNT];
+	// AVX-512 path: one ASID byte per entry plus a bit per global entry, so the ASID test is a single
+	// VPCMPEQB into a 64-bit mask. Needs proper testing against the SSE path on real workloads.
+	alignas(64) static u8 s_fast_asid_byte[64] = {};
+	static u64 s_fast_global_bits = 0;
+	// Per-ASID bitset of non-global entries (256 * 8 = 2 KiB), updated when an entry is rebuilt, so a lookup
+	// does one load instead of a 64-byte compare. Needs proper testing against the SSE path on real workloads.
+	alignas(64) static u64 s_fast_asid_bits[256] = {};
+	static bool s_fast_use_avx512 = false;
+	static bool s_fast_use_avx2 = false;
 
 	static void RebuildFastLookupEntry(size_t index, const tlbs& entry)
 	{
@@ -105,7 +117,54 @@ namespace EEMmu
 		}
 		s_fast_asid_mask[index] = entry.isGlobal() ? 0 : 0xff;
 		s_fast_asid_value[index] = entry.EntryHi.ASID;
+		s_fast_asid_bits[s_fast_asid_byte[index]] &= ~(1ULL << index);
+		s_fast_asid_byte[index] = static_cast<u8>(entry.EntryHi.ASID);
+		if (entry.isGlobal())
+		{
+			s_fast_global_bits |= 1ULL << index;
+		}
+		else
+		{
+			s_fast_global_bits &= ~(1ULL << index);
+			s_fast_asid_bits[s_fast_asid_byte[index]] |= 1ULL << index;
+		}
 	}
+
+#if defined(_M_X64) || defined(__x86_64__)
+#if defined(__GNUC__) || defined(__clang__)
+	__attribute__((target("avx512f,avx512vl,avx512bw,avx512dq")))
+#endif
+	static u64 FastLookupMatchesAVX512(u32 vaddr, u64 asid_match)
+	{
+		const __m512i v_vaddr = _mm512_set1_epi32(static_cast<int>(vaddr));
+		u64 matches = 0;
+		for (size_t i = 0; i < TLB_ENTRY_COUNT; i += 16)
+		{
+			const __m512i mask = _mm512_load_si512(&s_fast_vaddr_mask[i]);
+			const __m512i base = _mm512_load_si512(&s_fast_vaddr_base[i]);
+			const __mmask16 hit = _mm512_mask_cmpeq_epi32_mask(static_cast<__mmask16>(asid_match >> i),
+				_mm512_and_si512(v_vaddr, mask), base);
+			matches |= static_cast<u64>(hit) << i;
+		}
+		return matches;
+	}
+#if defined(__GNUC__) || defined(__clang__)
+	__attribute__((target("avx2")))
+#endif
+	static u64 FastLookupMatchesAVX2(u32 vaddr, u64 asid_match)
+	{
+		const __m256i v_vaddr = _mm256_set1_epi32(static_cast<int>(vaddr));
+		u64 matches = 0;
+		for (size_t i = 0; i < TLB_ENTRY_COUNT; i += 8)
+		{
+			const __m256i mask = _mm256_load_si256(reinterpret_cast<const __m256i*>(&s_fast_vaddr_mask[i]));
+			const __m256i base = _mm256_load_si256(reinterpret_cast<const __m256i*>(&s_fast_vaddr_base[i]));
+			const int bits = _mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpeq_epi32(_mm256_and_si256(v_vaddr, mask), base)));
+			matches |= static_cast<u64>(bits) << i;
+		}
+		return matches & asid_match;
+	}
+#endif
 
 	// Bit i set when tlb entry i matches; same predicate as the MatchesASID/Matches*Entry loop.
 	static u64 FastLookupMatches(const tlbs* entries, u32 vaddr, u8 asid)
@@ -122,6 +181,11 @@ namespace EEMmu
 
 		u64 matches = 0;
 #if defined(_M_X64) || defined(__x86_64__)
+		const u64 asid_match = s_fast_asid_bits[asid] | s_fast_global_bits;
+		if (s_fast_use_avx512)
+			return FastLookupMatchesAVX512(vaddr, asid_match);
+		if (s_fast_use_avx2)
+			return FastLookupMatchesAVX2(vaddr, asid_match);
 		const __m128i v_vaddr = _mm_set1_epi32(static_cast<int>(vaddr));
 		const __m128i v_asid = _mm_set1_epi32(asid);
 		const __m128i zero = _mm_setzero_si128();
@@ -150,6 +214,10 @@ namespace EEMmu
 	void EnableFastTLBLookup(bool enable)
 	{
 		s_fast_lookup_enabled = enable;
+#if defined(_M_X64) || defined(__x86_64__)
+		s_fast_use_avx512 = x86Emitter::avx512.HasCore();
+		s_fast_use_avx2 = cpuinfo_has_x86_avx2();
+#endif
 		s_fast_lookup_dirty = ALL_TLB_ENTRIES;
 	}
 

@@ -193,7 +193,7 @@ void _validateRegs()
 				gprmode = x86regs[hostreg].mode;
 			}
 		}
-		for (u32 hostreg = 0; hostreg < iREGCNT_XMM; hostreg++)
+		for (u32 hostreg = 0; hostreg < iREGCNT_XMM_EVEX; hostreg++)
 		{
 			if (xmmregs[hostreg].inuse && xmmregs[hostreg].type == XMMTYPE_GPRREG && xmmregs[hostreg].reg == guestreg)
 			{
