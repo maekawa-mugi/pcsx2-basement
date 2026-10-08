@@ -1199,8 +1199,7 @@ static void mVUGenerateSoftMaddIntegratedLaneKernel(microVU& mVU)
 	xXOR(eax, edx);
 	xAND(eax, 0x80000000);
 	xMOV(ptr32[rsp + product_sign], eax);
-	xSHR(eax, 30);
-	xAND(eax, product_status_sign);
+	xSHR(eax, 30); // bit 31 -> bit 1, already 0 or product_status_sign
 	xMOV(ptr32[rsp + product_status], eax);
 	xMOV(ptr32[rsp + product_exponent], 0);
 	xMOV(ptr32[rsp + product_significand], 0);

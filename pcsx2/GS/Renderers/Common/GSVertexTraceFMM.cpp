@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
+#include <type_traits>
 #include "GSVertexTrace.h"
 #include "GS/GSState.h"
 #include "GS/GSUtil.h"
@@ -235,25 +236,23 @@ void GSVertexTraceFMM::FindMinMax(GSVertexTrace& vt, const void* vertex, const u
 				zpmax = _mm512_max_epu32(zpmax, p);
 			}
 
-			alignas(64) float ft[2][16];
-			alignas(64) u32 it[4][16];
-			_mm512_store_ps(ft[0], ztmin);
-			_mm512_store_ps(ft[1], ztmax);
-			_mm512_store_si512(it[0], zcmin);
-			_mm512_store_si512(it[1], zcmax);
-			_mm512_store_si512(it[2], zpmin);
-			_mm512_store_si512(it[3], zpmax);
+			// Reduce lane 0..3 in the original order, extracting straight from the ZMM registers
+			// instead of spilling to the stack (needs proper testing).
 			u32 nanbits = 0;
-			for (int l = 0; l < 4; l++)
-			{
-				tmin = tmin.min(GSVector4::load<true>(&ft[0][l * 4]));
-				tmax = tmax.max(GSVector4::load<true>(&ft[1][l * 4]));
-				cmin = cmin.min_u8(GSVector4i::load<true>(&it[0][l * 4]));
-				cmax = cmax.max_u8(GSVector4i::load<true>(&it[1][l * 4]));
-				pmin = pmin.min_u32(GSVector4i::load<true>(&it[2][l * 4]));
-				pmax = pmax.max_u32(GSVector4i::load<true>(&it[3][l * 4]));
+			const auto reduceLane = [&](auto lane) {
+				constexpr int l = decltype(lane)::value;
+				tmin = tmin.min(GSVector4(_mm512_extractf32x4_ps(ztmin, l)));
+				tmax = tmax.max(GSVector4(_mm512_extractf32x4_ps(ztmax, l)));
+				cmin = cmin.min_u8(GSVector4i(_mm512_extracti32x4_epi32(zcmin, l)));
+				cmax = cmax.max_u8(GSVector4i(_mm512_extracti32x4_epi32(zcmax, l)));
+				pmin = pmin.min_u32(GSVector4i(_mm512_extracti32x4_epi32(zpmin, l)));
+				pmax = pmax.max_u32(GSVector4i(_mm512_extracti32x4_epi32(zpmax, l)));
 				nanbits |= (knan >> (l * 4)) & 0xf;
-			}
+			};
+			reduceLane(std::integral_constant<int, 0>());
+			reduceLane(std::integral_constant<int, 1>());
+			reduceLane(std::integral_constant<int, 2>());
+			reduceLane(std::integral_constant<int, 3>());
 			tnan |= GSVector4i(_mm_movm_epi32(static_cast<__mmask8>(nanbits)));
 		}
 #endif

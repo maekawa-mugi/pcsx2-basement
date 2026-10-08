@@ -778,20 +778,22 @@ void GSDrawScanlineCodeGenerator::Init()
 					movss(f, ptr[a3 + offsetof(GSVertexSW, t.w)]); // v.t.w
 
 				cvttps2dq(f, f);
-				punpcklwd(f, f);
-				pshufd(f, f, _MM_SHUFFLE(0, 0, 0, 0));
+				if (isYmm)
+				{
+					vpbroadcastw(f, Xmm(f.getIdx())); // low word of each dword (needs proper testing)
+				}
+				else
+				{
+					punpcklwd(f, f);
+					pshufd(f, f, _MM_SHUFFLE(0, 0, 0, 0));
+				}
 				paddw(f, ptr[a1 + offsetof(GSScanlineLocalData::skip, f)]);
 			}
 
 			if (m_sel.zb && m_sel.zequal)
 			{
-				Xmm zx(_z.getIdx());
 				cvttsd2si(rax, ptr[a3 + offsetof(GSVertexSW, p.z)]);
-				movd(zx, eax);
-				if (hasAVX2)
-					vpbroadcastd(_z, zx);
-				else
-					pshufd(_z, _z, _MM_SHUFFLE(0, 0, 0, 0));
+				broadcastGPRToVec(_z, eax);
 			}
 			else if (m_sel.zb)
 			{
@@ -1175,7 +1177,8 @@ void GSDrawScanlineCodeGenerator::TestZ(const XYm& temp1, const XYm& temp2)
 		}
 
 		// Clamp Z to ZPSM_FMT_MAX
-		if (m_sel.zclamp)
+		// zpsm & 3 == 0 gives a 0xffffffff max, so the unsigned min is an identity (needs proper testing)
+		if (m_sel.zclamp && (m_sel.zpsm & 0x3) != 0)
 		{
 			const u8 amt = (u8)((m_sel.zpsm & 0x3) * 8);
 			pcmpeqd(temp1, temp1);
@@ -1235,9 +1238,17 @@ void GSDrawScanlineCodeGenerator::TestZ(const XYm& temp1, const XYm& temp2)
 			case ZTST_GREATER: // TODO: tidus hair and chocobo wings only appear fully when this is tested as ZTST_GEQUAL
 				// test |= zso <= zdo; // ~(zso > zdo)
 				pcmpgtd(xym0, temp2);
-				pcmpeqd(temp1, temp1);
-				pxor(xym0, temp1);
-				por(_test, xym0);
+				if (hasAVX512)
+				{
+					// test |= ~xym0 in one ternary op (needs proper testing)
+					vpternlogd(_test, xym0, xym0, 0xF3);
+				}
+				else
+				{
+					pcmpeqd(temp1, temp1);
+					pxor(xym0, temp1);
+					por(_test, xym0);
+				}
 				break;
 		}
 
@@ -1319,9 +1330,9 @@ void GSDrawScanlineCodeGenerator::SampleTexture()
 	{
 		// GSVector4i uv1 = uv0.add16(GSVector4i::x0001());
 
+		// x - (-1) == x + 1
 		pcmpeqd(xym0, xym0);
-		psrlw(xym0, 15);
-		THREEARG(paddw, xym3, xym2, xym0);
+		THREEARG(psubw, xym3, xym2, xym0);
 
 		// uv0 = Wrap(uv0);
 		// uv1 = Wrap(uv1);
@@ -1950,8 +1961,7 @@ void GSDrawScanlineCodeGenerator::SampleTextureLOD()
 		// GSVector4i uv1 = uv0.add16(GSVector4i::x0001());
 
 		pcmpeqd(xym1, xym1);
-		psrlw(xym1, 15);
-		THREEARG(paddw, xym3, xym2, xym1);
+		THREEARG(psubw, xym3, xym2, xym1);
 
 		// uv0 = Wrap(uv0);
 		// uv1 = Wrap(uv1);
@@ -1977,7 +1987,7 @@ void GSDrawScanlineCodeGenerator::SampleTextureLOD()
 	// xym6: ga
 
 
-	if (m_sel.mmin != 1) // !round-off mode
+	if (m_sel.mmin != 1 && !m_sel.lodz) // !round-off mode, and the second mip level has non-zero weight
 	{
 		saveTemp(HighTemp::trb, _rip_local(temp.trb), xym5);
 		saveTemp(HighTemp::tga, _rip_local(temp.tga), xym6);
@@ -2032,8 +2042,7 @@ void GSDrawScanlineCodeGenerator::SampleTextureLOD()
 			// GSVector4i uv1 = uv0.add16(GSVector4i::x0001());
 
 			pcmpeqd(xym1, xym1);
-			psrlw(xym1, 15);
-			THREEARG(paddw, xym3, xym2, xym1);
+			THREEARG(psubw, xym3, xym2, xym1);
 
 			// uv0 = Wrap(uv0);
 			// uv1 = Wrap(uv1);
@@ -2296,9 +2305,7 @@ void GSDrawScanlineCodeGenerator::AlphaTFX()
 			}
 			else
 			{
-				pcmpeqd(xym0, xym0);
-				psllw(xym0, 15);
-				psrlw(xym0, 8);
+				movdqa(xym0, ptr[_m_const + offsetof(GConstType, m_word_80)]);
 			}
 
 			mix16(_ga, xym0, xym1);
@@ -2307,9 +2314,7 @@ void GSDrawScanlineCodeGenerator::AlphaTFX()
 		{
 			// a = a == 0x80 ? cov : a
 
-			pcmpeqd(xym0, xym0);
-			psllw(xym0, 15);
-			psrlw(xym0, 8);
+			movdqa(xym0, ptr[_m_const + offsetof(GConstType, m_word_80)]);
 
 			if (m_sel.edge)
 			{
@@ -2368,8 +2373,15 @@ void GSDrawScanlineCodeGenerator::TestAlpha()
 			// t = (ga >> 16) != m_local.gd->aref;
 			THREEARG(psrld, xym1, _ga, 16);
 			BROADCAST_AND_OP(vbroadcasti128, pcmpeqd, xym1, xym0, _rip_global(aref));
-			pcmpeqd(xym0, xym0);
-			pxor(xym1, xym0);
+			if (hasAVX512)
+			{
+				vpternlogd(xym1, xym1, xym1, 0x0F); // xym1 = ~xym1
+			}
+			else
+			{
+				pcmpeqd(xym0, xym0);
+				pxor(xym1, xym0);
+			}
 			break;
 
 		case ATST_GEQUAL:
@@ -2409,7 +2421,7 @@ void GSDrawScanlineCodeGenerator::TestAlpha()
 			// zm |= t;
 			por(_zm, xym1);
 			// fm |= t & GSVector4i::xff000000();
-			psrld(xym1, 24);
+			// t is all-ones or zero per dword, so one left shift yields the 0xff000000 mask
 			pslld(xym1, 24);
 			por(_fm, xym1);
 			break;
@@ -2554,17 +2566,31 @@ void GSDrawScanlineCodeGenerator::TestDestAlpha()
 	{
 		if (m_sel.fpsm == 2)
 		{
-			pxor(xym0, xym0);
-			//vpsrld(xym1, _fd, 15);
 			THREEARG(pslld, xym1, _fd, 16);
 			psrad(xym1, 31);
-			pcmpeqd(xym1, xym0);
+			if (!hasAVX512)
+			{
+				pxor(xym0, xym0);
+				pcmpeqd(xym1, xym0);
+			}
+		}
+		else if (hasAVX512)
+		{
+			THREEARG(psrad, xym1, _fd, 31);
 		}
 		else
 		{
 			pcmpeqd(xym0, xym0);
 			THREEARG(pxor, xym1, _fd, xym0);
 			psrad(xym1, 31);
+		}
+
+		if (hasAVX512)
+		{
+			// test |= ~xym1 in one ternary op (needs proper testing)
+			vpternlogd(_test, xym1, xym1, 0xF3);
+			alltrue(_test);
+			return;
 		}
 	}
 	else
@@ -3013,11 +3039,9 @@ void GSDrawScanlineCodeGenerator::WriteFrame()
 
 	if (m_sel.fba && m_sel.fpsm != 1)
 	{
-		// fs |= 0x80000000;
+		// fs |= 0x80000000; (constant load instead of pcmpeqd + pslld, needs proper testing)
 
-		pcmpeqd(tmp, tmp);
-		pslld(tmp, 31);
-		por(xym5, tmp);
+		por(xym5, ptr[_m_const + offsetof(GConstType, m_dword_sign)]);
 	}
 
 	// tmp1 = fs

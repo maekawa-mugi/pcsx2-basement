@@ -1187,6 +1187,9 @@ bool GSRendererSW::GetScanlineGlobalData(SharedData* data)
 					gd.lod.i = GSVector4i(lod >> 16);
 					gd.lod.f = GSVector4i(lod & 0xffff).xxxxl().xxzz();
 
+					// The JIT lerps with (f >> 1), so a fraction of 0 or 1 selects level m exactly (needs proper testing)
+					gd.sel.lodz = gd.sel.mmin == 2 && ((lod & 0xffff) >> 1) == 0;
+
 					// TODO: lot to optimize when lod is constant
 				}
 				else

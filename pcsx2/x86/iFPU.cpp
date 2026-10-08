@@ -779,20 +779,16 @@ void GenerateSoftFloatKernels()
 
 			xMOV(esi, 23);
 			u8* const div_quotient_loop = xGetPtr();
-			xSHL(ebp, 1);
-			xADD(ebp, r8d);
+			xLEA(ebp, ptr[rbp * 2 + r8]);
 			X86SoftFloatEmitter::EmitDivCarrySaveStep();
 			xDEC(esi);
 			xJcc32(Jcc_NotZero,
 				static_cast<s32>(reinterpret_cast<sptr>(div_quotient_loop) -
 								 (reinterpret_cast<sptr>(xGetPtr()) + 6)));
 
-			xSHL(ebp, 1);
-			xADD(ebp, r8d);
+			xLEA(ebp, ptr[rbp * 2 + r8]);
 			X86SoftFloatEmitter::EmitDivCarrySaveStep();
-			xMOV(eax, ebp);
-			xSHL(eax, 1);
-			xADD(eax, r8d);
+			xLEA(eax, ptr[rbp * 2 + r8]);
 			xCMP(eax, 1 << 24);
 			xForwardJL8 div_quotient_normalized;
 			xSHR(eax, 1);
@@ -975,13 +971,8 @@ void GenerateSoftFloatKernels()
 				static_cast<s32>(reinterpret_cast<sptr>(sqrt_quotient_loop) -
 								 (reinterpret_cast<sptr>(xGetPtr()) + 6)));
 
-			xMOV(eax, r8d);
-			xSHL(eax, 1);
-			xADD(eax, ebp);
-			xMOV(edi, eax);
-			xMOV(eax, r8d);
-			xSHL(eax, 2);
-			xADD(ebp, eax);
+			xLEA(edi, ptr[r8 * 2 + rbp]);
+			xLEA(ebp, ptr[r8 * 4 + rbp]);
 			X86SoftFloatEmitter::EmitSqrtCarrySaveStep();
 			xMOV(eax, r8d);
 			xSHL(eax, 1);

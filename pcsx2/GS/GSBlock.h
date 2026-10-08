@@ -1243,10 +1243,18 @@ public:
 
 		GSVector8i::sw64(v0, v2, v1, v3);
 
+#if defined(__AVX512BW__) && defined(__AVX512VL__)
+		// Byte-masked store keeps the destination alpha byte without reading VRAM (needs proper testing).
+		_mm256_mask_storeu_epi8(dst + 0, 0x77777777u, v0.m);
+		_mm256_mask_storeu_epi8(dst + 32, 0x77777777u, v2.m);
+		_mm256_mask_storeu_epi8(dst + 64, 0x77777777u, v1.m);
+		_mm256_mask_storeu_epi8(dst + 96, 0x77777777u, v3.m);
+#else
 		((GSVector8i*)dst)[0] = ((GSVector8i*)dst)[0].blend8(v0, mask);
 		((GSVector8i*)dst)[1] = ((GSVector8i*)dst)[1].blend8(v2, mask);
 		((GSVector8i*)dst)[2] = ((GSVector8i*)dst)[2].blend8(v1, mask);
 		((GSVector8i*)dst)[3] = ((GSVector8i*)dst)[3].blend8(v3, mask);
+#endif
 
 		src += srcpitch * 4;
 
@@ -1269,10 +1277,18 @@ public:
 
 		GSVector8i::sw64(v0, v2, v1, v3);
 
+#if defined(__AVX512BW__) && defined(__AVX512VL__)
+		// Byte-masked store keeps the destination alpha byte without reading VRAM (needs proper testing).
+		_mm256_mask_storeu_epi8(dst + 128, 0x77777777u, v0.m);
+		_mm256_mask_storeu_epi8(dst + 160, 0x77777777u, v2.m);
+		_mm256_mask_storeu_epi8(dst + 192, 0x77777777u, v1.m);
+		_mm256_mask_storeu_epi8(dst + 224, 0x77777777u, v3.m);
+#else
 		((GSVector8i*)dst)[4] = ((GSVector8i*)dst)[4].blend8(v0, mask);
 		((GSVector8i*)dst)[5] = ((GSVector8i*)dst)[5].blend8(v2, mask);
 		((GSVector8i*)dst)[6] = ((GSVector8i*)dst)[6].blend8(v1, mask);
 		((GSVector8i*)dst)[7] = ((GSVector8i*)dst)[7].blend8(v3, mask);
+#endif
 
 #else
 
@@ -1353,6 +1369,18 @@ public:
 			GSVector8i v1 = GSVector8i::u8to32(v4.zwzw()) << 24;
 			GSVector8i v2 = GSVector8i::u8to32(v5) << 24;
 			GSVector8i v3 = GSVector8i::u8to32(v5.zwzw()) << 24;
+
+#if defined(__AVX512BW__) && defined(__AVX512VL__)
+			if (mask == 0xff000000)
+			{
+				// Only the top byte of each dword is written; the data is already in byte 3 (needs proper testing).
+				_mm256_mask_storeu_epi8(&d[0], 0x88888888u, v0.m);
+				_mm256_mask_storeu_epi8(&d[1], 0x88888888u, v1.m);
+				_mm256_mask_storeu_epi8(&d[2], 0x88888888u, v2.m);
+				_mm256_mask_storeu_epi8(&d[3], 0x88888888u, v3.m);
+				continue;
+			}
+#endif
 
 			d[0] = d[0].smartblend<mask>(v0);
 			d[1] = d[1].smartblend<mask>(v1);

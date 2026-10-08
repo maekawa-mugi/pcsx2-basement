@@ -7,6 +7,9 @@
 
 #include "cpuinfo.h"
 
+#include <cstdio>
+#include <cstring>
+
 #ifdef _WIN32
 #define strcasecmp _stricmp
 #endif
@@ -55,6 +58,21 @@ static ProcessorFeatures::VectorISA getCurrentISA()
 
 #endif
 
+#if defined(_M_X86) && defined(__linux__)
+// Intel parts (Skylake through Tiger Lake) with the Gather Data Sampling microcode mitigation run
+// VPGATHERDD several times slower than scalar loads. Needs proper testing on other CPUs.
+static bool hasGatherDataSamplingMitigation()
+{
+	FILE* fp = fopen("/sys/devices/system/cpu/vulnerabilities/gather_data_sampling", "r");
+	if (!fp)
+		return false;
+	char buf[32] = {};
+	const size_t n = fread(buf, 1, sizeof(buf) - 1, fp);
+	fclose(fp);
+	return n >= 10 && strncmp(buf, "Mitigation", 10) == 0;
+}
+#endif
+
 static ProcessorFeatures getProcessorFeatures()
 {
 	cpuinfo_initialize();
@@ -93,6 +111,10 @@ static ProcessorFeatures getProcessorFeatures()
 		{
 			// Slow on Haswell
 			features.hasSlowGather = (cpuinfo_get_uarchs_count() == 0 || cpuinfo_get_uarch(0)->uarch == cpuinfo_uarch_haswell);
+#ifdef __linux__
+			if (!features.hasSlowGather)
+				features.hasSlowGather = hasGatherDataSamplingMitigation();
+#endif
 		}
 		else
 		{

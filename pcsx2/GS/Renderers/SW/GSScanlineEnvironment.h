@@ -57,6 +57,7 @@ union GSScanlineSelector
 		// TODO: 1D texture flag? could save 2 texture reads and 4 lerps with bilinear, and also the texture coordinate clamp/wrap code in one direction
 		u32 zequal : 1; // 56
 		u32 breakpoint : 1; // Insert a trap to stop the program, helpful to stop debugger on a program
+		u32 lodz : 1; // 58 (lcm && trilinear && lerp weight between mip levels is zero: skip the second level)
 	};
 
 	struct
@@ -280,6 +281,10 @@ struct alignas(64) GSScanlineConstantData256B
 	alignas(32) u8 m_clamp16_shuf[32] = {};
 	// 0x00ff in every word (colclamp-less RGBA masking, low-byte split).
 	alignas(32) u16 m_word_lo_mask[16] = {};
+	// 0x80000000 per dword (FBA), 0x0080 per word (AA1 coverage), 0x0000ffff per dword (setup mask16).
+	alignas(32) u32 m_dword_sign[8] = {};
+	alignas(32) u16 m_word_80[16] = {};
+	alignas(32) u32 m_dword_ffff[8] = {};
 	// VBMI VPMULTISHIFTQB controls for the 5551 <-> 8888 conversions (same windows as MMI PEXT5/PPAC5).
 	// m_c5_expand_ctrl: RGBA5551 per dword -> bytes [R<<3, G<<3, B<<3, A<<7]; the rb/ga masks
 	// are applied after the 16-bit split ([R,0,B,0] / [G,0,A,0]).
@@ -316,6 +321,13 @@ struct alignas(64) GSScanlineConstantData256B
 		}
 		for (size_t i = 0; i < std::size(m_word_lo_mask); i++)
 			m_word_lo_mask[i] = 0x00ff;
+		for (size_t i = 0; i < std::size(m_dword_sign); i++)
+		{
+			m_dword_sign[i] = 0x80000000u;
+			m_dword_ffff[i] = 0x0000ffffu;
+		}
+		for (size_t i = 0; i < std::size(m_word_80); i++)
+			m_word_80[i] = 0x0080;
 		for (int lane = 0; lane < 2; lane++)
 		{
 			for (int i = 0; i < 4; i++)
@@ -374,12 +386,22 @@ struct alignas(64) GSScanlineConstantData128B
 	};
 	alignas(16) float m_log2_coef[4][4] = {};
 	alignas(16) u16 m_word_lo_mask[8] = {};
+	alignas(16) u32 m_dword_sign[4] = {};
+	alignas(16) u16 m_word_80[8] = {};
+	alignas(16) u32 m_dword_ffff[4] = {};
 
 	constexpr GSScanlineConstantData128B()
 	{
 		using namespace GSScanlineConstantData;
 		for (size_t i = 0; i < std::size(m_word_lo_mask); i++)
 			m_word_lo_mask[i] = 0x00ff;
+		for (size_t i = 0; i < std::size(m_dword_sign); i++)
+		{
+			m_dword_sign[i] = 0x80000000u;
+			m_dword_ffff[i] = 0x0000ffffu;
+		}
+		for (size_t i = 0; i < std::size(m_word_80); i++)
+			m_word_80[i] = 0x0080;
 		for (size_t n = 0; n < std::size(log2_coef); ++n)
 		{
 			for (size_t i = 0; i < 4; ++i)

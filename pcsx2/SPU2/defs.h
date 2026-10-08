@@ -134,7 +134,15 @@ public:
 	{
 	}
 
-	void Update();
+	// Most voices never slide their volume, so test Enable inline instead of calling out for every voice
+	// on every sample (needs proper testing).
+	__forceinline void Update()
+	{
+		if (Enable)
+			UpdateSlide();
+	}
+
+	void UpdateSlide();
 	void RegSet(u16 src); // used to set the volume from a register source
 
 #ifdef PCSX2_DEVBUILD

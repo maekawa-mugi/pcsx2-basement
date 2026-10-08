@@ -305,19 +305,15 @@ static mVUSoftDivCapTailPatch mVUGenerateLowerDivSoftExactKernel(microVU& mVU)
 
 	xMOV(esi, 23);
 	u8* const quotient_loop = xGetPtr();
-	xSHL(ebp, 1);
-	xADD(ebp, r8d);
+	xLEA(ebp, ptr[rbp * 2 + r8]);
 	X86SoftFloatEmitter::EmitDivCarrySaveStep();
 	xDEC(esi);
 	xJcc32(Jcc_NotZero,
 		static_cast<s32>(reinterpret_cast<sptr>(quotient_loop) - (reinterpret_cast<sptr>(xGetPtr()) + 6)));
 
-	xSHL(ebp, 1);
-	xADD(ebp, r8d);
+	xLEA(ebp, ptr[rbp * 2 + r8]);
 	X86SoftFloatEmitter::EmitDivCarrySaveStep();
-	xMOV(eax, ebp);
-	xSHL(eax, 1);
-	xADD(eax, r8d);
+	xLEA(eax, ptr[rbp * 2 + r8]);
 	xCMP(eax, 1 << 24);
 	xForwardJL8 srt_quotient_normalized;
 	xSHR(eax, 1);
@@ -522,14 +518,9 @@ static void mVUGenerateLowerSqrtSoftExactKernel(microVU& mVU)
 	sqrt_residual_radicand_ready.SetTarget();
 	xCMP(r10, rax);
 	xForwardJBE8 sqrt_residual_floor;
-	xMOV(edx, ptr32[rsp + ft_raw]);
-	xMOV(ecx, edx);
-	xAND(ecx, 0x7fffff);
-	xSHR(edx, 23);
-	xAND(edx, 1);
-	xXOR(edx, 1);
-	xSHL(edx, 23);
-	xOR(ecx, edx);
+	xMOV(ecx, ptr32[rsp + ft_raw]);
+	xXOR(ecx, 0x00800000);
+	xAND(ecx, 0x00ffffff);
 	xMOV64(r10, reinterpret_cast<uptr>(MicroVUSoftFloatTables::sqrt_correction_lookup));
 	xXOR(eax, eax);
 	xBT(ptr32[r10], ecx);
@@ -580,13 +571,8 @@ static void mVUGenerateLowerSqrtSoftExactKernel(microVU& mVU)
 	xCMP(esi, 23);
 	xJcc32(Jcc_Less, static_cast<s32>(reinterpret_cast<sptr>(sqrt_loop) - (reinterpret_cast<sptr>(xGetPtr()) + 6)));
 
-	xMOV(eax, r8d);
-	xSHL(eax, 1);
-	xADD(eax, ebp);
-	xMOV(edi, eax);
-	xMOV(eax, r8d);
-	xSHL(eax, 2);
-	xADD(ebp, eax);
+	xLEA(edi, ptr[r8 * 2 + rbp]);
+	xLEA(ebp, ptr[r8 * 4 + rbp]);
 	X86SoftFloatEmitter::EmitSqrtCarrySaveStep();
 	xMOV(eax, r8d);
 	xSHL(eax, 1);
@@ -749,14 +735,9 @@ static void mVUGenerateLowerRsqrtSoftExactKernel(microVU& mVU)
 	rsqrt_sqrt_residual_radicand_ready.SetTarget();
 	xCMP(r10, rax);
 	xForwardJBE8 rsqrt_sqrt_residual_floor;
-	xMOV(edx, ptr32[rsp + ft_raw]);
-	xMOV(ecx, edx);
-	xAND(ecx, 0x7fffff);
-	xSHR(edx, 23);
-	xAND(edx, 1);
-	xXOR(edx, 1);
-	xSHL(edx, 23);
-	xOR(ecx, edx);
+	xMOV(ecx, ptr32[rsp + ft_raw]);
+	xXOR(ecx, 0x00800000);
+	xAND(ecx, 0x00ffffff);
 	xMOV64(r10, reinterpret_cast<uptr>(MicroVUSoftFloatTables::sqrt_correction_lookup));
 	xXOR(eax, eax);
 	xBT(ptr32[r10], ecx);
@@ -800,18 +781,14 @@ static void mVUGenerateLowerRsqrtSoftExactKernel(microVU& mVU)
 	xMOV(r8d, 1);
 	xMOV(esi, 23);
 	u8* const quotient_loop = xGetPtr();
-	xSHL(ebp, 1);
-	xADD(ebp, r8d);
+	xLEA(ebp, ptr[rbp * 2 + r8]);
 	X86SoftFloatEmitter::EmitDivCarrySaveStep();
 	xDEC(esi);
 	xJcc32(Jcc_NotZero,
 		static_cast<s32>(reinterpret_cast<sptr>(quotient_loop) - (reinterpret_cast<sptr>(xGetPtr()) + 6)));
-	xSHL(ebp, 1);
-	xADD(ebp, r8d);
+	xLEA(ebp, ptr[rbp * 2 + r8]);
 	X86SoftFloatEmitter::EmitDivCarrySaveStep();
-	xMOV(eax, ebp);
-	xSHL(eax, 1);
-	xADD(eax, r8d);
+	xLEA(eax, ptr[rbp * 2 + r8]);
 	xCMP(eax, 1 << 24);
 	xForwardJL8 rsqrt_quotient_normalized;
 	xSHR(eax, 1);

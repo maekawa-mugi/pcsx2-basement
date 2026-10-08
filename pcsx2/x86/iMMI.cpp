@@ -2806,9 +2806,8 @@ void recPCPYUD()
 			xPUNPCK.HQDQ(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S), xRegisterSSE(EEREC_T));
 		else if (EEREC_D == EEREC_T)
 		{
-			//TODO
-			xPUNPCK.HQDQ(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S));
-			xPSHUF.D(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_D), 0x4e);
+			// D = [S.hi64, T.hi64]: movhlps copies S.hi64 to the low half and keeps D(=T).hi64 (needs proper testing)
+			xMOVHL.PS(xRegisterSSE(EEREC_D), xRegisterSSE(EEREC_S));
 		}
 		else
 		{
