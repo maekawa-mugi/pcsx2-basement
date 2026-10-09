@@ -423,7 +423,7 @@ void FIFOIntr()
 		(dev9.dma_iop_transfered == dev9.dma_iop_size))
 	{
 		dev9.dma_iop_active = false;
-		psxDMA8Interrupt();
+		psxDMA8Interrupt(static_cast<u32>(dev9.dma_iop_transfered));
 	}
 }
 
@@ -1145,8 +1145,9 @@ void DEV9readDMA8Mem(u32 madr, int size)
 
 	if (dev9.dma_ctrl & SPD_DMA_TO_SMAP)
 	{
+		const bool dma_enabled = (dev9Ru16(SMAP_R_RXFIFO_CTRL) & SMAP_RXFIFO_DMAEN) != 0;
 		smap_readDMA8Mem(reinterpret_cast<u32*>(iopPhysMem(madr)), size);
-		psxDMA8Interrupt();
+		psxDMA8Interrupt(dma_enabled ? static_cast<u32>(size) : 0);
 	}
 	else
 	{
@@ -1183,8 +1184,9 @@ void DEV9writeDMA8Mem(u32 madr, int size)
 
 	if (dev9.dma_ctrl & SPD_DMA_TO_SMAP)
 	{
+		const bool dma_enabled = (dev9Ru16(SMAP_R_TXFIFO_CTRL) & SMAP_TXFIFO_DMAEN) != 0;
 		smap_writeDMA8Mem(reinterpret_cast<u32*>(iopPhysMem(madr)), size);
-		psxDMA8Interrupt();
+		psxDMA8Interrupt(dma_enabled ? static_cast<u32>(size) : 0);
 	}
 	else
 	{
