@@ -412,10 +412,10 @@
       <item row="3" column="0" colspan="3">
        <widget class="QCheckBox" name="hddLinuxSwap">
         <property name="toolTip">
-         <string>Adds a volatile 256 MiB RAM disk, preformatted as Linux swap, as the primary ATA slave (/dev/hdb). Its contents are discarded when emulation stops.</string>
+         <string>Adds a volatile 1 GiB RAM disk, preformatted as Linux swap, as the primary ATA slave (/dev/hdb). Its contents are discarded when emulation stops.</string>
         </property>
         <property name="text">
-         <string>Add 256 MiB Linux Swap RAM Disk as Primary Slave</string>
+         <string>Add 1 GiB Linux Swap RAM Disk as Primary Slave</string>
         </property>
        </widget>
       </item>

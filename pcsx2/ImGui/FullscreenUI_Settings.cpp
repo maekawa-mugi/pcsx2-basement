@@ -4284,7 +4284,7 @@ void FullscreenUI::DrawNetworkHDDSettingsPage()
 
 	DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_FLOPPY_DISK, "Enable HDD"),
 		FSUI_CSTR("Enables the internal Hard Disk Drive for expanded storage."), "DEV9/Hdd", "HddEnable", false);
-	DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_MEMORY, "Add 256 MiB Linux Swap RAM Disk as Primary Slave"),
+	DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_MEMORY, "Add 1 GiB Linux Swap RAM Disk as Primary Slave"),
 		FSUI_CSTR("Adds a volatile RAM disk, preformatted as Linux swap, as the primary ATA slave (/dev/hdb). Its contents are discarded when emulation stops."),
 		"DEV9/Hdd", "HddEnableLinuxSwap", false);
 

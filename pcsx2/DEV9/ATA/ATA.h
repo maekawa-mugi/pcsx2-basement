@@ -17,7 +17,7 @@
 class ATA
 {
 public:
-	static constexpr u64 LINUX_SWAP_SIZE = 256ULL * 1024 * 1024;
+	static constexpr u64 LINUX_SWAP_SIZE = 1024ULL * 1024 * 1024;
 
 	//Transfer
 	bool dmaReady = false;

@@ -132,13 +132,13 @@ bool ATA::OpenLinuxSwap()
 	linuxSwapData.reset(new (std::nothrow) u8[static_cast<size_t>(LINUX_SWAP_SIZE)]);
 	if (!linuxSwapData)
 	{
-		Console.Error("DEV9: ATA: Failed to allocate 256 MiB Linux swap RAM disk");
+		Console.Error("DEV9: ATA: Failed to allocate 1 GiB Linux swap RAM disk");
 		return false;
 	}
 	std::memset(linuxSwapData.get(), 0, static_cast<size_t>(LINUX_SWAP_SIZE));
 
 	InitializeLinuxSwapDisk();
-	DevCon.WriteLn("DEV9: ATA: Added 256 MiB Linux swap RAM disk with MBR partition as primary slave");
+	DevCon.WriteLn("DEV9: ATA: Added 1 GiB Linux swap RAM disk with MBR partition as primary slave");
 	return true;
 }
 
@@ -170,6 +170,8 @@ void ATA::InitializeLinuxSwapDisk()
 	auto write_chs = [this](size_t offset, u32 lba) {
 		constexpr u32 chs_sectors_per_track = 63;
 		constexpr u32 chs_heads = 16;
+		// Saturate the 10-bit MBR cylinder field; LBA retains the full partition size.
+		lba = (std::min)(lba, 1024 * chs_heads * chs_sectors_per_track - 1);
 		const u32 cylinder = lba / (chs_heads * chs_sectors_per_track);
 		const u32 track_offset = lba % (chs_heads * chs_sectors_per_track);
 		const u32 head = track_offset / chs_sectors_per_track;
