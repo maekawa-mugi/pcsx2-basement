@@ -75,6 +75,7 @@
 #define PS_FBA 0
 #define PS_FBMASK 0
 #define PS_LTF 1
+#define PS_INTERPOLATION 0
 #define PS_TCOFFSETHACK 0
 #define PS_POINT_SAMPLER 0
 #define PS_REGION_RECT 0
@@ -475,6 +476,57 @@ float4 sample_c_af(float2 uv, float uv_w)
 }
 #endif
 
+
+#if PS_INTERPOLATION != 0
+// 4x4 reconstruction, used only for simple colour textures without mipmapping.
+float cubic_kernel(float x)
+{
+	x = abs(x);
+	if (x < 1.0)
+		return ((1.5 * x - 2.5) * x) * x + 1.0;
+	if (x < 2.0)
+		return (((-0.5 * x + 2.5) * x) - 4.0) * x + 2.0;
+	return 0.0;
+}
+
+float jinc_kernel(float r)
+{
+	float q = 2.46740110027 * r * r;
+	return 1.0 + q * (-0.5 + q * (0.0833333333333 + q * (-0.00694444444444 +
+		q * (0.000347222222222 + q * (-0.0000115740740741 +
+		q * (0.00000027557319224 + q * (-0.00000000492094986 +
+		q * 0.0000000000683461217)))))));
+}
+
+float4 sample_interpolated(float2 uv)
+{
+	uint tex_width, tex_height, mip_levels;
+	Texture.GetDimensions(0, tex_width, tex_height, mip_levels);
+	float2 size = float2(tex_width, tex_height);
+	float2 texel = uv * size - 0.5;
+	float2 base = floor(texel);
+	float4 colour = 0.0;
+	float weight_sum = 0.0;
+	[unroll] for (int y = -1; y <= 2; y++)
+	{
+		[unroll] for (int x = -1; x <= 2; x++)
+		{
+			float2 tap = base + float2(x, y);
+			float2 delta = tap - texel;
+#if PS_INTERPOLATION == 1
+			float weight = cubic_kernel(delta.x) * cubic_kernel(delta.y);
+#else
+			float radius = length(delta);
+			float weight = (radius < 2.0) ? jinc_kernel(radius) * jinc_kernel(radius * 0.5) : 0.0;
+#endif
+			colour += Texture.SampleLevel(TextureSampler, (tap + 0.5) / size, 0) * weight;
+			weight_sum += weight;
+		}
+	}
+	return saturate(colour / max(weight_sum, 0.000001));
+}
+#endif
+
 float4 sample_c(float2 uv, float uv_w, int2 xy)
 {
 #if PS_TEX_IS_FB == 1
@@ -507,7 +559,9 @@ float4 sample_c(float2 uv, float uv_w, int2 xy)
 	#endif
 #endif
 
-#if PS_ANISOTROPIC_FILTERING > 1
+#if PS_INTERPOLATION != 0
+	return sample_interpolated(uv);
+#elif PS_ANISOTROPIC_FILTERING > 1
 	return sample_c_af(uv, uv_w);
 #elif PS_AUTOMATIC_LOD == 1
 	return Texture.Sample(TextureSampler, uv);
