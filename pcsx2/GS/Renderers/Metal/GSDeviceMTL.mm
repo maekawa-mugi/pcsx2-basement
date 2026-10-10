@@ -2016,6 +2016,7 @@ void GSDeviceMTL::MRESetHWPipelineState(GSHWDrawConfig::VSSelector vssel, GSHWDr
 		setFnConstantB(m_fn_constants, pssel.adjs,                  GSMTLConstantIndex_PS_ADJS);
 		setFnConstantB(m_fn_constants, pssel.adjt,                  GSMTLConstantIndex_PS_ADJT);
 		setFnConstantB(m_fn_constants, pssel.ltf,                   GSMTLConstantIndex_PS_LTF);
+		setFnConstantI(m_fn_constants, pssel.interpolation,         GSMTLConstantIndex_PS_INTERPOLATION);
 		setFnConstantB(m_fn_constants, pssel.shuffle,               GSMTLConstantIndex_PS_SHUFFLE);
 		setFnConstantB(m_fn_constants, pssel.shuffle_same,          GSMTLConstantIndex_PS_SHUFFLE_SAME);
 		setFnConstantI(m_fn_constants, pssel.process_ba,            GSMTLConstantIndex_PS_PROCESS_BA);
