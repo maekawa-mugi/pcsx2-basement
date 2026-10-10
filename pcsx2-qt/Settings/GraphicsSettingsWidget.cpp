@@ -109,6 +109,7 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* settings_dialog, 
 	// HW Settings
 	//////////////////////////////////////////////////////////////////////////
 	SettingWidgetBinder::BindWidgetToIntSetting(sif, m_hw.textureFiltering, "EmuCore/GS", "filter", static_cast<int>(Pcsx2Config::GSOptions::DEFAULT_TEXTURE_FILTERING_MODE));
+	SettingWidgetBinder::BindWidgetToIntSetting(sif, m_hw.textureInterpolation, "EmuCore/GS", "TextureInterpolation", static_cast<int>(Pcsx2Config::GSOptions::DEFAULT_TEXTURE_INTERPOLATION));
 	SettingWidgetBinder::BindWidgetToIntSetting(
 		sif, m_hw.trilinearFiltering, "EmuCore/GS", "TriFilter", static_cast<int>(TriFiltering::Automatic), -1);
 	SettingWidgetBinder::BindWidgetToEnumSetting(sif, m_hw.anisotropicFiltering, "EmuCore/GS", "MaxAnisotropy",
@@ -546,6 +547,12 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* settings_dialog, 
 			   "Bilinear (Forced): Will blend colors together to remove harsh edges between different colored pixels even if the game told the PS2 not to.<br> "
 			   "Bilinear (PS2): Will apply filtering to all surfaces that a game instructs the PS2 to filter.<br> "
 			   "Bilinear (Forced Excluding Sprites): Will apply filtering to all surfaces, even if the game told the PS2 not to, except sprites."));
+
+		dialog()->registerWidgetHelp(m_hw.textureInterpolation, tr("Interpolation Method"), tr("Bilinear (Default)"),
+			tr("Selects the reconstruction kernel when texture filtering is enabled in the hardware renderer. "
+			   "Bicubic and Jinc use 16 shader samples per pixel and can be significantly slower. "
+			   "For compatibility, unusual texture formats, special addressing, mipmapping and anisotropic filtering "
+			   "continue to use the original sampling path. Nearest filtering is never overridden."));
 
 		dialog()->registerWidgetHelp(m_hw.trilinearFiltering, tr("Trilinear Filtering"), tr("Automatic (Default)"),
 			tr("Reduces blurriness of large textures applied to small, steeply angled surfaces by sampling colors from the two nearest Mipmaps. Requires Mipmapping to be 'on'.<br> "
