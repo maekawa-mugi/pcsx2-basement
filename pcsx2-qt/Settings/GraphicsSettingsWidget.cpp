@@ -541,12 +541,12 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* settings_dialog, 
 			m_hw.rov, tr("Rasterizer Ordered View"), tr("Unchecked"), tr("Enables Rasterizer Ordered View (ROV), which allows feedback loops to be executed with fewer draw calls. Can improve performance in feedback heavy games with higher accuracy settings."));
 
 		dialog()->registerWidgetHelp(
-			m_hw.textureFiltering, tr("Texture Filtering"), tr("Bilinear (PS2)"),
-			tr("Changes what filtering algorithm is used to map textures to surfaces.<br> "
-			   "Nearest: Makes no attempt to blend colors.<br> "
-			   "Bilinear (Forced): Will blend colors together to remove harsh edges between different colored pixels even if the game told the PS2 not to.<br> "
-			   "Bilinear (PS2): Will apply filtering to all surfaces that a game instructs the PS2 to filter.<br> "
-			   "Bilinear (Forced Excluding Sprites): Will apply filtering to all surfaces, even if the game told the PS2 not to, except sprites."));
+			m_hw.textureFiltering, tr("Texture Filtering Mode"), tr("Follow PS2 (Default)"),
+			tr("Controls when hardware texture filtering is applied. Select the algorithm separately under Interpolation Method.<br> "
+			   "Nearest: Never filters textures.<br> "
+			   "Forced: Filters textures even when the game disables filtering.<br> "
+			   "Follow PS2: Filters only when instructed by the game.<br> "
+			   "Forced (Except Sprites): Forces filtering on other surfaces but retains the game's sprite filtering."));
 
 		dialog()->registerWidgetHelp(m_hw.textureInterpolation, tr("Interpolation Method"), tr("Bilinear (Default)"),
 			tr("Selects the reconstruction kernel when texture filtering is enabled in the hardware renderer. "
