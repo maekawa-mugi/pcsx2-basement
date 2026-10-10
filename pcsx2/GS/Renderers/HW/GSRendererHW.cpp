@@ -8335,6 +8335,7 @@ __ri void GSRendererHW::EmulateTextureSampler(const GSTextureCache::Target* rt, 
 	// Enhanced filtering reconstructs colour texels in the pixel shader.
 	// Keep GS-specific palette, depth, region wrapping, and mipmapped paths unchanged.
 	// The custom kernel uses 16 nearest-texel taps and the existing sampler wrap/clamp state.
+	m_conf.ps.interpolation = 0;
 	if (bilinear && !shader_emulated_sampler && !m_conf.ps.shuffle &&
 		!m_conf.ps.tex_is_fb && !m_conf.ps.sw_aniso && !m_conf.sampler.triln &&
 		!trilinear_manual && !trilinear_auto)
