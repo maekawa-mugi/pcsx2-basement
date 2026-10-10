@@ -8332,6 +8332,18 @@ __ri void GSRendererHW::EmulateTextureSampler(const GSTextureCache::Target* rt, 
 			m_conf.ps.automatic_lod = 1;
 	}
 
+	// Enhanced filtering reconstructs colour texels in the pixel shader.
+	// Keep GS-specific palette, depth, region wrapping, and mipmapped paths unchanged.
+	// The custom kernel uses 16 nearest-texel taps and the existing sampler wrap/clamp state.
+	if (bilinear && !shader_emulated_sampler && !m_conf.ps.shuffle &&
+		!m_conf.ps.tex_is_fb && !m_conf.ps.sw_aniso && !m_conf.sampler.triln &&
+		!trilinear_manual && !trilinear_auto)
+	{
+		m_conf.ps.interpolation = static_cast<u8>(GSConfig.Interpolation);
+		if (m_conf.ps.interpolation != 0)
+			m_conf.sampler.biln = 0;
+	}
+
 	// clamp to base level if we're not providing or generating mipmaps
 	// manual trilinear causes the chain to be uploaded, auto causes it to be generated
 	m_conf.sampler.lodclamp = !(trilinear_manual || trilinear_auto);
