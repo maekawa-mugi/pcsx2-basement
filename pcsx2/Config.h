@@ -323,6 +323,14 @@ enum class BiFiltering : u8
 	Forced_But_Sprite,
 };
 
+// Selects the reconstruction kernel used when hardware texture filtering is enabled.
+enum class TextureInterpolation : u8
+{
+	Bilinear,
+	Bicubic,
+	Jinc,
+};
+
 enum class TriFiltering : s8
 {
 	Automatic = -1,
@@ -737,6 +745,7 @@ struct Pcsx2Config
 		static constexpr float DEFAULT_UPSCALE_MULTIPLIER = 1.0f;
 		static constexpr AccBlendLevel DEFAULT_BLENDING_ACCURACY = AccBlendLevel::Basic;
 		static constexpr BiFiltering DEFAULT_TEXTURE_FILTERING_MODE = BiFiltering::PS2;
+		static constexpr TextureInterpolation DEFAULT_TEXTURE_INTERPOLATION = TextureInterpolation::Bilinear;
 		static constexpr TriFiltering DEFAULT_TRILINEAR_FILTERING_MODE = TriFiltering::Automatic;
 
 		static constexpr float DEFAULT_OSD_SCALE = 100.0f;
@@ -881,6 +890,7 @@ struct Pcsx2Config
 
 		AccBlendLevel AccurateBlendingUnit = DEFAULT_BLENDING_ACCURACY;
 		BiFiltering TextureFiltering = DEFAULT_TEXTURE_FILTERING_MODE;
+		TextureInterpolation Interpolation = DEFAULT_TEXTURE_INTERPOLATION;
 		TexturePreloadingLevel TexturePreloading = TexturePreloadingLevel::Full;
 		GSDumpCompressionMethod GSDumpCompression = GSDumpCompressionMethod::Zstandard;
 		GSHardwareDownloadMode HWDownloadMode = GSHardwareDownloadMode::Enabled;
