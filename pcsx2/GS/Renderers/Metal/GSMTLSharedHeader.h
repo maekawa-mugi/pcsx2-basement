@@ -189,6 +189,7 @@ enum GSMTLFnConstants
 	GSMTLConstantIndex_PS_ADJS,
 	GSMTLConstantIndex_PS_ADJT,
 	GSMTLConstantIndex_PS_LTF,
+	GSMTLConstantIndex_PS_INTERPOLATION,
 	GSMTLConstantIndex_PS_SHUFFLE,
 	GSMTLConstantIndex_PS_SHUFFLE_SAME,
 	GSMTLConstantIndex_PS_PROCESS_BA,
