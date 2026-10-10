@@ -17,7 +17,7 @@
    <item row="1" column="0">
     <widget class="QLabel" name="textureFilteringLabel">
      <property name="text">
-      <string>Texture Filtering:</string>
+      <string>Texture Filtering Mode:</string>
      </property>
      <property name="buddy">
       <cstring>textureFiltering</cstring>
@@ -151,17 +151,17 @@
      </item>
      <item>
       <property name="text">
-       <string>Bilinear (Forced)</string>
+       <string>Forced</string>
       </property>
      </item>
      <item>
       <property name="text">
-       <string>Bilinear (PS2)</string>
+       <string>Follow PS2 (Default)</string>
       </property>
      </item>
      <item>
       <property name="text">
-       <string>Bilinear (Forced excluding sprite)</string>
+       <string>Forced (Except Sprites)</string>
       </property>
      </item>
     </widget>
