@@ -42,6 +42,8 @@ struct GSMTLPresentPSUniform
 	vector_float2 source_resolution;
 	vector_float2 rcp_source_resolution; ///< 1 / source_resolution
 	float time;
+	float scaling_mode; // DisplayConstantBuffer::TimeAndPad.y
+	float color_space; // DisplayConstantBuffer::TimeAndPad.z
 };
 
 struct GSMTLInterlacePSUniform

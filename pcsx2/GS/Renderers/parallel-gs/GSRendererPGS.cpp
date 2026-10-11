@@ -173,7 +173,8 @@ void GSRendererPGS::render_blit(CommandBuffer& cmd, const ImageView& view,
 	float width, float height)
 {
 	cmd.set_srgb_texture(0, 0, view);
-	cmd.set_sampler(0, 0, GSConfig.LinearPresent != GSPostBilinearMode::Off ? StockSampler::LinearClamp : StockSampler::NearestClamp);
+	// The classic final resamplers are not used by PGS; preserve its value-0 nearest fallback.
+	cmd.set_sampler(0, 0, GSConfig.LinearPresent != GSPostBilinearMode::Area ? StockSampler::LinearClamp : StockSampler::NearestClamp);
 	cmd.set_opaque_state();
 	cmd.set_depth_test(false, false);
 	cmd.set_program(blit_program);

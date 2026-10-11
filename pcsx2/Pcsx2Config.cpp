@@ -825,6 +825,7 @@ bool Pcsx2Config::GSOptions::OptionsAreEqual(const GSOptions& right) const
 
 		OpEqu(InterlaceMode) &&
 		OpEqu(LinearPresent) &&
+		OpEqu(FinalScalingColorSpace) &&
 
 		OpEqu(StretchY) &&
 		OpEqu(Crop[0]) &&
@@ -1099,6 +1100,7 @@ void Pcsx2Config::GSOptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapBitBool(EnableAudioCaptureParameters);
 
 	SettingsWrapIntEnumEx(LinearPresent, "linear_present_mode");
+	SettingsWrapIntEnumEx(FinalScalingColorSpace, "FinalScalingColorSpace");
 	SettingsWrapIntEnumEx(InterlaceMode, "deinterlace_mode");
 
 	SettingsWrapEntry(OsdScale);

@@ -35,6 +35,17 @@ static constexpr std::array<PresentShader, 8> s_tv_shader_indices = {
 	PresentShader::COMPLEX_FILTER, PresentShader::LOTTES_FILTER,
 	PresentShader::SUPERSAMPLE_4xRGSS, PresentShader::SUPERSAMPLE_AUTO};
 
+static Filter GetFinalPresentFilter()
+{
+	switch (GSConfig.LinearPresent)
+	{
+		case GSPostBilinearMode::Area: return Filter::Area;
+		case GSPostBilinearMode::CatmullRom: return Filter::CatmullRom;
+		case GSPostBilinearMode::Jinc: return Filter::Jinc;
+		default: return Filter::Biln;
+	}
+}
+
 std::unique_ptr<GSRenderer> g_gs_renderer;
 
 // Since we read this on the EE thread, we can't put it in the renderer, because
@@ -622,7 +633,7 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 				const float shader_time = static_cast<float>(Common::Timer::ConvertValueToSeconds(current_time - m_shader_time_start));
 
 				g_gs_device->PresentRect(current, src_uv, nullptr, draw_rect,
-					s_tv_shader_indices[GSConfig.TVShader], shader_time, BilnIf(GSConfig.LinearPresent != GSPostBilinearMode::Off));
+					s_tv_shader_indices[GSConfig.TVShader], shader_time, GetFinalPresentFilter());
 			}
 
 			EndPresentFrame();
@@ -945,7 +956,7 @@ void GSRenderer::PresentCurrentFrame()
 			const float shader_time = static_cast<float>(Common::Timer::ConvertValueToSeconds(current_time - m_shader_time_start));
 
 			g_gs_device->PresentRect(current, src_uv, nullptr, draw_rect,
-				s_tv_shader_indices[GSConfig.TVShader], shader_time, BilnIf(GSConfig.LinearPresent != GSPostBilinearMode::Off));
+				s_tv_shader_indices[GSConfig.TVShader], shader_time, GetFinalPresentFilter());
 		}
 
 		EndPresentFrame();

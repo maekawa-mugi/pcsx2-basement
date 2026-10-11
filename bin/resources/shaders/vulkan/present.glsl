@@ -29,6 +29,8 @@ layout(push_constant) uniform cb10
 	vec2 u_source_resolution;
 	vec2 u_rcp_source_resolution; // 1 / u_source_resolution
 	float u_time;
+	float u_final_scaling_mode;
+	float u_final_color_space;
 };
 
 layout(location = 0) in vec2 v_tex;
@@ -37,9 +39,163 @@ layout(location = 0) out vec4 o_col0;
 
 layout(set = 0, binding = 0) uniform sampler2D samp0;
 
+
+// Final output. Modes: bilinear=1, box/area=2, Catmull-Rom=3, Jinc=4.
+// Working spaces: encoded RGB=0, linear light=1, sigmoidized linear=2.
+float final_srgb_decode(float x)
+{
+	return x <= 0.04045 ? x / 12.92 : pow((x + 0.055) / 1.055, 2.4);
+}
+float final_srgb_encode(float x)
+{
+	return x <= 0.0031308 ? 12.92 * x : 1.055 * pow(x, 1.0 / 2.4) - 0.055;
+}
+float final_sigmoid(float x)
+{
+	return (1.0 / (1.0 + exp(-8.0 * (x - 0.5))) - 0.01798620996) / 0.96402758008;
+}
+float final_unsigmoid(float x)
+{
+	float p = clamp(x, 0.0, 1.0) * 0.96402758008 + 0.01798620996;
+	return clamp(0.5 + log(p / (1.0 - p)) / 8.0, 0.0, 1.0);
+}
+vec4 final_encode_input(vec4 pixel, float space)
+{
+	if (space >= 0.5)
+	{
+		pixel.r = final_srgb_decode(pixel.r);
+		pixel.g = final_srgb_decode(pixel.g);
+		pixel.b = final_srgb_decode(pixel.b);
+		if (space >= 1.5)
+		{
+			pixel.r = final_sigmoid(pixel.r);
+			pixel.g = final_sigmoid(pixel.g);
+			pixel.b = final_sigmoid(pixel.b);
+		}
+	}
+	return pixel;
+}
+vec4 final_decode_output(vec4 pixel, float space)
+{
+	pixel = clamp(pixel, vec4(0.0), vec4(1.0));
+	if (space >= 0.5)
+	{
+		if (space >= 1.5)
+		{
+			pixel.r = final_unsigmoid(pixel.r);
+			pixel.g = final_unsigmoid(pixel.g);
+			pixel.b = final_unsigmoid(pixel.b);
+		}
+		pixel.r = final_srgb_encode(pixel.r);
+		pixel.g = final_srgb_encode(pixel.g);
+		pixel.b = final_srgb_encode(pixel.b);
+	}
+	return pixel;
+}
+float final_cubic(float x)
+{
+	x = abs(x);
+	if (x < 1.0) return ((1.5 * x - 2.5) * x) * x + 1.0;
+	if (x < 2.0) return (((-0.5 * x + 2.5) * x) - 4.0) * x + 2.0;
+	return 0.0;
+}
+float final_jinc(float r)
+{
+	// Normalized Jinc(pi*r), approximated by the texture-filter polynomial.
+	float q = 2.46740110027 * r * r;
+	return 1.0 + q * (-0.5 + q * (0.0833333333333 + q * (-0.00694444444444 +
+		q * (0.000347222222222 + q * (-0.0000115740740741 +
+		q * (0.00000027557319224 + q * (-0.00000000492094986 +
+		q * 0.0000000000683461217)))))));
+}
+vec4 final_read(ivec2 coord, float space)
+{
+	ivec2 limit = ivec2(u_source_resolution) - ivec2(1);
+	return final_encode_input(texelFetch(samp0, clamp(coord, ivec2(0), limit), 0), space);
+}
+vec4 final_resample(vec2 uv, float mode, float space)
+{
+	if (mode < 1.5 && space < 0.5)
+		return texture(samp0, uv);
+
+	// Area is always a true weighted average in Native RGB or Linear Light.
+	if (mode >= 1.5 && mode < 2.5 && space >= 1.5)
+		space = 1.0;
+
+	vec2 location = uv * u_source_resolution - vec2(0.5);
+	ivec2 base = ivec2(floor(location));
+	if (mode < 1.5)
+	{
+		// Manual bilinear is required to decode RGB before mixing.
+		vec2 f = fract(location);
+		vec4 a = final_read(base, space);
+		vec4 b = final_read(base + ivec2(1, 0), space);
+		vec4 c = final_read(base + ivec2(0, 1), space);
+		vec4 d = final_read(base + ivec2(1, 1), space);
+		return final_decode_output(mix(mix(a, b, f.x), mix(c, d, f.x), f.y), space);
+	}
+
+	vec2 source_per_output = abs(u_source_size / max(abs(u_target_size), vec2(1.0)));
+	if (mode < 2.5)
+	{
+		// Exact pixel-overlap box resampling, directly from the source.
+		vec2 low = uv * u_source_resolution - 0.5 * source_per_output;
+		vec2 high = low + source_per_output;
+		ivec2 first = ivec2(floor(low));
+		ivec2 last = ivec2(ceil(high));
+		vec4 sum = vec4(0.0);
+		for (int y = first.y; y < last.y; y++)
+		{
+			for (int x = first.x; x < last.x; x++)
+			{
+				vec2 overlap = max(vec2(0.0), min(high, vec2(x + 1, y + 1)) - max(low, vec2(x, y)));
+				sum += final_read(ivec2(x, y), space) * (overlap.x * overlap.y);
+			}
+		}
+		return final_decode_output(sum / max(source_per_output.x * source_per_output.y, 1e-8), space);
+	}
+
+	// Widen the kernel for minification instead of using a fixed 4x4 footprint.
+	vec2 scale = max(vec2(1.0), source_per_output);
+	ivec2 first = ivec2(ceil(location - 2.0 * scale));
+	ivec2 last = ivec2(floor(location + 2.0 * scale));
+	vec4 sum = vec4(0.0);
+	vec4 center_min = vec4(1.0);
+	vec4 center_max = vec4(0.0);
+	float total = 0.0;
+	for (int y = first.y; y <= last.y; y++)
+	{
+		for (int x = first.x; x <= last.x; x++)
+		{
+			vec2 delta = (vec2(x, y) - location) / scale;
+			float weight = 0.0;
+			if (mode < 3.5)
+				weight = final_cubic(delta.x) * final_cubic(delta.y);
+			else
+			{
+				float radius = length(delta);
+				if (radius < 2.0) weight = final_jinc(radius) * final_jinc(radius * 0.5);
+			}
+			if (weight == 0.0) continue;
+			vec4 pixel = final_read(ivec2(x, y), space);
+			sum += pixel * weight;
+			total += weight;
+			if (x >= base.x && x <= base.x + 1 && y >= base.y && y <= base.y + 1)
+			{
+				center_min = min(center_min, pixel);
+				center_max = max(center_max, pixel);
+			}
+		}
+	}
+	vec4 result = sum / max(total, 1e-8);
+	if (mode >= 3.5 && scale.x <= 1.0 && scale.y <= 1.0)
+		result = clamp(result, center_min, center_max); // Jinc anti-ringing.
+	return final_decode_output(result, space);
+}
+
 vec4 sample_c(vec2 uv)
 {
-	return texture(samp0, uv);
+	return final_resample(uv, u_final_scaling_mode, u_final_color_space);
 }
 
 vec4 ps_crt(uint i)
@@ -150,7 +306,7 @@ vec3 Fetch(vec2 pos, vec2 off)
 	}
 	else
 	{
-		return ToLinear(texture(samp0, pos.xy).rgb);
+		return ToLinear(sample_c(pos.xy).rgb);
 	}
 }
 

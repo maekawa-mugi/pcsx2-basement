@@ -19,6 +19,9 @@ enum class Filter
 {
 	Nearest = 0,
 	Biln    = 1,
+	Area    = 2, // Full-coverage box filter used for the final display.
+	CatmullRom = 3,
+	Jinc = 4,
 };
 
 static inline constexpr Filter Nearest = Filter::Nearest;
@@ -622,6 +625,11 @@ struct alignas(16) DisplayConstantBuffer
 	void SetTime(float time)
 	{
 		TimeAndPad = GSVector4(time);
+	}
+	void SetFinalScaling(Filter filter, u8 color_space)
+	{
+		TimeAndPad.y = static_cast<float>(filter);
+		TimeAndPad.z = static_cast<float>(color_space);
 	}
 };
 static_assert(sizeof(DisplayConstantBuffer) == 96, "DisplayConstantBuffer is correct size");

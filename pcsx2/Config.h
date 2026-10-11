@@ -309,9 +309,19 @@ enum class GSInterlaceMode : u8
 
 enum class GSPostBilinearMode : u8
 {
-	Off,
+	Area, // Setting value 0 now uses coverage-based final image scaling.
 	BilinearSmooth,
 	BilinearSharp,
+	CatmullRom,
+	Jinc,
+};
+
+// Working colour space for final output scaling, not HW texture interpolation.
+enum class GSFinalScalingColorSpace : u8
+{
+	NativeRGB,
+	LinearLight,
+	SigmoidizedLinear,
 };
 
 // Ordering was done to keep compatibility with older ini file.
@@ -875,6 +885,7 @@ struct Pcsx2Config
 		FMVAspectRatioSwitchType FMVAspectRatioSwitch = DEFAULT_FMV_ASPECT_RATIO;
 		GSInterlaceMode InterlaceMode = DEFAULT_INTERLACE_MODE;
 		GSPostBilinearMode LinearPresent = DEFAULT_BILINEAR_FILTERING_MODE;
+		GSFinalScalingColorSpace FinalScalingColorSpace = GSFinalScalingColorSpace::NativeRGB;
 
 		float StretchY = 100.0f;
 		int Crop[4] = {};
