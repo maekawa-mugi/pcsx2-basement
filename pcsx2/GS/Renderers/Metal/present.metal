@@ -31,33 +31,65 @@ static float4 ps_scanlines(float4 color, int i)
 	return color * saturate(mask[i] + 0.5f);
 }
 
-// use ps_copy from convert.metal
-
-fragment float4 ps_filter_scanlines(ConvertShaderData data [[stage_in]], ConvertPSRes res)
+// Area resampling integrates the source texels covered by each output pixel.
+static float4 present_sample(ConvertPSRes res, float2 uv, constant GSMTLPresentPSUniform& cb)
 {
-	return ps_scanlines(res.sample(data.t), uint(data.p.y) % 2);
+	if (cb.area_filter < 0.5f)
+		return res.sample(uv);
+	float2 footprint = abs(cb.source_size / max(abs(cb.target_size), float2(1.0f)));
+	float2 lo = uv * cb.source_resolution - 0.5f * footprint;
+	float2 hi = lo + footprint;
+	int2 begin = int2(floor(lo));
+	int2 end = int2(ceil(hi));
+	int2 max_texel = int2(cb.source_resolution) - int2(1);
+	float4 sum = float4(0.0f);
+	for (int y = begin.y; y < end.y; y++)
+	{
+		for (int x = begin.x; x < end.x; x++)
+		{
+			float2 overlap = max(float2(0.0f), min(hi, float2(x + 1, y + 1)) - max(lo, float2(x, y)));
+			sum += res.texture.read(uint2(clamp(int2(x, y), int2(0), max_texel))) * (overlap.x * overlap.y);
+		}
+	}
+	return sum / max(footprint.x * footprint.y, 1e-8f);
 }
 
-fragment float4 ps_filter_diagonal(ConvertShaderData data [[stage_in]], ConvertPSRes res)
+fragment float4 ps_present_copy(ConvertShaderData data [[stage_in]], ConvertPSRes res,
+	constant GSMTLPresentPSUniform& cb [[buffer(GSMTLBufferIndexUniforms)]])
+{
+	return present_sample(res, data.t, cb);
+}
+
+
+fragment float4 ps_filter_scanlines(ConvertShaderData data [[stage_in]], ConvertPSRes res,
+	constant GSMTLPresentPSUniform& cb [[buffer(GSMTLBufferIndexUniforms)]])
+{
+	return ps_scanlines(present_sample(res, data.t, cb), uint(data.p.y) % 2);
+}
+
+fragment float4 ps_filter_diagonal(ConvertShaderData data [[stage_in]], ConvertPSRes res,
+	constant GSMTLPresentPSUniform& cb [[buffer(GSMTLBufferIndexUniforms)]])
 {
 	uint4 p = uint4(data.p);
-	return ps_crt(res.sample(data.t), (p.x + (p.y % 3)) % 3);
+	return ps_crt(present_sample(res, data.t, cb), (p.x + (p.y % 3)) % 3);
 }
 
-fragment float4 ps_filter_triangular(ConvertShaderData data [[stage_in]], ConvertPSRes res)
+fragment float4 ps_filter_triangular(ConvertShaderData data [[stage_in]], ConvertPSRes res,
+	constant GSMTLPresentPSUniform& cb [[buffer(GSMTLBufferIndexUniforms)]])
 {
 	uint4 p = uint4(data.p);
 	uint val = ((p.x + ((p.y >> 1) & 1) * 3) >> 1) % 3;
-	return ps_crt(res.sample(data.t), val);
+	return ps_crt(present_sample(res, data.t, cb), val);
 }
 
-fragment float4 ps_filter_complex(ConvertShaderData data [[stage_in]], ConvertPSRes res)
+fragment float4 ps_filter_complex(ConvertShaderData data [[stage_in]], ConvertPSRes res,
+	constant GSMTLPresentPSUniform& cb [[buffer(GSMTLBufferIndexUniforms)]])
 {
 	float2 texdim = float2(res.texture.get_width(), res.texture.get_height());
 	float factor = (0.9f - 0.4f * cos(2.f * M_PI_F * data.t.y * texdim.y));
 	float ycoord = (floor(data.t.y * texdim.y) + 0.5f) / texdim.y;
 
-	return factor * res.sample(float2(data.t.x, ycoord));
+	return factor * present_sample(res, float2(data.t.x, ycoord), cb);
 }
 
 #define MaskingType 4                      //[1|2|3|4] The type of CRT shadow masking used. 1: compressed TV style, 2: Aperture-grille, 3: Stretched VGA style, 4: VGA style.
@@ -108,7 +140,7 @@ struct LottesCRTPass
 		}
 		else
 		{
-			return ToLinear(res.sample(pos.xy).rgb);
+			return ToLinear(present_sample(res, pos.xy, uniform).rgb);
 		}
 	}
 
@@ -361,7 +393,8 @@ fragment float4 ps_filter_lottes(ConvertShaderData data [[stage_in]], ConvertPSR
 	return LottesCRTPass(res, uniform).Run(data.p);
 }
 
-fragment float4 ps_4x_rgss(ConvertShaderData data [[stage_in]], ConvertPSRes res)
+fragment float4 ps_4x_rgss(ConvertShaderData data [[stage_in]], ConvertPSRes res,
+	constant GSMTLPresentPSUniform& cb [[buffer(GSMTLBufferIndexUniforms)]])
 {
 	float2 dxy = float2(dfdx(data.t.x), dfdy(data.t.y));
 	float3 color = 0;
@@ -369,10 +402,10 @@ fragment float4 ps_4x_rgss(ConvertShaderData data [[stage_in]], ConvertPSRes res
 	float s = 1.0/8.0;
 	float l = 3.0/8.0;
 
-	color += res.sample(data.t + float2( s, l) * dxy).rgb;
-	color += res.sample(data.t + float2( l,-s) * dxy).rgb;
-	color += res.sample(data.t + float2(-s,-l) * dxy).rgb;
-	color += res.sample(data.t + float2(-l, s) * dxy).rgb;
+	color += present_sample(res, data.t + float2( s, l) * dxy, cb).rgb;
+	color += present_sample(res, data.t + float2( l,-s) * dxy, cb).rgb;
+	color += present_sample(res, data.t + float2(-s,-l) * dxy, cb).rgb;
+	color += present_sample(res, data.t + float2(-l, s) * dxy, cb).rgb;
 
 	return float4(color * 0.25,1);
 }
@@ -382,7 +415,7 @@ fragment float4 ps_automagical_supersampling(ConvertShaderData data [[stage_in]]
 {
 	float2 ratio = (cb.source_size / cb.target_size) * 0.5;
 	float2 steps = floor(ratio);
-	float3 col = res.sample(data.t).rgb;
+	float3 col = present_sample(res, data.t, cb).rgb;
 	float div = 1;
 
 	for (float y = 0; y < steps.y; y++)
@@ -390,7 +423,7 @@ fragment float4 ps_automagical_supersampling(ConvertShaderData data [[stage_in]]
 		for (float x = 0; x < steps.x; x++)
 		{
 			float2 offset = float2(x,y) - ratio * 0.5;
-			col += res.sample(data.t + offset * cb.rcp_source_resolution * 2.0).rgb;
+			col += present_sample(res, data.t + offset * cb.rcp_source_resolution * 2.0, cb).rgb;
 			div++;
 		}
 	}

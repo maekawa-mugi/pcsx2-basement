@@ -622,7 +622,7 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 				const float shader_time = static_cast<float>(Common::Timer::ConvertValueToSeconds(current_time - m_shader_time_start));
 
 				g_gs_device->PresentRect(current, src_uv, nullptr, draw_rect,
-					s_tv_shader_indices[GSConfig.TVShader], shader_time, BilnIf(GSConfig.LinearPresent != GSPostBilinearMode::Off));
+					s_tv_shader_indices[GSConfig.TVShader], shader_time, (GSConfig.LinearPresent == GSPostBilinearMode::Area) ? Filter::Area : Biln);
 			}
 
 			EndPresentFrame();
@@ -945,7 +945,7 @@ void GSRenderer::PresentCurrentFrame()
 			const float shader_time = static_cast<float>(Common::Timer::ConvertValueToSeconds(current_time - m_shader_time_start));
 
 			g_gs_device->PresentRect(current, src_uv, nullptr, draw_rect,
-				s_tv_shader_indices[GSConfig.TVShader], shader_time, BilnIf(GSConfig.LinearPresent != GSPostBilinearMode::Off));
+				s_tv_shader_indices[GSConfig.TVShader], shader_time, (GSConfig.LinearPresent == GSPostBilinearMode::Area) ? Filter::Area : Biln);
 		}
 
 		EndPresentFrame();

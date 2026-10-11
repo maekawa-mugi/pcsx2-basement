@@ -459,9 +459,11 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* settings_dialog, 
 		dialog()->registerWidgetHelp(m_display.disableInterlaceOffset, tr("Disable Interlace Offset"), tr("Unchecked"),
 			tr("Disables interlacing offset which may reduce blurring in some situations."));
 
-		dialog()->registerWidgetHelp(m_display.bilinearFiltering, tr("Bilinear Filtering"), tr("Bilinear (Smooth)"),
-			tr("Enables bilinear post processing filter. Smooths the overall picture as it is displayed on the screen. Corrects "
-			   "positioning between pixels."));
+		dialog()->registerWidgetHelp(m_display.bilinearFiltering, tr("Final Image Scaling"), tr("Bilinear (Smooth)"),
+			tr("Scales the finished game image to the display resolution. Area integrates exact source pixel coverage, "
+			   "preserving hard pixel-art edges at integer scales and blending boundaries at fractional scales. "
+			   "Bilinear modes smooth the result; Sharp retains more definition. "
+			   "Area can be slower when downscaling large images."));
 
 		dialog()->registerWidgetHelp(m_display.PCRTCOffsets, tr("Screen Offsets"), tr("Unchecked"),
 			//: PCRTC: Programmable CRT (Cathode Ray Tube) Controller.

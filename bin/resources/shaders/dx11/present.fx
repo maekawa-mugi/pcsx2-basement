@@ -26,14 +26,37 @@ cbuffer cb0 : register(b0)
 	float2 u_source_resolution;
 	float2 u_rcp_source_resolution; // 1 / u_source_resolution
 	float u_time;
+	float u_area_filter;
 };
 
 Texture2D Texture;
 SamplerState TextureSampler;
 
+
+float4 sample_area(float2 uv)
+{
+	// Integrate the exact overlap of each source texel with this destination pixel.
+	float2 footprint = abs(u_source_size / max(abs(u_target_size), float2(1.0, 1.0)));
+	float2 lo = uv * u_source_resolution - 0.5 * footprint;
+	float2 hi = lo + footprint;
+	int2 begin = (int2)floor(lo);
+	int2 end = (int2)ceil(hi);
+	int2 max_texel = (int2)u_source_resolution - int2(1, 1);
+	float4 sum = 0;
+	[loop] for (int y = begin.y; y < end.y; y++)
+	{
+		[loop] for (int x = begin.x; x < end.x; x++)
+		{
+			float2 overlap = max(float2(0, 0), min(hi, float2(x + 1, y + 1)) - max(lo, float2(x, y)));
+			sum += Texture.Load(int3(clamp(int2(x, y), int2(0, 0), max_texel), 0)) * (overlap.x * overlap.y);
+		}
+	}
+	return sum / max(footprint.x * footprint.y, 1e-8);
+}
+
 float4 sample_c(float2 uv)
 {
-	return Texture.Sample(TextureSampler, uv);
+	return u_area_filter > 0.5 ? sample_area(uv) : Texture.Sample(TextureSampler, uv);
 }
 
 struct PS_INPUT

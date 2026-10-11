@@ -43,6 +43,7 @@ uniform vec2 u_rcp_target_resolution; // 1 / u_target_resolution
 uniform vec2 u_source_resolution;
 uniform vec2 u_rcp_source_resolution; // 1 / u_source_resolution
 uniform float u_time;
+uniform float u_area_filter;
 
 in vec4 PSin_p;
 in vec2 PSin_t;
@@ -52,14 +53,36 @@ layout(binding = 0) uniform sampler2D TextureSampler;
 
 layout(location = 0) out vec4 SV_Target0;
 
-vec4 sample_c()
+
+vec4 sample_area(vec2 uv)
 {
-	return texture(TextureSampler, PSin_t);
+	// Box coverage, measured in source texels. No intermediate integer upscale.
+	vec2 footprint = abs(u_source_size / max(abs(u_target_size), vec2(1.0)));
+	vec2 lo = uv * u_source_resolution - 0.5 * footprint;
+	vec2 hi = lo + footprint;
+	ivec2 begin = ivec2(floor(lo));
+	ivec2 end = ivec2(ceil(hi));
+	ivec2 max_texel = ivec2(u_source_resolution) - ivec2(1);
+	vec4 sum = vec4(0.0);
+	for (int y = begin.y; y < end.y; y++)
+	{
+		for (int x = begin.x; x < end.x; x++)
+		{
+			vec2 overlap = max(vec2(0.0), min(hi, vec2(x + 1, y + 1)) - max(lo, vec2(x, y)));
+			sum += texelFetch(TextureSampler, clamp(ivec2(x, y), ivec2(0), max_texel), 0) * (overlap.x * overlap.y);
+		}
+	}
+	return sum / max(footprint.x * footprint.y, 1e-8);
 }
 
 vec4 sample_c(vec2 uv)
 {
-	return texture(TextureSampler, uv);
+	return u_area_filter > 0.5 ? sample_area(uv) : texture(TextureSampler, uv);
+}
+
+vec4 sample_c()
+{
+	return sample_c(PSin_t);
 }
 
 vec4 ps_crt(uint i)

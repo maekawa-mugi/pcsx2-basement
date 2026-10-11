@@ -309,7 +309,7 @@ enum class GSInterlaceMode : u8
 
 enum class GSPostBilinearMode : u8
 {
-	Off,
+	Area, // Setting value 0 now uses coverage-based final image scaling.
 	BilinearSmooth,
 	BilinearSharp,
 };
