@@ -379,9 +379,9 @@ static int ohci_copy_td(OHCIState* ohci, struct ohci_td* td, uint8_t* buf, u32 l
 		return 1;
 
 	if (write)
-		std::memcpy(iopMem->Main + ptr, buf, len);
+		std::memcpy(iopMem->Main + ptr, buf, n);
 	else
-		std::memcpy(buf, iopMem->Main + ptr, len);
+		std::memcpy(buf, iopMem->Main + ptr, n);
 
 	if (n == len)
 		return 0;
@@ -389,7 +389,7 @@ static int ohci_copy_td(OHCIState* ohci, struct ohci_td* td, uint8_t* buf, u32 l
 	buf += n;
 	len -= n;
 
-	if ((ptr + n) > Ps2MemSize::ExposedIopRam)
+	if ((ptr + len) > Ps2MemSize::ExposedIopRam)
 		return 1;
 
 	if (write)
@@ -411,9 +411,9 @@ static int ohci_copy_iso_td(OHCIState* ohci, u32 start_addr, u32 end_addr,
 		return 1;
 
 	if (write)
-		std::memcpy(iopMem->Main + ptr, buf, len);
+		std::memcpy(iopMem->Main + ptr, buf, n);
 	else
-		std::memcpy(buf, iopMem->Main + ptr, len);
+		std::memcpy(buf, iopMem->Main + ptr, n);
 
 	if (n == len)
 		return 0;
@@ -421,7 +421,7 @@ static int ohci_copy_iso_td(OHCIState* ohci, u32 start_addr, u32 end_addr,
 	buf += n;
 	len -= n;
 
-	if ((ptr + n) > Ps2MemSize::ExposedIopRam)
+	if ((ptr + len) > Ps2MemSize::ExposedIopRam)
 		return 1;
 
 	if (write)
