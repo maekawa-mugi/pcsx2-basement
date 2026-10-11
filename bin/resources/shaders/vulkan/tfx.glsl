@@ -540,6 +540,7 @@ void main()
 #define PS_FBA 0
 #define PS_FBMASK 0
 #define PS_LTF 1
+#define PS_INTERPOLATION 0
 #define PS_TCOFFSETHACK 0
 #define PS_SHUFFLE 0
 #define PS_SHUFFLE_SAME 0
@@ -664,7 +665,7 @@ layout(location = 0) in VSOutput
 
 #if NEEDS_TEX
 layout(set = 1, binding = 0) uniform sampler2D Texture;
-layout(set = 1, binding = 1) uniform texture2D Palette;
+layout(set = 1, binding = 1) uniform sampler2D Palette;
 #endif
 
 #if PS_FEEDBACK_LOOP_IS_NEEDED_RT || PS_FEEDBACK_LOOP_IS_NEEDED_DEPTH
@@ -851,6 +852,110 @@ vec4 sample_c_af(vec2 uv, float uv_w)
 }
 #endif
 
+
+#if PS_INTERPOLATION != 0
+// 4x4 reconstruction for complete colour texture layers.
+float cubic_kernel(float x)
+{
+	x = abs(x);
+	if (x < 1.0)
+		return ((1.5 * x - 2.5) * x) * x + 1.0;
+	if (x < 2.0)
+		return (((-0.5 * x + 2.5) * x) - 4.0) * x + 2.0;
+	return 0.0;
+}
+
+// Generated with imgview/tools/generate_lut.cpp: normalized Bessel J1,
+// blur 0.9812505644269356, window Jinc(pi*q/3). Keep the verified coefficients.
+
+float jinc_kernel(float r)
+{
+	const float support = 3.177598897e+00;
+	// Palette binding is unused by Jinc draws and holds the shared R32F LUT.
+#if PS_JINC_LINEAR_LUT
+	// imgview texel-centre coordinates: hardware interpolates the same two coefficients.
+	return r < support ? textureLod(Palette, vec2((r / support * 1023.0 + 0.5) / 1024.0, 0.5), 0.0).r : 0.0;
+#else
+	// R32F linear filtering is optional in Vulkan. Preserve support on those devices.
+	float p = clamp(r / support * 1023.0, 0.0, 1023.0);
+	int i = int(p);
+	float a = texelFetch(Palette, ivec2(i, 0), 0).r;
+	float b = texelFetch(Palette, ivec2(min(i + 1, 1023), 0), 0).r;
+	return r < support ? mix(a, b, fract(p)) : 0.0;
+#endif
+}
+
+vec4 sample_interpolated_level(vec2 uv, int level)
+{
+	vec2 size = vec2(textureSize(Texture, level));
+	vec2 texel = uv * size - vec2(0.5);
+	vec2 base = floor(texel);
+	vec4 colour = vec4(0.0);
+	float weight_sum = 0.0;
+	vec4 central_min = vec4(1.0);
+	vec4 central_max = vec4(0.0);
+	for (int y = -1; y <= 2; y++)
+	{
+		for (int x = -1; x <= 2; x++)
+		{
+			vec2 tap = base + vec2(float(x), float(y));
+			vec2 delta = tap - texel;
+#if PS_INTERPOLATION == 1
+			float weight = cubic_kernel(delta.x) * cubic_kernel(delta.y);
+#else
+			float radius = length(delta);
+			float weight = jinc_kernel(radius);
+#endif
+			// The GPU sampler is set to nearest, retaining its wrap/clamp rules.
+			vec4 value = textureLod(Texture, (tap + vec2(0.5)) / size, float(level));
+			colour += value * weight;
+#if PS_INTERPOLATION == 2
+			if (x >= 0 && x <= 1 && y >= 0 && y <= 1)
+			{
+				central_min = min(central_min, value);
+				central_max = max(central_max, value);
+			}
+#endif
+			weight_sum += weight;
+		}
+	}
+	colour /= max(weight_sum, 0.000001);
+#if PS_INTERPOLATION == 2
+	// imgview AR at full strength, including alpha, before blending mip levels.
+	return clamp(colour, central_min, central_max);
+#else
+	return clamp(colour, 0.0, 1.0);
+#endif
+}
+vec4 sample_interpolated(vec2 uv)
+{
+#if PS_INTERPOLATION_MIP != 0
+#if PS_MANUAL_LOD == 1
+	float lod = manual_lod(vsIn.t.w);
+#else
+	// Derivatives are evaluated before any mip/tap dependent branching.
+	vec2 size = vec2(textureSize(Texture, 0));
+	vec2 dx = dFdx(uv * size);
+	vec2 dy = dFdy(uv * size);
+	float lod = 0.5 * log2(max(max(dot(dx, dx), dot(dy, dy)), 1e-16));
+#endif
+	lod = clamp(lod, 0.0, float(textureQueryLevels(Texture) - 1));
+#if PS_INTERPOLATION_MIP == 2
+	int lower = int(floor(lod));
+	int upper = min(lower + 1, textureQueryLevels(Texture) - 1);
+	vec4 a = sample_interpolated_level(uv, lower);
+	if (upper == lower || fract(lod) == 0.0)
+		return a;
+	return mix(a, sample_interpolated_level(uv, upper), fract(lod));
+#else
+	return sample_interpolated_level(uv, int(floor(lod + 0.5)));
+#endif
+#else
+	return sample_interpolated_level(uv, 0);
+#endif
+}
+#endif
+
 vec4 sample_c(vec2 uv)
 {
 #if PS_TEX_IS_FB
@@ -874,7 +979,9 @@ vec4 sample_c(vec2 uv)
 	#endif
 #endif
 
-#if PS_ANISOTROPIC_FILTERING > 1
+#if PS_INTERPOLATION != 0
+	return sample_interpolated(uv);
+#elif PS_ANISOTROPIC_FILTERING > 1
 	return sample_c_af(uv, vsIn.t.w);
 #elif PS_AUTOMATIC_LOD == 1
 	return texture(Texture, uv);

@@ -9,6 +9,7 @@
 #include "GS/Renderers/Vulkan/VKBuilders.h"
 #include "GS/Renderers/Vulkan/VKShaderCache.h"
 #include "GS/Renderers/Vulkan/VKSwapChain.h"
+#include "GS/Renderers/Vulkan/JincLUT.h"
 #include "GS/Renderers/Common/GSDevice.h"
 
 #include "BuildVersion.h"
@@ -2238,7 +2239,7 @@ bool GSDeviceVK::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 		return false;
 	}
 
-	if (!CreateBuffers())
+	if (!CreateBuffers() || !CreateJincLUT())
 		return false;
 
 	if (!CompileConvertPipelines() || !CompilePresentPipelines() || !CompileInterlacePipelines() ||
@@ -3952,6 +3953,23 @@ bool GSDeviceVK::CreateNullTexture()
 	return true;
 }
 
+bool GSDeviceVK::CreateJincLUT()
+{
+	VkFormatProperties properties;
+	vkGetPhysicalDeviceFormatProperties(m_physical_device, LookupNativeFormat(GSTexture::Format::PrimID), &properties);
+	m_jinc_lut_linear = (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0;
+
+	// PrimID is the existing R32F format; this texture is sampled, never rendered to.
+	m_jinc_lut = GSTextureVK::Create(GSTexture::Usage::Texture, GSTexture::Format::PrimID, 1024, 1, 1);
+	if (!m_jinc_lut || !m_jinc_lut->Update(GSVector4i(0, 0, 1024, 1), JINC_LUT, sizeof(JINC_LUT)))
+	{
+		Host::ReportErrorAsync("GS", "Failed to create Jinc coefficient texture");
+		return false;
+	}
+	Vulkan::SetObjectName(m_device, m_jinc_lut->GetImage(), "Jinc coefficient LUT");
+	return true;
+}
+
 bool GSDeviceVK::CreateBuffers()
 {
 	if (!m_vertex_stream_buffer.Create(
@@ -4044,7 +4062,7 @@ bool GSDeviceVK::CreatePipelineLayouts()
 
 	dslb.SetPushFlag();
 	dslb.AddBinding(TFX_TEXTURE_TEXTURE, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
-	dslb.AddBinding(TFX_TEXTURE_PALETTE, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
+	dslb.AddBinding(TFX_TEXTURE_PALETTE, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT);
 	dslb.AddBinding(TFX_TEXTURE_RT,
 		(m_features.texture_barrier && !UseFeedbackLoopLayout()) ? VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT :
 																                              VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
@@ -4899,6 +4917,12 @@ void GSDeviceVK::DestroyResources()
 		vkDestroyFramebuffer(m_device, m_null_framebuffer, nullptr);
 	}
 
+	if (m_jinc_lut)
+	{
+		m_jinc_lut->Destroy(false);
+		m_jinc_lut.reset();
+	}
+
 	if (m_null_texture)
 	{
 		m_null_texture->Destroy(false);
@@ -4995,6 +5019,9 @@ VkShaderModule GSDeviceVK::GetTFXFragmentShader(const GSHWDrawConfig::PSSelector
 	AddMacro(ss, "PS_A_MASKED", sel.a_masked);
 	AddMacro(ss, "PS_FBA", sel.fba);
 	AddMacro(ss, "PS_LTF", sel.ltf);
+	AddMacro(ss, "PS_INTERPOLATION", sel.interpolation);
+	AddMacro(ss, "PS_INTERPOLATION_MIP", sel.interpolation_mip);
+	AddMacro(ss, "PS_JINC_LINEAR_LUT", m_jinc_lut_linear);
 	AddMacro(ss, "PS_AUTOMATIC_LOD", sel.automatic_lod);
 	AddMacro(ss, "PS_MANUAL_LOD", sel.manual_lod);
 	AddMacro(ss, "PS_COLCLIP", sel.colclip);
@@ -5801,8 +5828,12 @@ bool GSDeviceVK::ApplyTFXState(bool already_execed)
 		}
 		if (flags & DIRTY_FLAG_TFX_TEXTURE_PALETTE)
 		{
-			dsub.AddImageDescriptorWrite(VK_NULL_HANDLE, TFX_TEXTURE_PALETTE,
-				m_tfx_textures[TFX_TEXTURE_PALETTE]->GetView(), m_tfx_textures[TFX_TEXTURE_PALETTE]->GetVkLayout());
+			// Palette texelFetch ignores the sampler; Jinc alone uses linear LUT filtering.
+			const VkSampler sampler = (m_jinc_lut_linear && m_tfx_textures[TFX_TEXTURE_PALETTE] == m_jinc_lut.get()) ?
+				m_linear_sampler : m_point_sampler;
+			dsub.AddCombinedImageSamplerDescriptorWrite(VK_NULL_HANDLE, TFX_TEXTURE_PALETTE,
+				m_tfx_textures[TFX_TEXTURE_PALETTE]->GetView(), sampler,
+				m_tfx_textures[TFX_TEXTURE_PALETTE]->GetVkLayout());
 		}
 		if (flags & DIRTY_FLAG_TFX_TEXTURE_RT)
 		{
@@ -6039,7 +6070,13 @@ void GSDeviceVK::RenderHW(GSHWDrawConfig& config)
 		PSSetShaderResource(TFX_TEXTURE_TEXTURE, config.tex, config.tex != config.rt && config.tex != config.ds);
 		PSSetSampler(config.sampler);
 	}
-	if (config.pal)
+	if (config.ps.interpolation == static_cast<u8>(TextureInterpolation::Jinc))
+	{
+		// Jinc is gated out for paletted textures, so these descriptors are mutually exclusive.
+		pxAssert(!config.pal);
+		PSSetShaderResource(TFX_TEXTURE_PALETTE, m_jinc_lut.get(), true);
+	}
+	else if (config.pal)
 		PSSetShaderResource(TFX_TEXTURE_PALETTE, config.pal, true);
 
 	if (config.blend.constant_enable)

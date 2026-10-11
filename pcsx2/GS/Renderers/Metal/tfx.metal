@@ -37,6 +37,7 @@ constant uint PS_WMT                [[function_constant(GSMTLConstantIndex_PS_WM
 constant bool PS_ADJS               [[function_constant(GSMTLConstantIndex_PS_ADJS)]];
 constant bool PS_ADJT               [[function_constant(GSMTLConstantIndex_PS_ADJT)]];
 constant bool PS_LTF                [[function_constant(GSMTLConstantIndex_PS_LTF)]];
+constant uint PS_INTERPOLATION      [[function_constant(GSMTLConstantIndex_PS_INTERPOLATION)]];
 constant bool PS_SHUFFLE            [[function_constant(GSMTLConstantIndex_PS_SHUFFLE)]];
 constant bool PS_SHUFFLE_SAME       [[function_constant(GSMTLConstantIndex_PS_SHUFFLE_SAME)]];
 constant uint PS_PROCESS_BA         [[function_constant(GSMTLConstantIndex_PS_PROCESS_BA)]];
@@ -777,6 +778,55 @@ struct PSMain
 		return colour;
 	}
 
+
+	// The 4x4 kernels are enabled only for normal colour textures without mipmapping.
+	float cubic_kernel(float x)
+	{
+		x = abs(x);
+		if (x < 1.0f)
+			return ((1.5f * x - 2.5f) * x) * x + 1.0f;
+		if (x < 2.0f)
+			return (((-0.5f * x + 2.5f) * x) - 4.0f) * x + 2.0f;
+		return 0.0f;
+	}
+
+	float jinc_kernel(float r)
+	{
+		float q = 2.46740110027f * r * r;
+		return 1.0f + q * (-0.5f + q * (0.0833333333333f + q * (-0.00694444444444f +
+			q * (0.000347222222222f + q * (-0.0000115740740741f +
+			q * (0.00000027557319224f + q * (-0.00000000492094986f +
+			q * 0.0000000000683461217f)))))));
+	}
+
+	float4 sample_interpolated(float2 uv)
+	{
+		float2 size = float2(get_tex_dims());
+		float2 texel = uv * size - 0.5f;
+		float2 base = floor(texel);
+		float4 colour = float4(0.0f);
+		float weight_sum = 0.0f;
+		for (int y = -1; y <= 2; y++)
+		{
+			for (int x = -1; x <= 2; x++)
+			{
+				float2 tap = base + float2(x, y);
+				float2 delta = tap - texel;
+				float weight;
+				if (PS_INTERPOLATION == 1)
+					weight = cubic_kernel(delta.x) * cubic_kernel(delta.y);
+				else
+				{
+					float radius = length(delta);
+					weight = (radius < 2.0f) ? jinc_kernel(radius) * jinc_kernel(radius * 0.5f) : 0.0f;
+				}
+				colour += sample_tex(tex_sampler, (tap + 0.5f) / size, level(0)) * weight;
+				weight_sum += weight;
+			}
+		}
+		return clamp(colour / max(weight_sum, 0.000001f), 0.0f, 1.0f);
+	}
+
 	float4 sample_c(float2 uv)
 	{
 		if (PS_TEX_IS_FB)
@@ -800,6 +850,8 @@ struct PSMain
 				uv.y = uv.y * cb.st_scale.y;
 		}
 
+		if (PS_INTERPOLATION != 0)
+			return sample_interpolated(uv);
 		if (PS_SW_ANISO > 1)
 			return sample_c_af(uv, in.t.w);
 		else if (PS_AUTOMATIC_LOD)

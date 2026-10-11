@@ -749,6 +749,7 @@ struct alignas(16) GSHWDrawConfig
 				u32 adjs : 1;
 				u32 adjt : 1;
 				u32 ltf : 1;
+				u32 interpolation : 2; // 0 = bilinear, 1 = bicubic, 2 = Jinc
 				// Shuffle and fbmask effect
 				u32 shuffle  : 1;
 				u32 shuffle_same : 1;
@@ -809,6 +810,7 @@ struct alignas(16) GSHWDrawConfig
 				u32 sw_aniso : 5;
 				
 				// ROVs
+				u32 interpolation_mip : 2; // Vulkan: 0 = base, 1 = nearest mip, 2 = linear mip
 				u32 rov_color : 1;
 				PS_ROV_DEPTH rov_depth : 2;
 			};
