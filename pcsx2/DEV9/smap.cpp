@@ -227,7 +227,12 @@ void tx_process()
 		}
 
 
-		pbd->ctrl_stat &= ~SMAP_BD_TX_READY;
+		// On completion the hardware replaces the TX control bits with the TX status, which
+		// is 0 for a clean send. The control bits GENFCS/GENPAD share bit positions with the
+		// status bits BADFCS/BADPKT, so leaving them set makes drivers (PS2 Linux, NetBSD)
+		// count every sent packet as an error. needs proper testing.
+		// Idea from ajfa/ps2linux10-whiterhino patch 0004 (SMAP TX status part).
+		pbd->ctrl_stat = 0;
 
 		//increase TXBD
 		dev9.txbdi++;
