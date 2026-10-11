@@ -279,9 +279,19 @@ void ohci_hard_reset(OHCIState* ohci)
 	ohci_roothub_reset(ohci);
 }
 
+// The IOP bus only decodes the low address bits, so guests that hand the OHCI an
+// EE-physical alias of IOP RAM (e.g. 0x1c000000 + x) still reach the right memory.
+// Idea from ajfa/ps2linux10-whiterhino patch 0005 ("USB OHCI: mask addresses to the
+// IOP bus"); needs proper testing.
+__fi static u32 iop_bus_addr(u32 addr)
+{
+	return addr & (Ps2MemSize::ExposedIopRam - 1);
+}
+
 /* Get an array of dwords from main memory */
 __fi static int get_dwords(u32 addr, u32* buf, u32 num)
 {
+	addr = iop_bus_addr(addr);
 	if ((addr + (num * sizeof(u32))) > Ps2MemSize::ExposedIopRam)
 		return 0;
 
@@ -292,6 +302,7 @@ __fi static int get_dwords(u32 addr, u32* buf, u32 num)
 /* Get an array of words from main memory */
 __fi static int get_words(u32 addr, u16* buf, u32 num)
 {
+	addr = iop_bus_addr(addr);
 	if ((addr + (num * sizeof(u16))) > Ps2MemSize::ExposedIopRam)
 		return 0;
 
@@ -302,6 +313,7 @@ __fi static int get_words(u32 addr, u16* buf, u32 num)
 /* Put an array of dwords in to main memory */
 __fi static int put_dwords(u32 addr, u32* buf, u32 num)
 {
+	addr = iop_bus_addr(addr);
 	if ((addr + (num * sizeof(u32))) > Ps2MemSize::ExposedIopRam)
 		return 0;
 
@@ -312,6 +324,7 @@ __fi static int put_dwords(u32 addr, u32* buf, u32 num)
 /* Put an array of dwords in to main memory */
 __fi static int put_words(u32 addr, u16* buf, u32 num)
 {
+	addr = iop_bus_addr(addr);
 	if ((addr + (num * sizeof(u16))) > Ps2MemSize::ExposedIopRam)
 		return 0;
 
@@ -359,7 +372,7 @@ static inline int ohci_put_iso_td(OHCIState* ohci, u32 addr, struct ohci_iso_td*
 /* Read/Write the contents of a TD from/to main memory.  */
 static int ohci_copy_td(OHCIState* ohci, struct ohci_td* td, uint8_t* buf, u32 len, int write)
 {
-	u32 ptr = td->cbp;
+	u32 ptr = iop_bus_addr(td->cbp);
 	const u32 n = std::min<u32>(0x1000 - (ptr & 0xfff), len);
 
 	if ((ptr + n) > Ps2MemSize::ExposedIopRam)
@@ -372,7 +385,7 @@ static int ohci_copy_td(OHCIState* ohci, struct ohci_td* td, uint8_t* buf, u32 l
 
 	if (n == len)
 		return 0;
-	ptr = td->be & ~0xfffu;
+	ptr = iop_bus_addr(td->be & ~0xfffu);
 	buf += n;
 	len -= n;
 
@@ -391,7 +404,7 @@ static int ohci_copy_td(OHCIState* ohci, struct ohci_td* td, uint8_t* buf, u32 l
 static int ohci_copy_iso_td(OHCIState* ohci, u32 start_addr, u32 end_addr,
 							uint8_t* buf, u32 len, int write)
 {
-	u32 ptr = start_addr;
+	u32 ptr = iop_bus_addr(start_addr);
 	const u32 n = std::min<u32>(0x1000 - (ptr & 0xfff), len);
 
 	if ((ptr + n) > Ps2MemSize::ExposedIopRam)
@@ -404,7 +417,7 @@ static int ohci_copy_iso_td(OHCIState* ohci, u32 start_addr, u32 end_addr,
 
 	if (n == len)
 		return 0;
-	ptr = end_addr & ~0xfffu;
+	ptr = iop_bus_addr(end_addr & ~0xfffu);
 	buf += n;
 	len -= n;
 
@@ -1099,13 +1112,14 @@ void ohci_frame_boundary(void* opaque)
 {
 	OHCIState* ohci = (OHCIState*)opaque;
 
-	if (ohci->hcca + sizeof(ohci_hcca) > Ps2MemSize::ExposedIopRam)
+	const u32 hcca_addr = iop_bus_addr(ohci->hcca);
+	if (hcca_addr + sizeof(ohci_hcca) > Ps2MemSize::ExposedIopRam)
 	{
 		Console.Error("ohci->hcca pointer is out of range.");
 		return;
 	}
 
-	ohci_hcca* hcca = reinterpret_cast<ohci_hcca*>(iopMem->Main + ohci->hcca);
+	ohci_hcca* hcca = reinterpret_cast<ohci_hcca*>(iopMem->Main + hcca_addr);
 
 	/* Process all the lists at the end of the frame */
 	/* if reset bit was set, don't process possibly invalid descriptors */
