@@ -440,14 +440,28 @@ void DEV9runFIFO()
 	// Order operations based on iopWrite to ensure DMA has data/space to work with.
 	if (iopWrite)
 	{
-		// Perform DMA from IOP.
-		if (iopXfer)
-			IOPWriteFIFO();
-
-		// Drain the FIFO
-		if (hddXfer && !hddRead)
+		// An IOP block can be larger than the FIFO (PS2 Linux writes 12 KB blocks into the
+		// 8 KB FIFO), so a single fill/drain pass stalls forever. Repeat while the IOP
+		// still has data pending and the previous pass moved something.
+		// Idea from ajfa's ps2linux10-whiterhino patch 0009 ("DEV9: fix FIFO writes that
+		// wrap or exceed the FIFO"); reimplemented here, needs proper testing.
+		// The first pass is identical to the old single pass, so small blocks cost nothing extra.
+		for (;;)
 		{
-			HDDReadFIFO();
+			const int before = dev9.fifo_bytes_write + dev9.fifo_bytes_read;
+
+			// Perform DMA from IOP.
+			if (dev9.dma_iop_active && (dev9.xfr_ctrl & SPD_XFR_DMAEN))
+				IOPWriteFIFO();
+
+			// Drain the FIFO
+			// Recheck dmaReady, as a prior drain may have completed the HDD transfer.
+			if (hddXfer && !hddRead && dev9.ata->dmaReady)
+				HDDReadFIFO();
+
+			if (!dev9.dma_iop_active || dev9.dma_iop_transfered >= dev9.dma_iop_size ||
+				(dev9.fifo_bytes_write + dev9.fifo_bytes_read) == before)
+				break;
 		}
 	}
 	else
