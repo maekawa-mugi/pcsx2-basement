@@ -346,6 +346,57 @@ vec4 sample_c_af(vec2 uv, float uv_w)
 }
 #endif
 
+
+#if PS_INTERPOLATION != 0
+// 4x4 reconstruction, used only for simple colour textures without mipmapping.
+float cubic_kernel(float x)
+{
+	x = abs(x);
+	if (x < 1.0)
+		return ((1.5 * x - 2.5) * x) * x + 1.0;
+	if (x < 2.0)
+		return (((-0.5 * x + 2.5) * x) - 4.0) * x + 2.0;
+	return 0.0;
+}
+
+// Normalized 2*J1(pi*r)/(pi*r), evaluated as an eighth-order polynomial.
+float jinc_kernel(float r)
+{
+	float q = 2.46740110027 * r * r;
+	return 1.0 + q * (-0.5 + q * (0.0833333333333 + q * (-0.00694444444444 +
+		q * (0.000347222222222 + q * (-0.0000115740740741 +
+		q * (0.00000027557319224 + q * (-0.00000000492094986 +
+		q * 0.0000000000683461217)))))));
+}
+
+vec4 sample_interpolated(vec2 uv)
+{
+	vec2 size = vec2(textureSize(TextureSampler, 0));
+	vec2 texel = uv * size - vec2(0.5);
+	vec2 base = floor(texel);
+	vec4 colour = vec4(0.0);
+	float weight_sum = 0.0;
+	for (int y = -1; y <= 2; y++)
+	{
+		for (int x = -1; x <= 2; x++)
+		{
+			vec2 tap = base + vec2(float(x), float(y));
+			vec2 delta = tap - texel;
+#if PS_INTERPOLATION == 1
+			float weight = cubic_kernel(delta.x) * cubic_kernel(delta.y);
+#else
+			float radius = length(delta);
+			float weight = (radius < 2.0) ? jinc_kernel(radius) * jinc_kernel(radius * 0.5) : 0.0;
+#endif
+			// The GPU sampler is set to nearest, retaining its wrap/clamp rules.
+			colour += textureLod(TextureSampler, (tap + vec2(0.5)) / size, 0.0) * weight;
+			weight_sum += weight;
+		}
+	}
+	return clamp(colour / max(weight_sum, 0.000001), 0.0, 1.0);
+}
+#endif
+
 vec4 sample_c(vec2 uv)
 {
 #if PS_TEX_IS_FB == 1
@@ -369,7 +420,9 @@ vec4 sample_c(vec2 uv)
 	#endif
 #endif
 
-#if PS_ANISOTROPIC_FILTERING > 1
+#if PS_INTERPOLATION != 0
+	return sample_interpolated(uv);
+#elif PS_ANISOTROPIC_FILTERING > 1
 	return sample_c_af(uv, PSin.t_float.w);
 #elif PS_AUTOMATIC_LOD == 1
 	return texture(TextureSampler, uv);

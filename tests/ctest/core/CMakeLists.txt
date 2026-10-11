@@ -1,6 +1,7 @@
 add_pcsx2_test(core_test
 	iop_dma_tests.cpp
 	ee_config_tests.cpp
+	gs_texture_interpolation_tests.cpp
 	ee_xmm_allocator_tests.cpp
 	ee_physical_memory_tests.cpp
 	ee_synthetic_mmu_tests.cpp

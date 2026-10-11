@@ -336,6 +336,15 @@ public:
 
 		__fi bool CanPreload() const { return CanPreloadTextureSize(m_TEX0.TW, m_TEX0.TH); }
 		__fi bool IsFromTarget() const { return m_target; }
+		// Hash-cache textures are uploaded in full; other sources track completeness per mip layer.
+		__fi bool HasCompleteBaseLayer() const { return m_from_hash_cache || (m_complete_layers & 1u); }
+		__fi bool HasCompleteMipChain(int levels) const
+		{
+			if (levels < 1 || levels > 7)
+				return false;
+			const u32 mask = (1u << levels) - 1u;
+			return m_from_hash_cache || (m_complete_layers & mask) == mask;
+		}
 		bool IsPaletteFormat() const;
 
 		__fi const SourceRegion& GetRegion() const { return m_region; }

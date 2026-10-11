@@ -506,6 +506,7 @@ private:
 	bool CreateDeviceAndSwapChain();
 	bool CheckFeatures();
 	bool CreateNullTexture();
+	bool CreateJincLUT();
 	bool CreateBuffers();
 	bool CreatePipelineLayouts();
 	bool CreateRenderPasses();
@@ -775,6 +776,8 @@ private:
 	VkPipeline m_current_pipeline = VK_NULL_HANDLE;
 
 	std::unique_ptr<GSTextureVK> m_null_texture;
+	std::unique_ptr<GSTextureVK> m_jinc_lut;
+	bool m_jinc_lut_linear = false;
 	VkFramebuffer m_null_framebuffer;
 
 	// current pipeline selector - we save this in the struct to avoid re-zeroing it every draw
