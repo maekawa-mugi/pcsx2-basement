@@ -179,6 +179,10 @@ extern int ThreadRun;
 #define		SPD_IF_HDD_RESET	(1 << 6) //HDD Hard Reset, 0=act.low/1=inact.high.
 #define		SPD_IF_ATA_RESET	(1 << 7) //Reset ATA Interface
 
+// Undocumented. Reads 0x0001 after an ATA interface reset; IOP ATA/DEV9 modules write it
+// during initialisation. The meaning is unknown, so the value is only kept. Needs proper testing.
+#define SPD_R_66				(SPD_REGBASE + 0x66)
+
 #define SPD_R_PIO_MODE			(SPD_REGBASE + 0x70)
 #define SPD_R_MDMA_MODE			(SPD_REGBASE + 0x72)
 #define SPD_R_UDMA_MODE			(SPD_REGBASE + 0x74)

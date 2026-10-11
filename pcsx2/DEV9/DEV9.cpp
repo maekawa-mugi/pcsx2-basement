@@ -619,6 +619,9 @@ u16 SpeedRead(u32 addr, int width)
 		case SPD_R_IF_CTRL:
 			//DevCon.WriteLn("DEV9: SPD_R_IF_CTRL %dbit read %x", width,, dev9.if_ctrl);
 			return dev9.if_ctrl;
+		case SPD_R_66:
+			// Meaning unknown, return what was written (or the post-reset value).
+			return (width == 8) ? dev9Ru8(addr) : dev9Ru16(addr);
 		default:
 			hard = dev9Ru16(addr);
 			Console.Error("DEV9: Unknown %dbit read at address %lx value %x", width, addr, hard);
@@ -847,7 +850,7 @@ void SpeedWrite(u32 addr, u16 value, int width)
 				DevCon.WriteLn("DEV9: IF_CTRL ATA Reset");
 				//0x62        0x0020
 				dev9.if_ctrl = 0x001A;
-				//0x66        0x0001
+				dev9Ru16(SPD_R_66) = 0x0001;
 				dev9.pio_mode = 0x24;
 				dev9.mdma_mode = 0x45;
 				dev9.udma_mode = 0x83;
@@ -859,6 +862,14 @@ void SpeedWrite(u32 addr, u16 value, int width)
 
 			break;
 		}
+		case SPD_R_66:
+			// Meaning unknown. Guests write it (8bit, value 1) while initialising the ATA
+			// interface; keep the value without logging. Needs proper testing.
+			if (width == 8)
+				dev9Ru8(addr) = static_cast<u8>(value);
+			else
+				dev9Ru16(addr) = value;
+			return;
 		case SPD_R_PIO_MODE: //ATA only? or includes EEPROM?
 			//DevCon.WriteLn("DEV9: SPD_R_PIO_MODE 16bit %dbit write %x", width, value);
 			dev9.pio_mode = value;
