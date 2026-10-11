@@ -1759,7 +1759,8 @@ static_assert(offsetof(DisplayConstantBuffer, RcpTargetResolution) == offsetof(G
 static_assert(offsetof(DisplayConstantBuffer, SourceResolution)    == offsetof(GSMTLPresentPSUniform, source_resolution));
 static_assert(offsetof(DisplayConstantBuffer, RcpSourceResolution) == offsetof(GSMTLPresentPSUniform, rcp_source_resolution));
 static_assert(offsetof(DisplayConstantBuffer, TimeAndPad.x)        == offsetof(GSMTLPresentPSUniform, time));
-static_assert(offsetof(DisplayConstantBuffer, TimeAndPad.y)        == offsetof(GSMTLPresentPSUniform, area_filter));
+static_assert(offsetof(DisplayConstantBuffer, TimeAndPad.y)        == offsetof(GSMTLPresentPSUniform, scaling_mode));
+static_assert(offsetof(DisplayConstantBuffer, TimeAndPad.z)        == offsetof(GSMTLPresentPSUniform, color_space));
 
 void GSDeviceMTL::PresentRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect, PresentShader shader, float shaderTime, Filter filter)
 { @autoreleasepool {
@@ -1768,7 +1769,7 @@ void GSDeviceMTL::PresentRect(GSTexture* sTex, const GSVector4& sRect, GSTexture
 	cb.SetSource(sRect, sTex->GetSize());
 	cb.SetTarget(dRect, ds);
 	cb.SetTime(shaderTime);
-	cb.SetAreaFilter(filter == Filter::Area);
+	cb.SetFinalScaling(filter, static_cast<u8>(GSConfig.FinalScalingColorSpace));
 	id<MTLRenderPipelineState> pipe = m_present_pipeline[static_cast<int>(shader)];
 
 	if (dTex)

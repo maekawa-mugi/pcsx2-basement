@@ -85,6 +85,8 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* settings_dialog, 
 	SettingWidgetBinder::BindWidgetToIntSetting(sif, m_display.interlacing, "EmuCore/GS", "deinterlace_mode", DEFAULT_INTERLACE_MODE);
 	SettingWidgetBinder::BindWidgetToIntSetting(
 		sif, m_display.bilinearFiltering, "EmuCore/GS", "linear_present_mode", static_cast<int>(GSPostBilinearMode::BilinearSmooth));
+	SettingWidgetBinder::BindWidgetToIntSetting(sif, m_display.finalScalingColorSpace, "EmuCore/GS", "FinalScalingColorSpace",
+		static_cast<int>(GSFinalScalingColorSpace::NativeRGB));
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_display.widescreenPatches, "EmuCore", "EnableWideScreenPatches", false);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_display.noInterlacingPatches, "EmuCore", "EnableNoInterlacingPatches", false);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_display.integerScaling, "EmuCore/GS", "IntegerScaling", false);
@@ -463,7 +465,14 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* settings_dialog, 
 			tr("Scales the finished game image to the display resolution. Area integrates exact source pixel coverage, "
 			   "preserving hard pixel-art edges at integer scales and blending boundaries at fractional scales. "
 			   "Bilinear modes smooth the result; Sharp retains more definition. "
-			   "Area can be slower when downscaling large images."));
+			   "Area can be slower when downscaling large images. Catmull-Rom and Jinc widen their filters when shrinking."));
+
+		dialog()->registerWidgetHelp(m_display.finalScalingColorSpace, tr("Scaling Color Space"), tr("Native RGB (Default)"),
+			tr("Native RGB interpolates encoded values directly. Linear Light converts sRGB into linear values before "
+			   "mixing and converts back afterwards. Sigmoidized Linear additionally applies a normalized sigmoid "
+			   "before interpolation and its inverse after, reducing ringing with Jinc or Catmull-Rom. "
+			   "For Area, Sigmoidized Linear uses Linear Light instead so that the averaging is meaningful. "
+			   "Non-native color spaces require extra GPU processing."));
 
 		dialog()->registerWidgetHelp(m_display.PCRTCOffsets, tr("Screen Offsets"), tr("Unchecked"),
 			//: PCRTC: Programmable CRT (Cathode Ray Tube) Controller.

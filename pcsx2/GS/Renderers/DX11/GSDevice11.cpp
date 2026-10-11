@@ -1695,7 +1695,7 @@ void GSDevice11::PresentRect(GSTexture* sTex, const GSVector4& sRect, GSTexture*
 	cb.SetSource(sRect, sTex->GetSize());
 	cb.SetTarget(dRect, ds);
 	cb.SetTime(shaderTime);
-	cb.SetAreaFilter(filter == Filter::Area);
+	cb.SetFinalScaling(filter, static_cast<u8>(GSConfig.FinalScalingColorSpace));
 	UpdateSubresource(m_present.ps_cb.get(), &cb, &m_present.cb_uniforms, sizeof(cb));
 
 	// om

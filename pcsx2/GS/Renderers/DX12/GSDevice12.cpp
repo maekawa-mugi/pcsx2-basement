@@ -1858,7 +1858,7 @@ void GSDevice12::PresentRect(GSTexture* sTex, const GSVector4& sRect, GSTexture*
 	cb.SetSource(sRect, sTex->GetSize());
 	cb.SetTarget(dRect, dTex ? dTex->GetSize() : GSVector2i(GetWindowWidth(), GetWindowHeight()));
 	cb.SetTime(shaderTime);
-	cb.SetAreaFilter(filter == Filter::Area);
+	cb.SetFinalScaling(filter, static_cast<u8>(GSConfig.FinalScalingColorSpace));
 	SetUtilityRootSignature();
 	SetUtilityPushConstants(&cb, sizeof(cb));
 

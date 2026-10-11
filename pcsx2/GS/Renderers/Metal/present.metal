@@ -32,26 +32,162 @@ static float4 ps_scanlines(float4 color, int i)
 }
 
 // Area resampling integrates the source texels covered by each output pixel.
-static float4 present_sample(ConvertPSRes res, float2 uv, constant GSMTLPresentPSUniform& cb)
+// Final output. Modes: bilinear=1, box/area=2, Catmull-Rom=3, Jinc=4.
+// Working spaces: encoded RGB=0, linear light=1, sigmoidized linear=2.
+float final_srgb_decode(float x)
 {
-	if (cb.area_filter < 0.5f)
-		return res.sample(uv);
-	float2 footprint = abs(cb.source_size / max(abs(cb.target_size), float2(1.0f)));
-	float2 lo = uv * cb.source_resolution - 0.5f * footprint;
-	float2 hi = lo + footprint;
-	int2 begin = int2(floor(lo));
-	int2 end = int2(ceil(hi));
-	int2 max_texel = int2(cb.source_resolution) - int2(1);
-	float4 sum = float4(0.0f);
-	for (int y = begin.y; y < end.y; y++)
+	return x <= 0.04045 ? x / 12.92 : pow((x + 0.055) / 1.055, 2.4);
+}
+float final_srgb_encode(float x)
+{
+	return x <= 0.0031308 ? 12.92 * x : 1.055 * pow(x, 1.0 / 2.4) - 0.055;
+}
+float final_sigmoid(float x)
+{
+	return (1.0 / (1.0 + exp(-8.0 * (x - 0.5))) - 0.01798620996) / 0.96402758008;
+}
+float final_unsigmoid(float x)
+{
+	float p = clamp(x, 0.0, 1.0) * 0.96402758008 + 0.01798620996;
+	return clamp(0.5 + log(p / (1.0 - p)) / 8.0, 0.0, 1.0);
+}
+float4 final_encode_input(float4 pixel, float space)
+{
+	if (space >= 0.5)
 	{
-		for (int x = begin.x; x < end.x; x++)
+		pixel.r = final_srgb_decode(pixel.r);
+		pixel.g = final_srgb_decode(pixel.g);
+		pixel.b = final_srgb_decode(pixel.b);
+		if (space >= 1.5)
 		{
-			float2 overlap = max(float2(0.0f), min(hi, float2(x + 1, y + 1)) - max(lo, float2(x, y)));
-			sum += res.texture.read(uint2(clamp(int2(x, y), int2(0), max_texel))) * (overlap.x * overlap.y);
+			pixel.r = final_sigmoid(pixel.r);
+			pixel.g = final_sigmoid(pixel.g);
+			pixel.b = final_sigmoid(pixel.b);
 		}
 	}
-	return sum / max(footprint.x * footprint.y, 1e-8f);
+	return pixel;
+}
+float4 final_decode_output(float4 pixel, float space)
+{
+	pixel = clamp(pixel, float4(0.0), float4(1.0));
+	if (space >= 0.5)
+	{
+		if (space >= 1.5)
+		{
+			pixel.r = final_unsigmoid(pixel.r);
+			pixel.g = final_unsigmoid(pixel.g);
+			pixel.b = final_unsigmoid(pixel.b);
+		}
+		pixel.r = final_srgb_encode(pixel.r);
+		pixel.g = final_srgb_encode(pixel.g);
+		pixel.b = final_srgb_encode(pixel.b);
+	}
+	return pixel;
+}
+float final_cubic(float x)
+{
+	x = abs(x);
+	if (x < 1.0) return ((1.5 * x - 2.5) * x) * x + 1.0;
+	if (x < 2.0) return (((-0.5 * x + 2.5) * x) - 4.0) * x + 2.0;
+	return 0.0;
+}
+float final_jinc(float r)
+{
+	// Normalized Jinc(pi*r), approximated by the texture-filter polynomial.
+	float q = 2.46740110027 * r * r;
+	return 1.0 + q * (-0.5 + q * (0.0833333333333 + q * (-0.00694444444444 +
+		q * (0.000347222222222 + q * (-0.0000115740740741 +
+		q * (0.00000027557319224 + q * (-0.00000000492094986 +
+		q * 0.0000000000683461217)))))));
+}
+float4 final_read(int2 coord, float space, ConvertPSRes res, constant GSMTLPresentPSUniform& cb)
+{
+	int2 limit = int2(cb.source_resolution) - int2(1);
+	return final_encode_input(res.texture.read(uint2(clamp(coord, int2(0), limit))), space);
+}
+float4 final_resample(float2 uv, float mode, float space, ConvertPSRes res, constant GSMTLPresentPSUniform& cb)
+{
+	if (mode < 1.5 && space < 0.5)
+		return res.sample(uv);
+
+	// Area is always a true weighted average in Native RGB or Linear Light.
+	if (mode >= 1.5 && mode < 2.5 && space >= 1.5)
+		space = 1.0;
+
+	float2 location = uv * cb.source_resolution - float2(0.5);
+	int2 base = int2(floor(location));
+	if (mode < 1.5)
+	{
+		// Manual bilinear is required to decode RGB before mixing.
+		float2 f = fract(location);
+		float4 a = final_read(base, space, res, cb);
+		float4 b = final_read(base + int2(1, 0), space, res, cb);
+		float4 c = final_read(base + int2(0, 1), space, res, cb);
+		float4 d = final_read(base + int2(1, 1), space, res, cb);
+		return final_decode_output(mix(mix(a, b, f.x), mix(c, d, f.x), f.y), space);
+	}
+
+	float2 source_per_output = abs(cb.source_size / max(abs(cb.target_size), float2(1.0)));
+	if (mode < 2.5)
+	{
+		// Exact pixel-overlap box resampling, directly from the source.
+		float2 low = uv * cb.source_resolution - 0.5 * source_per_output;
+		float2 high = low + source_per_output;
+		int2 first = int2(floor(low));
+		int2 last = int2(ceil(high));
+		float4 sum = float4(0.0);
+		for (int y = first.y; y < last.y; y++)
+		{
+			for (int x = first.x; x < last.x; x++)
+			{
+				float2 overlap = max(float2(0.0), min(high, float2(x + 1, y + 1)) - max(low, float2(x, y)));
+				sum += final_read(int2(x, y), space, res, cb) * (overlap.x * overlap.y);
+			}
+		}
+		return final_decode_output(sum / max(source_per_output.x * source_per_output.y, 1e-8), space);
+	}
+
+	// Widen the kernel for minification instead of using a fixed 4x4 footprint.
+	float2 scale = max(float2(1.0), source_per_output);
+	int2 first = int2(ceil(location - 2.0 * scale));
+	int2 last = int2(floor(location + 2.0 * scale));
+	float4 sum = float4(0.0);
+	float4 center_min = float4(1.0);
+	float4 center_max = float4(0.0);
+	float total = 0.0;
+	for (int y = first.y; y <= last.y; y++)
+	{
+		for (int x = first.x; x <= last.x; x++)
+		{
+			float2 delta = (float2(x, y) - location) / scale;
+			float weight = 0.0;
+			if (mode < 3.5)
+				weight = final_cubic(delta.x) * final_cubic(delta.y);
+			else
+			{
+				float radius = length(delta);
+				if (radius < 2.0) weight = final_jinc(radius) * final_jinc(radius * 0.5);
+			}
+			if (weight == 0.0) continue;
+			float4 pixel = final_read(int2(x, y), space, res, cb);
+			sum += pixel * weight;
+			total += weight;
+			if (x >= base.x && x <= base.x + 1 && y >= base.y && y <= base.y + 1)
+			{
+				center_min = min(center_min, pixel);
+				center_max = max(center_max, pixel);
+			}
+		}
+	}
+	float4 result = sum / max(total, 1e-8);
+	if (mode >= 3.5 && scale.x <= 1.0 && scale.y <= 1.0)
+		result = clamp(result, center_min, center_max); // Jinc anti-ringing.
+	return final_decode_output(result, space);
+}
+
+static float4 present_sample(ConvertPSRes res, float2 uv, constant GSMTLPresentPSUniform& cb)
+{
+	return final_resample(uv, cb.scaling_mode, cb.color_space, res, cb);
 }
 
 fragment float4 ps_present_copy(ConvertShaderData data [[stage_in]], ConvertPSRes res,
