@@ -313,9 +313,9 @@ enum class GSPostBilinearMode : u8
 {
 	Area, // Setting value 0 now uses coverage-based final image scaling.
 	BilinearSmooth,
-	BilinearSharp,
-	CatmullRom,
-	Jinc,
+	// Value 2 was Bilinear Sharp. Keep the remaining saved values stable.
+	CatmullRom = 3,
+	Jinc = 4,
 };
 
 // Working colour space for final output scaling, not HW texture interpolation.
@@ -323,7 +323,6 @@ enum class GSFinalScalingColorSpace : u8
 {
 	NativeRGB,
 	LinearLight,
-	SigmoidizedLinear,
 };
 
 // Ordering was done to keep compatibility with older ini file.
@@ -904,6 +903,7 @@ struct Pcsx2Config
 		AccBlendLevel AccurateBlendingUnit = DEFAULT_BLENDING_ACCURACY;
 		BiFiltering TextureFiltering = DEFAULT_TEXTURE_FILTERING_MODE;
 		TextureInterpolation Interpolation = DEFAULT_TEXTURE_INTERPOLATION;
+		bool TextureLinearLight = false;
 		TexturePreloadingLevel TexturePreloading = TexturePreloadingLevel::Full;
 		GSDumpCompressionMethod GSDumpCompression = GSDumpCompressionMethod::Zstandard;
 		GSHardwareDownloadMode HWDownloadMode = GSHardwareDownloadMode::Enabled;

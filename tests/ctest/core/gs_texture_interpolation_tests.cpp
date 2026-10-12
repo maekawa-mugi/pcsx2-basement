@@ -3,10 +3,41 @@
 
 #include "GS/Renderers/HW/GSTextureCache.h"
 #include "GS/Renderers/Vulkan/JincLUT.h"
+#include "GS/Renderers/Vulkan/TextureColorLUT.h"
 
 #include <gtest/gtest.h>
 
 #include <cmath>
+
+TEST(GSTextureColorLUT, ConversionErrorStaysBelowAnEightBitStep)
+{
+	const auto table = TextureColorLUT::Generate();
+	double max_decode_error = 0.0;
+	double max_encode_error = 0.0;
+	for (int i = 0; i <= 100000; i++)
+	{
+		const double value = static_cast<double>(i) / 100000;
+		const double position = value * (TextureColorLUT::WIDTH - 1);
+		const int lower = static_cast<int>(position);
+		const int upper = std::min(lower + 1, TextureColorLUT::WIDTH - 1);
+		const double fraction = position - lower;
+		const double decode_position = value * (TextureColorLUT::DECODE_WIDTH - 1);
+		const int decode_lower = static_cast<int>(decode_position);
+		const int decode_upper = std::min(decode_lower + 1, TextureColorLUT::DECODE_WIDTH - 1);
+		const double decode = std::lerp(table[TextureColorLUT::WIDTH + decode_lower], table[TextureColorLUT::WIDTH + decode_upper], decode_position - decode_lower);
+		const double encode = std::lerp(table[2 * TextureColorLUT::WIDTH + lower], table[2 * TextureColorLUT::WIDTH + upper], fraction);
+		max_decode_error = std::max(max_decode_error, std::abs(decode - TextureColorLUT::Decode(value)));
+		max_encode_error = std::max(max_encode_error, std::abs(encode - TextureColorLUT::Encode(value)));
+	}
+	EXPECT_LT(max_decode_error, 1e-5);
+	EXPECT_LT(max_encode_error, 1e-4);
+	for (int i = 0; i < 1024; i++)
+		EXPECT_EQ(table[i], JINC_LUT[i]);
+	EXPECT_EQ(table[TextureColorLUT::WIDTH], 0.0f);
+	EXPECT_EQ(table[TextureColorLUT::WIDTH + TextureColorLUT::DECODE_WIDTH - 1], 1.0f);
+	EXPECT_EQ(table[2 * TextureColorLUT::WIDTH], 0.0f);
+	EXPECT_EQ(table.back(), 1.0f);
+}
 
 TEST(GSTextureInterpolation, PartialBlockUploadCannotSupplyNeighboringTaps)
 {

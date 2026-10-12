@@ -1703,6 +1703,7 @@ static void DumpPSSelector(DrawConfigWriter& out, const GSHWDrawConfig::PSSelect
 	out.WriteLn("ltf: {}", ps.ltf);
 	out.WriteLn("interpolation: {}", ps.interpolation);
 	out.WriteLn("interpolation_mip: {}", ps.interpolation_mip);
+	out.WriteLn("texture_linear_light: {}", ps.texture_linear_light);
 	out.WriteLn("shuffle: {}", ps.shuffle);
 	out.WriteLn("shuffle_same: {}", ps.shuffle_same);
 	out.WriteLn("real16src: {}", ps.real16src);

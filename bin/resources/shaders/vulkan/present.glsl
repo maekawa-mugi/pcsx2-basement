@@ -41,7 +41,7 @@ layout(set = 0, binding = 0) uniform sampler2D samp0;
 
 
 // Final output. Modes: bilinear=1, box/area=2, Catmull-Rom=3, Jinc=4.
-// Working spaces: encoded RGB=0, linear light=1, sigmoidized linear=2.
+// Working spaces: encoded RGB=0, linear light=1.
 float final_srgb_decode(float x)
 {
 	return x <= 0.04045 ? x / 12.92 : pow((x + 0.055) / 1.055, 2.4);
@@ -50,15 +50,6 @@ float final_srgb_encode(float x)
 {
 	return x <= 0.0031308 ? 12.92 * x : 1.055 * pow(x, 1.0 / 2.4) - 0.055;
 }
-float final_sigmoid(float x)
-{
-	return (1.0 / (1.0 + exp(-8.0 * (x - 0.5))) - 0.01798620996) / 0.96402758008;
-}
-float final_unsigmoid(float x)
-{
-	float p = clamp(x, 0.0, 1.0) * 0.96402758008 + 0.01798620996;
-	return clamp(0.5 + log(p / (1.0 - p)) / 8.0, 0.0, 1.0);
-}
 vec4 final_encode_input(vec4 pixel, float space)
 {
 	if (space >= 0.5)
@@ -66,12 +57,6 @@ vec4 final_encode_input(vec4 pixel, float space)
 		pixel.r = final_srgb_decode(pixel.r);
 		pixel.g = final_srgb_decode(pixel.g);
 		pixel.b = final_srgb_decode(pixel.b);
-		if (space >= 1.5)
-		{
-			pixel.r = final_sigmoid(pixel.r);
-			pixel.g = final_sigmoid(pixel.g);
-			pixel.b = final_sigmoid(pixel.b);
-		}
 	}
 	return pixel;
 }
@@ -80,12 +65,6 @@ vec4 final_decode_output(vec4 pixel, float space)
 	pixel = clamp(pixel, vec4(0.0), vec4(1.0));
 	if (space >= 0.5)
 	{
-		if (space >= 1.5)
-		{
-			pixel.r = final_unsigmoid(pixel.r);
-			pixel.g = final_unsigmoid(pixel.g);
-			pixel.b = final_unsigmoid(pixel.b);
-		}
 		pixel.r = final_srgb_encode(pixel.r);
 		pixel.g = final_srgb_encode(pixel.g);
 		pixel.b = final_srgb_encode(pixel.b);
@@ -117,10 +96,6 @@ vec4 final_resample(vec2 uv, float mode, float space)
 {
 	if (mode < 1.5 && space < 0.5)
 		return texture(samp0, uv);
-
-	// Area is always a true weighted average in Native RGB or Linear Light.
-	if (mode >= 1.5 && mode < 2.5 && space >= 1.5)
-		space = 1.0;
 
 	vec2 location = uv * u_source_resolution - vec2(0.5);
 	ivec2 base = ivec2(floor(location));

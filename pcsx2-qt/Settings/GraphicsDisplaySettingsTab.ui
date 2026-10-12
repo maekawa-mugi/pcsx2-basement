@@ -141,11 +141,6 @@
       </property>
      </item>
      <item>
-      <property name="text">
-       <string extracomment="Sharp: Refers to the texture clarity.">Bilinear (Sharp)</string>
-      </property>
-     </item>
-     <item>
       <property name="text"><string>Catmull-Rom (Bicubic)</string></property>
      </item>
      <item>
@@ -163,7 +158,6 @@
     <widget class="QComboBox" name="finalScalingColorSpace">
      <item><property name="text"><string>Native RGB (Default)</string></property></item>
      <item><property name="text"><string>Linear Light</string></property></item>
-     <item><property name="text"><string>Sigmoidized Linear</string></property></item>
     </widget>
    </item>
    <item row="6" column="0">
@@ -288,6 +282,12 @@
       <property name="text">
        <string extracomment="Adaptive: deinterlacing method that should be translated.">Adaptive (Top Field First, Similar to Bob + Weave)</string>
       </property>
+     </item>
+     <item>
+      <property name="text">
+       <string extracomment="Adaptive: deinterlacing method that should be translated.">Adaptive (Bottom Field First, Similar to Bob + Weave)</string>
+      </property>
+     </item>
      <item>
       <property name="text">
        <string extracomment="Phosphor: deinterlacing method that simulates the afterglow of a CRT. Vulkan renderer only; other renderers use Weave.">Phosphor (Top Field First, CRT Afterglow, Vulkan Only)</string>
@@ -296,12 +296,6 @@
      <item>
       <property name="text">
        <string extracomment="Phosphor: deinterlacing method that simulates the afterglow of a CRT. Vulkan renderer only; other renderers use Weave.">Phosphor (Bottom Field First, CRT Afterglow, Vulkan Only)</string>
-      </property>
-     </item>
-     </item>
-     <item>
-      <property name="text">
-       <string extracomment="Adaptive: deinterlacing method that should be translated.">Adaptive (Bottom Field First, Similar to Bob + Weave)</string>
       </property>
      </item>
     </widget>

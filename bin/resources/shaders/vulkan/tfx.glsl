@@ -853,7 +853,44 @@ vec4 sample_c_af(vec2 uv, float uv_w)
 #endif
 
 
+#ifndef PS_TEXTURE_LINEAR_LIGHT
+#define PS_TEXTURE_LINEAR_LIGHT 0
+#endif
+
 #if PS_INTERPOLATION != 0
+#if PS_TEXTURE_LINEAR_LIGHT
+float texture_colour_lut(float value, int row)
+{
+	float last = row == 1 ? 255.0 : 4095.0;
+	float p = clamp(value, 0.0, 1.0) * last;
+#if PS_JINC_LINEAR_LUT
+	return textureLod(Palette, vec2((p + 0.5) / 4096.0, (float(row) + 0.5) / 3.0), 0.0).r;
+#else
+	// R32F filtering is optional; interpolate the same entries on those devices.
+	int i = int(p);
+	return mix(texelFetch(Palette, ivec2(i, row), 0).r,
+		texelFetch(Palette, ivec2(min(i + 1, int(last)), row), 0).r, fract(p));
+#endif
+}
+#endif
+
+vec4 texture_to_working_space(vec4 value)
+{
+#if PS_TEXTURE_LINEAR_LIGHT
+	// Experimental sRGB assumption: needs proper testing across PS2 games.
+	value.rgb = vec3(texture_colour_lut(value.r, 1), texture_colour_lut(value.g, 1), texture_colour_lut(value.b, 1));
+#endif
+	return value;
+}
+
+vec4 texture_from_working_space(vec4 value)
+{
+#if PS_TEXTURE_LINEAR_LIGHT
+	value.rgb = vec3(texture_colour_lut(value.r, 2), texture_colour_lut(value.g, 2), texture_colour_lut(value.b, 2));
+#endif
+	return value;
+}
+
 // 4x4 reconstruction for complete colour texture layers.
 float cubic_kernel(float x)
 {
@@ -874,7 +911,11 @@ float jinc_kernel(float r)
 	// Palette binding is unused by Jinc draws and holds the shared R32F LUT.
 #if PS_JINC_LINEAR_LUT
 	// imgview texel-centre coordinates: hardware interpolates the same two coefficients.
+#if PS_TEXTURE_LINEAR_LIGHT
+	return r < support ? textureLod(Palette, vec2((r / support * 1023.0 + 0.5) / 4096.0, 0.5 / 3.0), 0.0).r : 0.0;
+#else
 	return r < support ? textureLod(Palette, vec2((r / support * 1023.0 + 0.5) / 1024.0, 0.5), 0.0).r : 0.0;
+#endif
 #else
 	// R32F linear filtering is optional in Vulkan. Preserve support on those devices.
 	float p = clamp(r / support * 1023.0, 0.0, 1023.0);
@@ -890,6 +931,14 @@ vec4 sample_interpolated_level(vec2 uv, int level)
 	vec2 size = vec2(textureSize(Texture, level));
 	vec2 texel = uv * size - vec2(0.5);
 	vec2 base = floor(texel);
+#if PS_INTERPOLATION == 3
+	vec2 f = fract(texel);
+	vec4 a = texture_to_working_space(textureLod(Texture, (base + vec2(0.5, 0.5)) / size, float(level)));
+	vec4 b = texture_to_working_space(textureLod(Texture, (base + vec2(1.5, 0.5)) / size, float(level)));
+	vec4 c = texture_to_working_space(textureLod(Texture, (base + vec2(0.5, 1.5)) / size, float(level)));
+	vec4 d = texture_to_working_space(textureLod(Texture, (base + vec2(1.5, 1.5)) / size, float(level)));
+	return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+#else
 	vec4 colour = vec4(0.0);
 	float weight_sum = 0.0;
 	vec4 central_min = vec4(1.0);
@@ -907,7 +956,7 @@ vec4 sample_interpolated_level(vec2 uv, int level)
 			float weight = jinc_kernel(radius);
 #endif
 			// The GPU sampler is set to nearest, retaining its wrap/clamp rules.
-			vec4 value = textureLod(Texture, (tap + vec2(0.5)) / size, float(level));
+			vec4 value = texture_to_working_space(textureLod(Texture, (tap + vec2(0.5)) / size, float(level)));
 			colour += value * weight;
 #if PS_INTERPOLATION == 2
 			if (x >= 0 && x <= 1 && y >= 0 && y <= 1)
@@ -925,6 +974,7 @@ vec4 sample_interpolated_level(vec2 uv, int level)
 	return clamp(colour, central_min, central_max);
 #else
 	return clamp(colour, 0.0, 1.0);
+#endif
 #endif
 }
 vec4 sample_interpolated(vec2 uv)
@@ -980,7 +1030,8 @@ vec4 sample_c(vec2 uv)
 #endif
 
 #if PS_INTERPOLATION != 0
-	return sample_interpolated(uv);
+	// Keep mip blending in the working space; encode only once before GS colour math.
+	return texture_from_working_space(sample_interpolated(uv));
 #elif PS_ANISOTROPIC_FILTERING > 1
 	return sample_c_af(uv, vsIn.t.w);
 #elif PS_AUTOMATIC_LOD == 1

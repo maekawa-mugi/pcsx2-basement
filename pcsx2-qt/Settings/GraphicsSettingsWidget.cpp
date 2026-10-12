@@ -58,6 +58,35 @@ static constexpr int DEFAULT_INTERLACE_MODE = 0;
 static constexpr int DEFAULT_TV_SHADER_MODE = 0;
 static constexpr int DEFAULT_CAS_SHARPNESS = 50;
 
+static const char* s_final_scaling_names[] = {QT_TRANSLATE_NOOP("GraphicsSettingsWidget", "Area (Pixel Art)"),
+	QT_TRANSLATE_NOOP("GraphicsSettingsWidget", "Bilinear (Smooth)"),
+	QT_TRANSLATE_NOOP("GraphicsSettingsWidget", "Catmull-Rom (Bicubic)"),
+	QT_TRANSLATE_NOOP("GraphicsSettingsWidget", "Jinc (Windowed)"), nullptr};
+static const char* s_final_scaling_values[] = {"0", "1", "3", "4", nullptr};
+
+static void MigrateRetiredFinalScalingSettings(SettingsInterface* sif)
+{
+	bool base_changed = false;
+	bool game_changed = false;
+	for (const char* key : {"linear_present_mode", "FinalScalingColorSpace"})
+	{
+		if (Host::GetBaseIntSettingValue("EmuCore/GS", key, 1) == 2)
+		{
+			Host::SetBaseIntSettingValue("EmuCore/GS", key, 1);
+			base_changed = true;
+		}
+		if (sif && sif->GetIntValue("EmuCore/GS", key, 1) == 2)
+		{
+			sif->SetIntValue("EmuCore/GS", key, 1);
+			game_changed = true;
+		}
+	}
+	if (base_changed)
+		Host::CommitBaseSettingChanges();
+	if (game_changed)
+		QtHost::SaveGameSettings(sif, false);
+}
+
 GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* settings_dialog, QWidget* parent)
 	: SettingsWidget(settings_dialog, parent)
 {
@@ -83,8 +112,10 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* settings_dialog, 
 	SettingWidgetBinder::BindWidgetToEnumSetting(sif, m_display.fmvAspectRatio, "EmuCore/GS", "FMVAspectRatioSwitch",
 		Pcsx2Config::GSOptions::FMVAspectRatioSwitchNames, FMVAspectRatioSwitchType::Off);
 	SettingWidgetBinder::BindWidgetToIntSetting(sif, m_display.interlacing, "EmuCore/GS", "deinterlace_mode", DEFAULT_INTERLACE_MODE);
-	SettingWidgetBinder::BindWidgetToIntSetting(
-		sif, m_display.bilinearFiltering, "EmuCore/GS", "linear_present_mode", static_cast<int>(GSPostBilinearMode::BilinearSmooth));
+	MigrateRetiredFinalScalingSettings(sif);
+	m_display.bilinearFiltering->clear();
+	SettingWidgetBinder::BindWidgetToEnumSetting(sif, m_display.bilinearFiltering, "EmuCore/GS", "linear_present_mode",
+		s_final_scaling_names, s_final_scaling_values, "1", "GraphicsSettingsWidget");
 	SettingWidgetBinder::BindWidgetToIntSetting(sif, m_display.finalScalingColorSpace, "EmuCore/GS", "FinalScalingColorSpace",
 		static_cast<int>(GSFinalScalingColorSpace::NativeRGB));
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_display.widescreenPatches, "EmuCore", "EnableWideScreenPatches", false);
@@ -112,6 +143,7 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* settings_dialog, 
 	//////////////////////////////////////////////////////////////////////////
 	SettingWidgetBinder::BindWidgetToIntSetting(sif, m_hw.textureFiltering, "EmuCore/GS", "filter", static_cast<int>(Pcsx2Config::GSOptions::DEFAULT_TEXTURE_FILTERING_MODE));
 	SettingWidgetBinder::BindWidgetToIntSetting(sif, m_hw.textureInterpolation, "EmuCore/GS", "TextureInterpolation", static_cast<int>(Pcsx2Config::GSOptions::DEFAULT_TEXTURE_INTERPOLATION));
+	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_hw.textureLinearLight, "EmuCore/GS", "TextureLinearLight", false);
 	SettingWidgetBinder::BindWidgetToIntSetting(
 		sif, m_hw.trilinearFiltering, "EmuCore/GS", "TriFilter", static_cast<int>(TriFiltering::Automatic), -1);
 	SettingWidgetBinder::BindWidgetToEnumSetting(sif, m_hw.anisotropicFiltering, "EmuCore/GS", "MaxAnisotropy",
@@ -464,14 +496,12 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* settings_dialog, 
 		dialog()->registerWidgetHelp(m_display.bilinearFiltering, tr("Final Image Scaling"), tr("Bilinear (Smooth)"),
 			tr("Scales the finished game image to the display resolution. Area integrates exact source pixel coverage, "
 			   "preserving hard pixel-art edges at integer scales and blending boundaries at fractional scales. "
-			   "Bilinear modes smooth the result; Sharp retains more definition. "
+			   "Bilinear smooths the result. "
 			   "Area can be slower when downscaling large images. Catmull-Rom and Jinc widen their filters when shrinking."));
 
 		dialog()->registerWidgetHelp(m_display.finalScalingColorSpace, tr("Scaling Color Space"), tr("Native RGB (Default)"),
 			tr("Native RGB interpolates encoded values directly. Linear Light converts sRGB into linear values before "
-			   "mixing and converts back afterwards. Sigmoidized Linear additionally applies a normalized sigmoid "
-			   "before interpolation and its inverse after, reducing ringing with Jinc or Catmull-Rom. "
-			   "For Area, Sigmoidized Linear uses Linear Light instead so that the averaging is meaningful. "
+			   "mixing and converts back afterwards. This applies only to final image scaling. "
 			   "Non-native color spaces require extra GPU processing."));
 
 		dialog()->registerWidgetHelp(m_display.PCRTCOffsets, tr("Screen Offsets"), tr("Unchecked"),
@@ -565,6 +595,10 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* settings_dialog, 
 			   "For compatibility, partially uploaded textures, render-target textures, unusual texture formats, "
 			   "special addressing and anisotropic filtering "
 			   "continue to use the original sampling path. Vulkan Jinc includes anti-ringing and supports mipmapping/trilinear with up to 32 samples. Nearest filtering is never overridden."));
+		dialog()->registerWidgetHelp(m_hw.textureLinearLight, tr("Linear Light Texture Interpolation"), tr("Unchecked"),
+			tr("Experimental Vulkan option. Treats texture RGB as sRGB, decodes before Bilinear, Bicubic or Jinc interpolation, "
+			   "then encodes before PS2 texture modulation and blending. Alpha is unchanged. This changes the original game appearance. "
+			   "Nearest filtering, palettes, partial uploads, render-target textures, special addressing and anisotropic filtering keep the original sampling path."));
 
 		dialog()->registerWidgetHelp(m_hw.trilinearFiltering, tr("Trilinear Filtering"), tr("Automatic (Default)"),
 			tr("Reduces blurriness of large textures applied to small, steeply angled surfaces by sampling colors from the two nearest Mipmaps. Requires Mipmapping to be 'on'.<br> "

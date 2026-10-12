@@ -10,6 +10,7 @@
 #include "GS/Renderers/Vulkan/VKShaderCache.h"
 #include "GS/Renderers/Vulkan/VKSwapChain.h"
 #include "GS/Renderers/Vulkan/JincLUT.h"
+#include "GS/Renderers/Vulkan/TextureColorLUT.h"
 #include "GS/Renderers/Common/GSDevice.h"
 
 #include "BuildVersion.h"
@@ -3968,6 +3969,16 @@ bool GSDeviceVK::CreateJincLUT()
 		return false;
 	}
 	Vulkan::SetObjectName(m_device, m_jinc_lut->GetImage(), "Jinc coefficient LUT");
+	const auto colours = TextureColorLUT::Generate();
+	m_texture_color_lut = GSTextureVK::Create(GSTexture::Usage::Texture, GSTexture::Format::PrimID,
+		TextureColorLUT::WIDTH, TextureColorLUT::HEIGHT, 1);
+	if (!m_texture_color_lut || !m_texture_color_lut->Update(
+			GSVector4i(0, 0, TextureColorLUT::WIDTH, TextureColorLUT::HEIGHT), colours.data(), TextureColorLUT::WIDTH * sizeof(float)))
+	{
+		Host::ReportErrorAsync("GS", "Failed to create texture colour conversion LUT");
+		return false;
+	}
+	Vulkan::SetObjectName(m_device, m_texture_color_lut->GetImage(), "Texture colour conversion and Jinc LUT");
 	return true;
 }
 
@@ -4918,6 +4929,11 @@ void GSDeviceVK::DestroyResources()
 		vkDestroyFramebuffer(m_device, m_null_framebuffer, nullptr);
 	}
 
+	if (m_texture_color_lut)
+	{
+		m_texture_color_lut->Destroy(false);
+		m_texture_color_lut.reset();
+	}
 	if (m_jinc_lut)
 	{
 		m_jinc_lut->Destroy(false);
@@ -5022,6 +5038,7 @@ VkShaderModule GSDeviceVK::GetTFXFragmentShader(const GSHWDrawConfig::PSSelector
 	AddMacro(ss, "PS_LTF", sel.ltf);
 	AddMacro(ss, "PS_INTERPOLATION", sel.interpolation);
 	AddMacro(ss, "PS_INTERPOLATION_MIP", sel.interpolation_mip);
+	AddMacro(ss, "PS_TEXTURE_LINEAR_LIGHT", sel.texture_linear_light);
 	AddMacro(ss, "PS_JINC_LINEAR_LUT", m_jinc_lut_linear);
 	AddMacro(ss, "PS_AUTOMATIC_LOD", sel.automatic_lod);
 	AddMacro(ss, "PS_MANUAL_LOD", sel.manual_lod);
@@ -5829,8 +5846,9 @@ bool GSDeviceVK::ApplyTFXState(bool already_execed)
 		}
 		if (flags & DIRTY_FLAG_TFX_TEXTURE_PALETTE)
 		{
-			// Palette texelFetch ignores the sampler; Jinc alone uses linear LUT filtering.
-			const VkSampler sampler = (m_jinc_lut_linear && m_tfx_textures[TFX_TEXTURE_PALETTE] == m_jinc_lut.get()) ?
+			// Palette texelFetch ignores the sampler. Both R32F LUTs use linear filtering if supported.
+			const VkSampler sampler = (m_jinc_lut_linear &&
+				(m_tfx_textures[TFX_TEXTURE_PALETTE] == m_jinc_lut.get() || m_tfx_textures[TFX_TEXTURE_PALETTE] == m_texture_color_lut.get())) ?
 				m_linear_sampler : m_point_sampler;
 			dsub.AddCombinedImageSamplerDescriptorWrite(VK_NULL_HANDLE, TFX_TEXTURE_PALETTE,
 				m_tfx_textures[TFX_TEXTURE_PALETTE]->GetView(), sampler,
@@ -6071,7 +6089,12 @@ void GSDeviceVK::RenderHW(GSHWDrawConfig& config)
 		PSSetShaderResource(TFX_TEXTURE_TEXTURE, config.tex, config.tex != config.rt && config.tex != config.ds);
 		PSSetSampler(config.sampler);
 	}
-	if (config.ps.interpolation == static_cast<u8>(TextureInterpolation::Jinc))
+	if (config.ps.texture_linear_light)
+	{
+		pxAssert(!config.pal);
+		PSSetShaderResource(TFX_TEXTURE_PALETTE, m_texture_color_lut.get(), true);
+	}
+	else if (config.ps.interpolation == static_cast<u8>(TextureInterpolation::Jinc))
 	{
 		// Jinc is gated out for paletted textures, so these descriptors are mutually exclusive.
 		pxAssert(!config.pal);

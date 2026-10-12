@@ -2,8 +2,55 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Config.h"
+#include "common/MemorySettingsInterface.h"
+#include "common/SettingsWrapper.h"
 
 #include <gtest/gtest.h>
+
+TEST(GSFinalScalingConfig, RetiredModesLoadAsBilinearAndLinearLight)
+{
+	MemorySettingsInterface settings;
+	settings.SetIntValue("EmuCore/GS", "linear_present_mode", 2);
+	settings.SetIntValue("EmuCore/GS", "FinalScalingColorSpace", 2);
+	SettingsLoadWrapper load(settings);
+	Pcsx2Config::GSOptions options;
+	options.LoadSave(load);
+	EXPECT_EQ(options.LinearPresent, GSPostBilinearMode::BilinearSmooth);
+	EXPECT_EQ(options.FinalScalingColorSpace, GSFinalScalingColorSpace::LinearLight);
+
+	SettingsSaveWrapper save(settings);
+	options.LoadSave(save);
+	EXPECT_EQ(settings.GetIntValue("EmuCore/GS", "linear_present_mode", -1), 1);
+	EXPECT_EQ(settings.GetIntValue("EmuCore/GS", "FinalScalingColorSpace", -1), 1);
+}
+
+TEST(GSFinalScalingConfig, RemovingSharpPreservesSavedCatmullRomAndJinc)
+{
+	for (const auto& [saved, mode] : {std::pair{3, GSPostBilinearMode::CatmullRom}, std::pair{4, GSPostBilinearMode::Jinc}})
+	{
+		MemorySettingsInterface settings;
+		settings.SetIntValue("EmuCore/GS", "linear_present_mode", saved);
+		SettingsLoadWrapper load(settings);
+		Pcsx2Config::GSOptions options;
+		options.LoadSave(load);
+		EXPECT_EQ(options.LinearPresent, mode);
+	}
+}
+
+TEST(GSTextureLinearLightConfig, OptInPersistsAndTriggersSettingsUpdate)
+{
+	Pcsx2Config::GSOptions original;
+	EXPECT_FALSE(original.TextureLinearLight);
+	Pcsx2Config::GSOptions changed(original);
+	changed.TextureLinearLight = true;
+	EXPECT_NE(original, changed);
+	MemorySettingsInterface settings;
+	SettingsSaveWrapper save(settings);
+	changed.LoadSave(save);
+	SettingsLoadWrapper load(settings);
+	original.LoadSave(load);
+	EXPECT_TRUE(original.TextureLinearLight);
+}
 
 TEST(EEFullTLBConfig, DefaultsOffAndPreservesNormalEffectiveSettings)
 {

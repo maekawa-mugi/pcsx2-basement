@@ -257,12 +257,6 @@ bool GSRenderer::Merge(int field)
 	if (GSConfig.FXAA)
 		g_gs_device->FXAA();
 
-	// Sharpens biinear at lower resolutions, almost nearest but with more uniform pixels.
-	if (GSConfig.LinearPresent == GSPostBilinearMode::BilinearSharp && (g_gs_device->GetWindowWidth() > fs.x || g_gs_device->GetWindowHeight() > fs.y))
-	{
-		g_gs_device->Resize(g_gs_device->GetWindowWidth(), g_gs_device->GetWindowHeight());
-	}
-
 	if (m_scanmask_used)
 		m_scanmask_used--;
 
@@ -365,20 +359,6 @@ static GSVector4 CalculateDrawDstRect(s32 window_width, s32 window_height, const
 		// make target width/height an integer multiple of the texture width/height
 		float t_width = static_cast<double>(src_rect.width());
 		float t_height = static_cast<double>(src_rect.height());
-
-		// If using Bilinear (Shape) the image will be prescaled to larger than the window, so we need to unscale it.
-		if (GSConfig.LinearPresent == GSPostBilinearMode::BilinearSharp && src_rect.width() > 0 && src_rect.height() > 0)
-		{
-			const GSVector2i resolution = g_gs_renderer->PCRTCDisplays.GetResolution();
-			const GSVector2i fs = GSVector2i(static_cast<int>(static_cast<float>(resolution.x) * g_gs_renderer->GetUpscaleMultiplier()),
-				static_cast<int>(static_cast<float>(resolution.y) * g_gs_renderer->GetUpscaleMultiplier()));
-
-			if (g_gs_device->GetWindowWidth() > fs.x || g_gs_device->GetWindowHeight() > fs.y)
-			{
-				t_width *= static_cast<float>(fs.x) / src_rect.width();
-				t_height *= static_cast<float>(fs.y) / src_rect.height();
-			}
-		}
 
 		float scale;
 		if ((t_width / t_height) >= 1.0)
@@ -672,15 +652,6 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 	{
 		u32 screenshot_width, screenshot_height;
 		std::vector<u32> screenshot_pixels;
-
-		if (GSConfig.LinearPresent == GSPostBilinearMode::BilinearSharp)
-		{
-			const GSTexture* current = g_gs_device->GetCurrent();
-			const GSVector2i internal_res = GetInternalResolution();
-
-			if (current && (current->GetWidth() > internal_res.x || current->GetHeight() > internal_res.y))
-				g_gs_device->Resize(internal_res.x, internal_res.y);
-		}
 
 		if (!m_dump && m_dump_frames > 0)
 		{

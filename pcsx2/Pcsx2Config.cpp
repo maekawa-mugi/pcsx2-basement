@@ -845,6 +845,7 @@ bool Pcsx2Config::GSOptions::OptionsAreEqual(const GSOptions& right) const
 		OpEqu(AccurateBlendingUnit) &&
 		OpEqu(TextureFiltering) &&
 		OpEqu(Interpolation) &&
+		OpEqu(TextureLinearLight) &&
 		OpEqu(TexturePreloading) &&
 		OpEqu(GSDumpCompression) &&
 		OpEqu(HWDownloadMode) &&
@@ -1101,6 +1102,11 @@ void Pcsx2Config::GSOptions::LoadSave(SettingsWrapper& wrap)
 
 	SettingsWrapIntEnumEx(LinearPresent, "linear_present_mode");
 	SettingsWrapIntEnumEx(FinalScalingColorSpace, "FinalScalingColorSpace");
+	// Retired modes also occur in per-game settings; normalize at load time.
+	if (static_cast<u8>(LinearPresent) == 2)
+		LinearPresent = GSPostBilinearMode::BilinearSmooth;
+	if (static_cast<u8>(FinalScalingColorSpace) == 2)
+		FinalScalingColorSpace = GSFinalScalingColorSpace::LinearLight;
 	SettingsWrapIntEnumEx(InterlaceMode, "deinterlace_mode");
 
 	SettingsWrapEntry(OsdScale);
@@ -1122,6 +1128,7 @@ void Pcsx2Config::GSOptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapIntEnumEx(AccurateBlendingUnit, "accurate_blending_unit");
 	SettingsWrapIntEnumEx(TextureFiltering, "filter");
 	SettingsWrapIntEnumEx(Interpolation, "TextureInterpolation");
+	SettingsWrapEntry(TextureLinearLight);
 	SettingsWrapIntEnumEx(TexturePreloading, "texture_preloading");
 	SettingsWrapIntEnumEx(GSDumpCompression, "GSDumpCompression");
 	SettingsWrapIntEnumEx(HWDownloadMode, "HWDownloadMode");

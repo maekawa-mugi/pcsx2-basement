@@ -2889,10 +2889,13 @@ void FullscreenUI::DrawGraphicsSettingsPage(SettingsInterface* bsi, bool show_ad
 		"11", //GSRendererType::Null
 	};
 	static constexpr const char* s_bilinear_present_options[] = {
-		FSUI_NSTR("Off"),
+		FSUI_NSTR("Area (Pixel Art)"),
 		FSUI_NSTR("Bilinear (Smooth)"),
-		FSUI_NSTR("Bilinear (Sharp)"),
+		FSUI_NSTR("Catmull-Rom (Bicubic)"),
+		FSUI_NSTR("Jinc (Windowed)"),
 	};
+	static constexpr const char* s_bilinear_present_values[] = {"0", "1", "3", "4"};
+	static constexpr const char* s_scaling_color_options[] = {FSUI_NSTR("Native RGB (Default)"), FSUI_NSTR("Linear Light")};
 	static constexpr const char* s_deinterlacing_options[] = {
 		FSUI_NSTR("Automatic (Default)"),
 		FSUI_NSTR("No Deinterlacing"),
@@ -2904,11 +2907,11 @@ void FullscreenUI::DrawGraphicsSettingsPage(SettingsInterface* bsi, bool show_ad
 		FSUI_NSTR("Blend (Bottom Field First, Half FPS)"),
 		FSUI_NSTR("Adaptive (Top Field First)"),
 		FSUI_NSTR("Adaptive (Bottom Field First)"),
+		FSUI_NSTR("Phosphor (Top Field First, Vulkan Only)"),
+		FSUI_NSTR("Phosphor (Bottom Field First, Vulkan Only)"),
 	};
 	static const char* s_resolution_options[] = {
 		FSUI_NSTR("Native (PS2)"),
-		FSUI_NSTR("Phosphor (Top Field First, Vulkan Only)"),
-		FSUI_NSTR("Phosphor (Bottom Field First, Vulkan Only)"),
 		FSUI_NSTR("2x Native (~720px/HD)"),
 		FSUI_NSTR("3x Native (~1080px/FHD)"),
 		FSUI_NSTR("4x Native (~1440px/QHD)"),
@@ -3141,9 +3144,22 @@ void FullscreenUI::DrawGraphicsSettingsPage(SettingsInterface* bsi, bool show_ad
 			FSUI_CSTR("Automatically loads and applies no-interlacing patches on game start. Can cause issues."), "EmuCore", "EnableNoInterlacingPatches", false);
 	}
 
-	DrawIntListSetting(bsi, FSUI_ICONSTR(ICON_FA_TABLE_CELLS, "Bilinear Filtering"), FSUI_CSTR("Smooths out the image when upscaling the console to the screen."),
-		"EmuCore/GS", "linear_present_mode", static_cast<int>(GSPostBilinearMode::BilinearSharp), s_bilinear_present_options,
+	for (const char* key : {"linear_present_mode", "FinalScalingColorSpace"})
+	{
+		if (bsi->GetIntValue("EmuCore/GS", key, 1) == 2)
+		{
+			bsi->SetIntValue("EmuCore/GS", key, 1);
+			SetSettingsChanged(bsi);
+		}
+	}
+	DrawStringListSetting(bsi, FSUI_ICONSTR(ICON_FA_TABLE_CELLS, "Final Image Scaling"), FSUI_CSTR("Smooths out the image when upscaling the console to the screen."),
+		"EmuCore/GS", "linear_present_mode", "1", s_bilinear_present_options, s_bilinear_present_values,
 		std::size(s_bilinear_present_options), true);
+	DrawIntListSetting(bsi, FSUI_ICONSTR(ICON_FA_TABLE_CELLS, "Scaling Color Space"), FSUI_CSTR("Color space used when scaling the final image."),
+		"EmuCore/GS", "FinalScalingColorSpace", 0, s_scaling_color_options, std::size(s_scaling_color_options), true);
+	DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_TABLE_CELLS, "Linear Light Texture Interpolation (Vulkan, Experimental)"),
+		FSUI_CSTR("Interpolates texture RGB in linear light. Changes the original game appearance."),
+		"EmuCore/GS", "TextureLinearLight", false);
 	DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_SQUARE_ARROW_UP_RIGHT, "Integer Scaling"),
 		FSUI_CSTR("Adds padding to the display area to ensure that the ratio between pixels on the host to pixels in the console is an "
 				  "integer number. May result in a sharper image in some 2D games."),
@@ -6607,7 +6623,6 @@ TRANSLATE_NOOP("FullscreenUI", "Software Renderer");
 TRANSLATE_NOOP("FullscreenUI", "Null");
 TRANSLATE_NOOP("FullscreenUI", "Off");
 TRANSLATE_NOOP("FullscreenUI", "Bilinear (Smooth)");
-TRANSLATE_NOOP("FullscreenUI", "Bilinear (Sharp)");
 TRANSLATE_NOOP("FullscreenUI", "No Deinterlacing");
 TRANSLATE_NOOP("FullscreenUI", "Weave (Top Field First, Sawtooth)");
 TRANSLATE_NOOP("FullscreenUI", "Weave (Bottom Field First, Sawtooth)");
@@ -6617,6 +6632,8 @@ TRANSLATE_NOOP("FullscreenUI", "Blend (Top Field First, Half FPS)");
 TRANSLATE_NOOP("FullscreenUI", "Blend (Bottom Field First, Half FPS)");
 TRANSLATE_NOOP("FullscreenUI", "Adaptive (Top Field First)");
 TRANSLATE_NOOP("FullscreenUI", "Adaptive (Bottom Field First)");
+TRANSLATE_NOOP("FullscreenUI", "Phosphor (Top Field First, Vulkan Only)");
+TRANSLATE_NOOP("FullscreenUI", "Phosphor (Bottom Field First, Vulkan Only)");
 TRANSLATE_NOOP("FullscreenUI", "Native (PS2)");
 TRANSLATE_NOOP("FullscreenUI", "2x Native (~720px/HD)");
 TRANSLATE_NOOP("FullscreenUI", "3x Native (~1080px/FHD)");
@@ -6632,8 +6649,6 @@ TRANSLATE_NOOP("FullscreenUI", "12x Native (~4320px/8K UHD)");
 TRANSLATE_NOOP("FullscreenUI", "13x Native (~4680px)");
 TRANSLATE_NOOP("FullscreenUI", "14x Native (~5040px)");
 TRANSLATE_NOOP("FullscreenUI", "15x Native (~5400px)");
-TRANSLATE_NOOP("FullscreenUI", "Phosphor (Top Field First, Vulkan Only)");
-TRANSLATE_NOOP("FullscreenUI", "Phosphor (Bottom Field First, Vulkan Only)");
 TRANSLATE_NOOP("FullscreenUI", "16x Native (~5760px)");
 TRANSLATE_NOOP("FullscreenUI", "17x Native (~6120px)");
 TRANSLATE_NOOP("FullscreenUI", "18x Native (~6480px/12K UHD)");

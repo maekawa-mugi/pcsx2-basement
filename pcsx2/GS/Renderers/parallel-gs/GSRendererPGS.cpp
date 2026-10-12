@@ -768,8 +768,7 @@ void GSRendererPGS::VSync(u32 field, bool registers_written, bool refresh_frame)
 				break;
 		}
 	}
-	else if (GSConfig.PGSTVEmulation != PGS_TV_EMULATION_NONE &&
-			 GSConfig.LinearPresent != GSPostBilinearMode::BilinearSharp)
+	else if (GSConfig.PGSTVEmulation != PGS_TV_EMULATION_NONE)
 	{
 		// Straight passthrough of the UNORM image since we won't go through FSR.
 		wsi.set_backbuffer_format(BackbufferFormat::UNORM);
@@ -881,8 +880,7 @@ void GSRendererPGS::VSync(u32 field, bool registers_written, bool refresh_frame)
 		float vp_width = 0.0f;
 		float vp_height = 0.0f;
 
-		if (GSConfig.PGSPhosphorPrimaries != PGS_CRT_NONE || GSConfig.LinearPresent != GSPostBilinearMode::BilinearSharp || !vsync.image)
-			fsr_render_target.reset();
+		fsr_render_target.reset();
 
 		bool fsr_render_is_valid = frame_is_duped && bool(fsr_render_target);
 
@@ -1022,18 +1020,6 @@ void GSRendererPGS::VSync(u32 field, bool registers_written, bool refresh_frame)
 			analog_output_is_valid = true;
 		}
 
-		if (vsync.image && GSConfig.LinearPresent == GSPostBilinearMode::BilinearSharp)
-		{
-			if (!fsr_render_target || fsr_render_target->get_width() != output_width || fsr_render_target->get_height() != output_height)
-			{
-				auto fsr_info = ImageCreateInfo::render_target(output_width, output_height, VK_FORMAT_R8G8B8A8_UNORM);
-				fsr_info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
-				fsr_info.usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
-				fsr_info.misc |= IMAGE_MISC_MUTABLE_SRGB_BIT;
-				fsr_render_target = dev.create_image(fsr_info);
-				fsr_render_is_valid = false;
-			}
-		}
 
 		// No need to do the upscaling twice when duping frames.
 		if (vsync.image && GSConfig.PGSPhosphorPrimaries != PGS_CRT_NONE)

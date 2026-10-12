@@ -8336,21 +8336,27 @@ __ri void GSRendererHW::EmulateTextureSampler(const GSTextureCache::Target* rt, 
 	// use bilinear coverage. Vulkan mip reconstruction needs proper testing in games.
 	const bool vulkan_jinc = GSConfig.Interpolation == TextureInterpolation::Jinc &&
 		g_gs_device->GetRenderAPI() == RenderAPI::Vulkan;
+	const bool vulkan_linear_light = GSConfig.TextureLinearLight &&
+		g_gs_device->GetRenderAPI() == RenderAPI::Vulkan;
 	const bool mipmapped = m_conf.sampler.UseMipmapFiltering() && (trilinear_manual || trilinear_auto);
 	const bool complete = (trilinear_manual && mipmapped) ?
 		tex->HasCompleteMipChain(tex->m_texture->GetMipmapLevels()) : tex->HasCompleteBaseLayer();
 	m_conf.ps.interpolation = 0;
 	m_conf.ps.interpolation_mip = 0;
+	m_conf.ps.texture_linear_light = 0;
 	if (bilinear && !shader_emulated_sampler && !m_conf.ps.shuffle &&
 		!m_conf.ps.tex_is_fb && !m_conf.ps.sw_aniso &&
-		(vulkan_jinc || (!m_conf.sampler.triln && !trilinear_manual && !trilinear_auto)) &&
+		(vulkan_jinc || vulkan_linear_light || (!m_conf.sampler.triln && !trilinear_manual && !trilinear_auto)) &&
 		!tex->IsFromTarget() && !tex->m_from_target && complete && m_conf.tex == tex->m_texture)
 	{
 		m_conf.ps.interpolation = static_cast<u8>(GSConfig.Interpolation);
+		m_conf.ps.texture_linear_light = vulkan_linear_light;
+		if (vulkan_linear_light && m_conf.ps.interpolation == 0)
+			m_conf.ps.interpolation = 3;
 		if (m_conf.ps.interpolation != 0)
 		{
 			m_conf.sampler.biln = 0;
-			if (vulkan_jinc && mipmapped)
+			if ((vulkan_jinc || vulkan_linear_light) && mipmapped)
 			{
 				m_conf.ps.interpolation_mip = (trilinear == 3 || trilinear == 5) ? 2 : 1;
 				// Each colour tap samples one exact mip. The shader performs mip selection/blending.

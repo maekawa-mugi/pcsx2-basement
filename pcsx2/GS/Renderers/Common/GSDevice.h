@@ -758,7 +758,7 @@ struct alignas(16) GSHWDrawConfig
 				u32 adjs : 1;
 				u32 adjt : 1;
 				u32 ltf : 1;
-				u32 interpolation : 2; // 0 = bilinear, 1 = bicubic, 2 = Jinc
+				u32 interpolation : 2; // 0 = hardware bilinear, 1 = bicubic, 2 = Jinc, 3 = manual bilinear
 				// Shuffle and fbmask effect
 				u32 shuffle  : 1;
 				u32 shuffle_same : 1;
@@ -820,6 +820,7 @@ struct alignas(16) GSHWDrawConfig
 				
 				// ROVs
 				u32 interpolation_mip : 2; // Vulkan: 0 = base, 1 = nearest mip, 2 = linear mip
+				u32 texture_linear_light : 1;
 				u32 rov_color : 1;
 				PS_ROV_DEPTH rov_depth : 2;
 			};
@@ -1488,12 +1489,12 @@ private:
 
 protected:
 	static constexpr int NUM_INTERLACE_SHADERS = 5;
-	static constexpr float MAD_SENSITIVITY = 0.08f;
 	static constexpr int NUM_INTERLACE_SHADERS_PHOSPHOR = 6; // Backends that implement SupportsPhosphor().
-	static constexpr u32 MAX_POOLED_TARGETS = 300;
+	static constexpr float MAD_SENSITIVITY = 0.08f;
 	// Per-field retention of the phosphor history, applied once per displayed field (not per wall-clock time),
 	// so fast-forward/slow-motion don't change the look. Needs proper testing.
 	static constexpr float PHOSPHOR_RETENTION = 0.93f;
+	static constexpr u32 MAX_POOLED_TARGETS = 300;
 	static constexpr u32 MAX_TARGET_AGE = 20;
 	static constexpr u32 MAX_POOLED_TEXTURES = 300;
 	static constexpr u32 MAX_TEXTURE_AGE = 10;
@@ -1509,9 +1510,9 @@ protected:
 	GSTexture* m_weavebob = nullptr;
 	GSTexture* m_blend = nullptr;
 	GSTexture* m_mad = nullptr;
-	GSTexture* m_target_tmp = nullptr;
 	GSTexture* m_phosphor[2] = {}; // Ping-pong history for the Phosphor interlace mode.
 	int m_phosphor_idx = 0;
+	GSTexture* m_target_tmp = nullptr;
 	GSTexture* m_current = nullptr;
 	GSTexture* m_cas = nullptr;
 	GSTexture* m_colclip_rt = nullptr; ///< Temp hw colclip texture

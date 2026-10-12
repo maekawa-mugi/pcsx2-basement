@@ -116,6 +116,11 @@
      </item>
     </widget>
    </item>
+   <item row="7" column="0" colspan="2">
+    <widget class="QCheckBox" name="textureLinearLight">
+     <property name="text"><string>Linear Light Texture Interpolation (Vulkan, Experimental)</string></property>
+    </widget>
+   </item>
    <item row="4" column="0">
     <widget class="QLabel" name="anisotropicFilteringLabel">
      <property name="text">
@@ -273,6 +278,7 @@
   <tabstop>upscaleMultiplier</tabstop>
   <tabstop>textureFiltering</tabstop>
   <tabstop>textureInterpolation</tabstop>
+  <tabstop>textureLinearLight</tabstop>
   <tabstop>trilinearFiltering</tabstop>
   <tabstop>anisotropicFiltering</tabstop>
   <tabstop>dithering</tabstop>

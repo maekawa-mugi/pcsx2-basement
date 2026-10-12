@@ -778,6 +778,7 @@ private:
 
 	std::unique_ptr<GSTextureVK> m_null_texture;
 	std::unique_ptr<GSTextureVK> m_jinc_lut;
+	std::unique_ptr<GSTextureVK> m_texture_color_lut;
 	bool m_jinc_lut_linear = false;
 	VkFramebuffer m_null_framebuffer;
 
