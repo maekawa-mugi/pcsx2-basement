@@ -3,4 +3,4 @@
 
 /// Version number for GS and other shaders. Increment whenever any of the contents of the
 /// shaders change, to invalidate the cache.
-static constexpr u32 SHADER_CACHE_VERSION = 122; // Vulkan 4x4 Jinc AR and mip reconstruction
+static constexpr u32 SHADER_CACHE_VERSION = 123; // Phosphor interlace shader

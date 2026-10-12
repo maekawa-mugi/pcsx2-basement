@@ -304,6 +304,8 @@ enum class GSInterlaceMode : u8
 	BlendBFF,
 	AdaptiveTFF,
 	AdaptiveBFF,
+	PhosphorTFF, // Vulkan only, other backends fall back to weave.
+	PhosphorBFF,
 	Count
 };
 

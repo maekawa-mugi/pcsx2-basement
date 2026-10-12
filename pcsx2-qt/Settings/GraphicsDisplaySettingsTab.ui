@@ -288,6 +288,16 @@
       <property name="text">
        <string extracomment="Adaptive: deinterlacing method that should be translated.">Adaptive (Top Field First, Similar to Bob + Weave)</string>
       </property>
+     <item>
+      <property name="text">
+       <string extracomment="Phosphor: deinterlacing method that simulates the afterglow of a CRT. Vulkan renderer only; other renderers use Weave.">Phosphor (Top Field First, CRT Afterglow, Vulkan Only)</string>
+      </property>
+     </item>
+     <item>
+      <property name="text">
+       <string extracomment="Phosphor: deinterlacing method that simulates the afterglow of a CRT. Vulkan renderer only; other renderers use Weave.">Phosphor (Bottom Field First, CRT Afterglow, Vulkan Only)</string>
+      </property>
+     </item>
      </item>
      <item>
       <property name="text">

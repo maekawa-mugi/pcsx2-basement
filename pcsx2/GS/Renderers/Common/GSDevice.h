@@ -100,6 +100,7 @@ enum class ShaderInterlace
 	BLEND = 2,
 	MAD_BUFFER = 3,
 	MAD_RECONSTRUCT = 4,
+	PHOSPHOR_DECAY = 5, // Vulkan only (see GSDevice::SupportsPhosphor()).
 	Count
 };
 
@@ -1488,7 +1489,11 @@ private:
 protected:
 	static constexpr int NUM_INTERLACE_SHADERS = 5;
 	static constexpr float MAD_SENSITIVITY = 0.08f;
+	static constexpr int NUM_INTERLACE_SHADERS_PHOSPHOR = 6; // Backends that implement SupportsPhosphor().
 	static constexpr u32 MAX_POOLED_TARGETS = 300;
+	// Per-field retention of the phosphor history, applied once per displayed field (not per wall-clock time),
+	// so fast-forward/slow-motion don't change the look. Needs proper testing.
+	static constexpr float PHOSPHOR_RETENTION = 0.93f;
 	static constexpr u32 MAX_TARGET_AGE = 20;
 	static constexpr u32 MAX_POOLED_TEXTURES = 300;
 	static constexpr u32 MAX_TEXTURE_AGE = 10;
@@ -1505,6 +1510,8 @@ protected:
 	GSTexture* m_blend = nullptr;
 	GSTexture* m_mad = nullptr;
 	GSTexture* m_target_tmp = nullptr;
+	GSTexture* m_phosphor[2] = {}; // Ping-pong history for the Phosphor interlace mode.
+	int m_phosphor_idx = 0;
 	GSTexture* m_current = nullptr;
 	GSTexture* m_cas = nullptr;
 	GSTexture* m_colclip_rt = nullptr; ///< Temp hw colclip texture
@@ -1591,7 +1598,13 @@ public:
 
 	__fi GSTexture* GetCurrent() const { return m_current; }
 	__fi GSTexture* GetMAD() const { return m_mad; }
-	
+
+	/// Whether the Phosphor deinterlace mode is implemented by this backend. Others fall back to weave.
+	virtual bool SupportsPhosphor() const { return false; }
+
+	/// Drops the Phosphor history (blank output, mode change), so stale fields don't ghost into the next image.
+	void ResetPhosphorHistory();
+
 	void Recycle(GSTexture* t);
 
 	/// Returns true if it's an OpenGL-based renderer.

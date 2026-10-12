@@ -1162,7 +1162,9 @@ void GSgetMemoryStats(SmallStringBase& info)
 void GSgetTitleStats(std::string& info)
 {
 	static constexpr const char* deinterlace_modes[] = {
-		"Automatic", "None", "Weave tff", "Weave bff", "Bob tff", "Bob bff", "Blend tff", "Blend bff", "Adaptive tff", "Adaptive bff"};
+		"Automatic", "None", "Weave tff", "Weave bff", "Bob tff", "Bob bff", "Blend tff", "Blend bff", "Adaptive tff", "Adaptive bff",
+		"Phosphor tff", "Phosphor bff"};
+	static_assert(std::size(deinterlace_modes) == static_cast<size_t>(GSInterlaceMode::Count));
 
 	const char* api_name =
 #ifdef HAVE_PARALLEL_GS
@@ -1688,6 +1690,8 @@ BEGIN_HOTKEY_LIST(g_gs_hotkeys){"Screenshot", TRANSLATE_NOOP("Hotkeys", "Graphic
 				TRANSLATE_NOOP("Hotkeys", "Blend (Bottom Field First)"),
 				TRANSLATE_NOOP("Hotkeys", "Adaptive (Top Field First)"),
 				TRANSLATE_NOOP("Hotkeys", "Adaptive (Bottom Field First)"),
+				TRANSLATE_NOOP("Hotkeys", "Phosphor (Top Field First, Vulkan only)"),
+				TRANSLATE_NOOP("Hotkeys", "Phosphor (Bottom Field First, Vulkan only)"),
 			}};
 
 			const GSInterlaceMode new_mode = static_cast<GSInterlaceMode>(

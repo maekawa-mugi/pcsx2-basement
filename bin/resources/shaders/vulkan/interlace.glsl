@@ -224,4 +224,18 @@ void ps_main4()
 }
 #endif
 
+
+// Phosphor shader - fades the previous output (all lines).
+#ifdef ps_main5
+void ps_main5()
+{
+	// The new field is weaved on top afterwards, so this only has to age what is already on screen.
+	// Truncate to the 8-bit grid instead of rounding: with rounding, low values would stop decaying
+	// (e.g. 7 * 0.93 rounds back to 7) and leave a permanent faint ghost. Needs proper testing.
+	const float retention = ZrH.w; // passed from CPU, per-field retention
+	vec4 c = textureLod(samp0, v_tex, 0);
+	o_col0 = vec4(floor(c.rgb * 255.0f * retention) / 255.0f, c.a);
+}
+#endif
+
 #endif

@@ -145,6 +145,9 @@ bool GSRenderer::Merge(int field)
 				g_gs_device->ClearRenderTarget(mad_tex, 0);
 				mad_tex = nullptr;
 			}
+
+			// Same for the Phosphor history, otherwise the last image would fade out over the next frames.
+			g_gs_device->ResetPhosphorHistory();
 		}
 
 		// Both circuits off still outputs BGCOLOR on real hardware.

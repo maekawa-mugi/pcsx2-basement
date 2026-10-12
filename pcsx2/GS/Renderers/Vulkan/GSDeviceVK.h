@@ -436,7 +436,7 @@ private:
 	std::vector<VkPipeline> m_convert;
 	std::array<VkPipeline, static_cast<int>(PresentShader::Count)> m_present{};
 	std::array<VkPipeline, 2> m_merge{};
-	std::array<VkPipeline, NUM_INTERLACE_SHADERS> m_interlace{};
+	std::array<VkPipeline, NUM_INTERLACE_SHADERS_PHOSPHOR> m_interlace{};
 	VkPipeline m_colclip_setup_pipelines[2][2] = {}; // [depth][feedback_loop]
 	VkPipeline m_colclip_finish_pipelines[2][2] = {}; // [depth][feedback_loop]
 	VkRenderPass m_primid_image_setup_render_passes[2][2] = {}; // [depth][clear]
@@ -486,6 +486,7 @@ private:
 		const GSRegEXTBUF& EXTBUF, u32 c, const Filter filter) final;
 	void DoInterlace(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect,
 		ShaderInterlace shader, Filter filter, const InterlaceConstantBuffer& cb) final;
+	bool SupportsPhosphor() const final { return true; }
 	void DoShadeBoost(GSTexture* sTex, GSTexture* dTex, const float params[4]) final;
 	void DoFXAA(GSTexture* sTex, GSTexture* dTex) final;
 

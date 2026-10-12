@@ -251,7 +251,7 @@ GSDevice::GSDevice()
 GSDevice::~GSDevice()
 {
 	// should've been cleaned up in Destroy()
-	pxAssert(m_pool[0].empty() && m_pool[1].empty() && !m_merge && !m_weavebob && !m_blend && !m_mad && !m_target_tmp && !m_cas);
+	pxAssert(m_pool[0].empty() && m_pool[1].empty() && !m_merge && !m_weavebob && !m_blend && !m_mad && !m_phosphor[0] && !m_phosphor[1] && !m_target_tmp && !m_cas);
 }
 
 const char* GSDevice::RenderAPIToString(RenderAPI api)
@@ -1002,6 +1002,8 @@ void GSDevice::ClearCurrent()
 	delete m_weavebob;
 	delete m_blend;
 	delete m_mad;
+	delete m_phosphor[0];
+	delete m_phosphor[1];
 	delete m_target_tmp;
 	delete m_cas;
 
@@ -1009,6 +1011,9 @@ void GSDevice::ClearCurrent()
 	m_weavebob = nullptr;
 	m_blend = nullptr;
 	m_mad = nullptr;
+	m_phosphor[0] = nullptr;
+	m_phosphor[1] = nullptr;
+	m_phosphor_idx = 0;
 	m_target_tmp = nullptr;
 	m_cas = nullptr;
 }
@@ -1021,13 +1026,41 @@ void GSDevice::Merge(GSTexture* sTex[3], GSVector4* sRect, GSVector4* dRect, con
 	m_current = m_merge;
 }
 
+void GSDevice::ResetPhosphorHistory()
+{
+	if (m_current == m_phosphor[0] || m_current == m_phosphor[1])
+		m_current = nullptr;
+
+	delete m_phosphor[0];
+	delete m_phosphor[1];
+	m_phosphor[0] = nullptr;
+	m_phosphor[1] = nullptr;
+	m_phosphor_idx = 0;
+}
+
 void GSDevice::Interlace(const GSVector2i& ds, int field, int mode, float yoffset)
 {
 	static int bufIdx = 0;
 	float offset = yoffset * static_cast<float>(field);
 	offset = GSConfig.DisableInterlaceOffset ? 0.0f : offset;
 
-	auto do_interlace = [this](GSTexture* sTex, GSTexture* dTex, ShaderInterlace shader, Filter filter, float yoffset, int bufIdx) {
+	constexpr int PHOSPHOR_MODE = 4;
+	if (mode == PHOSPHOR_MODE && !SupportsPhosphor())
+	{
+		static bool warned = false;
+		if (!warned)
+		{
+			warned = true;
+			Console.Warning("GS: Phosphor deinterlacing is only available with the Vulkan renderer, using weave instead.");
+		}
+		mode = 0;
+	}
+
+	// Leaving Phosphor (e.g. Automatic switching modes) must not leave an old image behind for the next time.
+	if (mode != PHOSPHOR_MODE && (m_phosphor[0] || m_phosphor[1]))
+		ResetPhosphorHistory();
+
+	auto do_interlace = [this](GSTexture* sTex, GSTexture* dTex, ShaderInterlace shader, Filter filter, float yoffset, int bufIdx, float param_w = MAD_SENSITIVITY) {
 		const GSVector2i ds_i = dTex->GetSize();
 		const GSVector2 ds = GSVector2(static_cast<float>(ds_i.x), static_cast<float>(ds_i.y));
 
@@ -1045,7 +1078,7 @@ void GSDevice::Interlace(const GSVector2i& ds, int field, int mode, float yoffse
 		}
 
 		const InterlaceConstantBuffer cb = {
-			GSVector4(static_cast<float>(bufIdx), 1.0f / ds.y, ds.y, MAD_SENSITIVITY)
+			GSVector4(static_cast<float>(bufIdx), 1.0f / ds.y, ds.y, param_w)
 		};
 
 		GL_PUSH("DoInterlace %dx%d Shader:%d Filter:%d", ds_i.x, ds_i.y, static_cast<int>(shader), filter);
@@ -1083,6 +1116,26 @@ void GSDevice::Interlace(const GSVector2i& ds, int field, int mode, float yoffse
 			do_interlace(m_mad, m_weavebob, ShaderInterlace::MAD_RECONSTRUCT, Nearest, 0, bufIdx);
 			m_current = m_weavebob;
 			break;
+		case PHOSPHOR_MODE: // Phosphor persistence (decaying weave), needs proper testing.
+		{
+			// Both history buffers must survive between fields, so never discard them on resize.
+			if (!ResizeRenderTarget(&m_phosphor[0], ds.x, ds.y, true, false) ||
+				!ResizeRenderTarget(&m_phosphor[1], ds.x, ds.y, true, false))
+			{
+				m_current = m_merge;
+				break;
+			}
+
+			GSTexture* prev = m_phosphor[m_phosphor_idx];
+			GSTexture* next = m_phosphor[m_phosphor_idx ^ 1];
+			m_phosphor_idx ^= 1;
+
+			// Fade everything shown so far, then write the new field's lines at full strength on top.
+			do_interlace(prev, next, ShaderInterlace::PHOSPHOR_DECAY, Nearest, 0, 0, PHOSPHOR_RETENTION);
+			do_interlace(m_merge, next, ShaderInterlace::WEAVE, Nearest, offset, field);
+			m_current = next;
+			break;
+		}
 		default:
 			m_current = m_merge;
 			break;

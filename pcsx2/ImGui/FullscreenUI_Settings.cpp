@@ -2907,6 +2907,8 @@ void FullscreenUI::DrawGraphicsSettingsPage(SettingsInterface* bsi, bool show_ad
 	};
 	static const char* s_resolution_options[] = {
 		FSUI_NSTR("Native (PS2)"),
+		FSUI_NSTR("Phosphor (Top Field First, Vulkan Only)"),
+		FSUI_NSTR("Phosphor (Bottom Field First, Vulkan Only)"),
 		FSUI_NSTR("2x Native (~720px/HD)"),
 		FSUI_NSTR("3x Native (~1080px/FHD)"),
 		FSUI_NSTR("4x Native (~1440px/QHD)"),
@@ -6630,6 +6632,8 @@ TRANSLATE_NOOP("FullscreenUI", "12x Native (~4320px/8K UHD)");
 TRANSLATE_NOOP("FullscreenUI", "13x Native (~4680px)");
 TRANSLATE_NOOP("FullscreenUI", "14x Native (~5040px)");
 TRANSLATE_NOOP("FullscreenUI", "15x Native (~5400px)");
+TRANSLATE_NOOP("FullscreenUI", "Phosphor (Top Field First, Vulkan Only)");
+TRANSLATE_NOOP("FullscreenUI", "Phosphor (Bottom Field First, Vulkan Only)");
 TRANSLATE_NOOP("FullscreenUI", "16x Native (~5760px)");
 TRANSLATE_NOOP("FullscreenUI", "17x Native (~6120px)");
 TRANSLATE_NOOP("FullscreenUI", "18x Native (~6480px/12K UHD)");
