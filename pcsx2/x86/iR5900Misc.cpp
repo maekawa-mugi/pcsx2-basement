@@ -173,7 +173,16 @@ namespace R5900
 			////////////////////////////////////////////////////
 			void recUnknown()
 			{
-				// TODO : Unknown ops should throw an exception.
+				if (EmuConfig.Cpu.EnableExperimentalEETLB && cpuEEIsLLSCFamilyOpcode(cpuRegs.code))
+				{
+					// Same shape as recSYSCALL: the interpreter helper raises the exception and the block ends
+					// with an indirect branch, since execution continues at the exception vector.
+					recCall(R5900::Interpreter::OpcodeImpl::Unknown);
+					g_branch = 2;
+					return;
+				}
+
+				// TODO : Other unknown ops should throw an exception too.
 				Console.Error("EE: Unrecognized op %x", cpuRegs.code);
 			}
 

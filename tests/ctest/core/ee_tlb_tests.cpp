@@ -108,6 +108,72 @@ TEST(EEFullTLB, SyscallRaisesTheArchitecturalGeneralException)
 	EmuConfig.Cpu.EnableExperimentalEETLB = previous_full_tlb;
 }
 
+TEST(EEFullTLB, LLSCFamilyRaisesReservedInstruction)
+{
+	// R5900 has no LL/LLD/SC/SCD. Linux userland relies on the Reserved Instruction exception so
+	// the kernel can emulate them (needs proper testing with a real PS2 Linux userland).
+	LiveEEStateGuard guard;
+	const bool previous_full_tlb = EmuConfig.Cpu.EnableExperimentalEETLB;
+	EmuConfig.Cpu.EnableExperimentalEETLB = true;
+
+	for (const u32 code : {0xc0e30000U, 0xd0e30000U, 0xe0e30000U, 0xf0e30000U}) // ll, lld, sc, scd
+	{
+		ASSERT_TRUE(cpuEEIsLLSCFamilyOpcode(code));
+		std::memset(&cpuRegs, 0, sizeof(cpuRegs));
+		cpuRegs.pc = 0x00400004;
+		cpuRegs.code = code;
+		cpuRegs.CP0.n.Status.val = STATUS_USER;
+		cpuRegs.CP0.n.Cause = 0x0000ac00;
+		cpuRegs.GPR.n.v1.UL[0] = 0x1234;
+		R5900::Interpreter::OpcodeImpl::Unknown();
+
+		EXPECT_EQ(cpuRegs.CP0.n.Cause & EXC_CODE__MASK, EXC_CODE_Ri);
+		EXPECT_EQ(cpuRegs.CP0.n.EPC, 0x00400000U);
+		EXPECT_EQ(cpuRegs.pc, 0x80000180U);
+		EXPECT_NE(cpuRegs.CP0.n.Status.val & STATUS_EXL, 0U);
+		EXPECT_EQ(cpuRegs.GPR.n.v1.UL[0], 0x1234U); // the instruction must not touch GPRs
+	}
+
+	// In a branch delay slot EPC points at the branch and Cause.BD is set.
+	std::memset(&cpuRegs, 0, sizeof(cpuRegs));
+	cpuRegs.pc = 0x00400008;
+	cpuRegs.branch = 1;
+	cpuRegs.code = 0xe0e30000U;
+	R5900::Interpreter::OpcodeImpl::Unknown();
+	EXPECT_EQ(cpuRegs.CP0.n.EPC, 0x00400000U);
+	EXPECT_NE(cpuRegs.CP0.n.Cause & (1U << 31), 0U);
+
+	EmuConfig.Cpu.EnableExperimentalEETLB = previous_full_tlb;
+}
+
+TEST(EEFullTLB, OtherUnknownOpcodesAndNonTLBModeKeepNoOpBehaviour)
+{
+	LiveEEStateGuard guard;
+	const bool previous_full_tlb = EmuConfig.Cpu.EnableExperimentalEETLB;
+
+	EXPECT_FALSE(cpuEEIsLLSCFamilyOpcode(0x4c000000U)); // COP3
+	EXPECT_FALSE(cpuEEIsLLSCFamilyOpcode(0xc4e30000U)); // lwc1 is a real instruction
+	EXPECT_FALSE(cpuEEIsLLSCFamilyOpcode(0xfc000000U)); // sd
+
+	// Outside Full TLB mode LL/SC stays a no-op, as before.
+	EmuConfig.Cpu.EnableExperimentalEETLB = false;
+	cpuRegs.pc = 0x00400004;
+	cpuRegs.code = 0xc0e30000U;
+	cpuRegs.CP0.n.Cause = 0x0000ac00;
+	R5900::Interpreter::OpcodeImpl::Unknown();
+	EXPECT_EQ(cpuRegs.pc, 0x00400004U);
+	EXPECT_EQ(cpuRegs.CP0.n.Cause, 0x0000ac00U);
+
+	// A non LL/SC unknown opcode stays a no-op even in Full TLB mode.
+	EmuConfig.Cpu.EnableExperimentalEETLB = true;
+	cpuRegs.code = 0x4c000000U;
+	R5900::Interpreter::OpcodeImpl::Unknown();
+	EXPECT_EQ(cpuRegs.pc, 0x00400004U);
+	EXPECT_EQ(cpuRegs.CP0.n.Cause, 0x0000ac00U);
+
+	EmuConfig.Cpu.EnableExperimentalEETLB = previous_full_tlb;
+}
+
 TEST(EEException, SynchronousExceptionPreservesPendingCauseBitsAndPreciseEPC)
 {
 	constexpr u32 cause = 0x0000ff08;

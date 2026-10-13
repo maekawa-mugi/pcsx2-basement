@@ -359,6 +359,14 @@ namespace R5900
 
 			void Unknown()
 			{
+				// Only the LL/SC family is turned into a Reserved Instruction exception, and only in Full TLB
+				// mode, so other unknown opcodes keep their historical no-op behaviour. Needs proper testing.
+				if (EmuConfig.Cpu.EnableExperimentalEETLB && cpuEEIsLLSCFamilyOpcode(cpuRegs.code))
+				{
+					cpuEESynchronousException(EXC_CODE_Ri, cpuRegs.pc - 4, cpuRegs.branch != 0);
+					return;
+				}
+
 				CPU_LOG("%8.8lx: Unknown opcode called", cpuRegs.pc);
 			}
 

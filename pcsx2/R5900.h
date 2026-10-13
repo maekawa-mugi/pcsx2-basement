@@ -422,6 +422,14 @@ namespace EEMmu
 extern bool cpuEETlbException(
 	EEMmu::Fault fault, EEMmu::AccessType access_type, u32 vaddr, u32 fault_pc, bool branch_delay);
 extern void cpuEESynchronousException(u32 cause_code, u32 fault_pc, bool branch_delay);
+
+// LL/LLD/SC/SCD (primary opcodes 0x30/0x34/0x38/0x3c) do not exist on the R5900. Real hardware raises a
+// Reserved Instruction exception, and Linux relies on that to emulate them in the kernel.
+constexpr bool cpuEEIsLLSCFamilyOpcode(u32 code)
+{
+	const u32 op = code >> 26;
+	return op == 0x30 || op == 0x34 || op == 0x38 || op == 0x3c;
+}
 extern void cpuTestHwInts();
 extern void cpuClearInt(uint n);
 extern void GoemonPreloadTlb();
