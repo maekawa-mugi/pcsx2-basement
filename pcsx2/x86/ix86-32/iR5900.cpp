@@ -1057,19 +1057,13 @@ static void recExecuteCrossPageBranchInterpreter(u32 branch_pc)
 
 static void recAdvanceFullTLBRandomInline()
 {
-	// Wired is part of the Full TLB block context. MTC0 Wired ends its block, so valid
-	// Random values can use a branchless decrement/wrap while retaining exact semantics.
-	const u32 wired = cpuRegs.CP0.n.Wired;
-	if (wired > 47)
-	{
-		xMOV(ptr32[&cpuRegs.CP0.n.Random], FULL_TLB_RANDOM_FALLBACK);
-		return;
-	}
-
+	// Wired is read at run time: it is not part of the block guard, so a block compiled before a
+	// Wired write must still wrap at the new value. A Wired above 47 always compares greater, which
+	// gives the interpreter's fallback of 47. Needs proper testing with Wired changes after compile.
 	const xRegister32 random(_allocX86reg(X86TYPE_TEMP, 0, MODE_CALLEESAVED));
 	xMOV(random, ptr32[&cpuRegs.CP0.n.Random]);
 	xDEC(random);
-	xCMP(random, wired);
+	xCMP(random, ptr32[&cpuRegs.CP0.n.Wired]);
 	xCMOVL(random, ptr32[&FULL_TLB_RANDOM_FALLBACK]);
 	xMOV(ptr32[&cpuRegs.CP0.n.Random], random);
 	_freeX86reg(random.GetId());
@@ -2370,7 +2364,7 @@ static u32 recFullTLBContextGuard(FullTLBContextGuard* guard)
 {
 	u32 reason;
 	const u32 asid = cpuRegs.CP0.n.EntryHi & 0xff;
-	if ((cpuRegs.CP0.n.Config & 0x7) != guard->config_key)
+	if ((cpuRegs.CP0.n.Config & 0x10007) != guard->config_key)
 		reason = FullTLBStats::ReasonConfig;
 	else if (EEMmu::TranslationStatusKey(cpuRegs.CP0.n.Status.val) != guard->status_key)
 		reason = FullTLBStats::ReasonStatus;
@@ -2458,7 +2452,7 @@ static void memory_protect_recompiled_code(u32 startpc, u32 size)
 		};
 
 		const u32 status_key = cpuRegs.CP0.n.Status.val & 0x1e;
-		const u32 config_key = cpuRegs.CP0.n.Config & 0x7;
+		const u32 config_key = cpuRegs.CP0.n.Config & 0x10007;
 		const u32 asid_key = cpuRegs.CP0.n.EntryHi & 0xff;
 		FullTLBContextGuard* const context_guard = &s_full_tlb_context_guards.emplace_back(FullTLBContextGuard{
 			status_key, config_key, asid_key,
@@ -2513,7 +2507,7 @@ static void memory_protect_recompiled_code(u32 startpc, u32 size)
 		xCMP(eax, ptr32[arg2reg + static_cast<sptr>(offsetof(FullTLBContextGuard, raw_status))]);
 		xForwardJNE8 mapping_changed_status;
 		xMOV(eax, ptr32[&cpuRegs.CP0.n.Config]);
-		xAND(eax, 0x7);
+		xAND(eax, 0x10007);
 		xCMP(eax, ptr32[arg2reg + static_cast<sptr>(offsetof(FullTLBContextGuard, config_key))]);
 		xForwardJNE8 mapping_changed_config;
 		xMOV(eax, ptr32[&cpuRegs.CP0.n.EntryHi]);

@@ -49,7 +49,7 @@ namespace
 
 	template <size_t Size>
 	EEMmu::TranslationContext MakeContext(const std::array<tlbs, Size>& entries, u32 status = 0,
-		u32 config = 3, u8 asid = 0)
+		u32 config = 0x10003, u8 asid = 0)
 	{
 		return {status, config, asid, entries.data(), entries.size()};
 	}
@@ -684,7 +684,7 @@ TEST(EETLBInstructions, WriteAndReadbackNormalizeArchitecturalFields)
 {
 	constexpr u32 page_mask = 0x003U << 13;
 	constexpr u32 entry_hi = 0x2000605a;
-	constexpr u32 entry_lo0 = 0x80000000U | (0x12347U << 6) | (1U << 3) | 0x7;
+	constexpr u32 entry_lo0 = (0x12347U << 6) | (1U << 3) | 0x7;
 	constexpr u32 entry_lo1 = (0x23457U << 6) | (6U << 3) | 0x7;
 	const tlbs entry = EEMmu::BuildTLBEntry(page_mask, entry_hi, entry_lo0, entry_lo1);
 
@@ -693,7 +693,7 @@ TEST(EETLBInstructions, WriteAndReadbackNormalizeArchitecturalFields)
 	EXPECT_EQ(entry.EntryLo0.PFN & entry.Mask(), 0U);
 	EXPECT_EQ(entry.EntryLo1.PFN & entry.Mask(), 0U);
 	EXPECT_TRUE(entry.isGlobal());
-	EXPECT_TRUE(entry.isSPR());
+	EXPECT_FALSE(entry.isSPR());
 	EXPECT_EQ(entry.EntryLo0.C, 1U);
 	EXPECT_EQ(entry.EntryLo1.C, 6U);
 
@@ -705,9 +705,27 @@ TEST(EETLBInstructions, WriteAndReadbackNormalizeArchitecturalFields)
 	EXPECT_EQ(read_page_mask, page_mask);
 	EXPECT_EQ(read_entry_hi & 0xff, entry_hi & 0xff);
 	EXPECT_EQ(read_entry_hi & (0x003U << 13), 0U);
-	EXPECT_NE(read_entry_lo0 & 0x80000000U, 0U);
+	EXPECT_EQ(read_entry_lo0 & 0x80000000U, 0U);
 	EXPECT_EQ(read_entry_lo0 & 1, 1U);
 	EXPECT_EQ(read_entry_lo1 & 1, 1U);
+}
+
+TEST(EETLBInstructions, ScratchpadEntryForcesZeroPageMaskAndReadsUncached)
+{
+	const tlbs entry = EEMmu::BuildTLBEntry(0x003U << 13, 0x70000000,
+		0x80000000U | (0x12347U << 6) | (3U << 3) | 0x7, (0x23457U << 6) | (3U << 3) | 0x7);
+	EXPECT_TRUE(entry.isSPR());
+	EXPECT_EQ(entry.Mask(), 0U);
+
+	u32 page_mask;
+	u32 entry_hi;
+	u32 entry_lo0;
+	u32 entry_lo1;
+	EEMmu::ReadTLBEntry(entry, &page_mask, &entry_hi, &entry_lo0, &entry_lo1);
+	EXPECT_EQ(page_mask, 0U);
+	EXPECT_NE(entry_lo0 & 0x80000000U, 0U);
+	EXPECT_EQ((entry_lo0 >> 3) & 7, 2U);
+	EXPECT_EQ((entry_lo1 >> 3) & 7, 2U);
 }
 
 TEST(EETLBInstructions, GlobalRequiresBothEntryLoBits)
@@ -770,4 +788,17 @@ TEST(EETLBInstructions, TranslationGenerationInvalidatesOnlyChangedEntry)
 	const u32 entry_zero_before_full_reset = EEMmu::GetTLBEntryGeneration(0);
 	EEMmu::InvalidateTranslations();
 	EXPECT_NE(EEMmu::GetTLBEntryGeneration(0), entry_zero_before_full_reset);
+}
+
+TEST(EETLBTranslator, DataCacheDisableForcesUncachedMode)
+{
+	const std::array entries = {MakeEntry(0x10000000, 0x01000000, 0x01001000, 0, 0, 3)};
+	constexpr u32 config_k0_cached = 3;
+	const EEMmu::TranslationContext off = MakeContext(entries, 0, config_k0_cached);
+	EXPECT_EQ(EEMmu::TranslateAddress(off, 0x80001000, EEMmu::AccessType::Load).cache_mode, 2U);
+	EXPECT_EQ(EEMmu::TranslateAddress(off, 0x10000020, EEMmu::AccessType::Load).cache_mode, 2U);
+
+	const EEMmu::TranslationContext on = MakeContext(entries, 0, config_k0_cached | (1U << 16));
+	EXPECT_EQ(EEMmu::TranslateAddress(on, 0x80001000, EEMmu::AccessType::Load).cache_mode, 3U);
+	EXPECT_EQ(EEMmu::TranslateAddress(on, 0x10000020, EEMmu::AccessType::Load).cache_mode, 3U);
 }

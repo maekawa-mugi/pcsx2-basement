@@ -388,6 +388,8 @@ void WriteTLB(int i)
 	}
 
 	MapTLB(tlb[i], i);
+	// Keep the Full TLB lookup table coherent if the setting is toggled without a reset.
+	EEMmu::InvalidateTLBEntry(i);
 }
 
 namespace R5900

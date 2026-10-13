@@ -180,12 +180,12 @@ static bool IsFullTLBDirectSegmentAddress(u32 address)
 	if (address >= 0xa0000000 && address < 0xc0000000)
 		return true;
 	return address >= 0x80000000 && address < 0xa0000000 &&
-	       (!CHECK_CACHE || (cpuRegs.CP0.n.Config & 0x7) != 3);
+	       (!CHECK_CACHE || (cpuRegs.CP0.n.Config & 0x10007) != 0x10003);
 }
 
 static bool CanUseFullTLBKseg0FastPath()
 {
-	return !CHECK_CACHE || (cpuRegs.CP0.n.Config & 0x7) != 3;
+	return !CHECK_CACHE || (cpuRegs.CP0.n.Config & 0x10007) != 0x10003;
 }
 
 static bool CanUseFullTLBInlineMemoryPath()

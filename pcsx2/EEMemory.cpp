@@ -21,7 +21,7 @@ namespace EEMemory
 		u32 translation_generation = 0;
 		u32 tlb_entry_index = RECOMPILER_TRANSLATION_NO_TLB_ENTRY;
 		u32 status_key = 0;
-		u8 config_key = 0;
+		u32 config_key = 0;
 		u8 asid = 0;
 		EEMmu::AccessType access_type = EEMmu::AccessType::Fetch;
 		EEMmu::TranslationResult translation;
@@ -372,7 +372,7 @@ namespace EEMemory
 		const u32 virtual_page = vaddr & ~vtlb_private::VTLB_PAGE_MASK;
 		const u32 page_offset = vaddr & vtlb_private::VTLB_PAGE_MASK;
 		const u32 status_key = cpuRegs.CP0.n.Status.val & 0x1e;
-		const u8 config_key = cpuRegs.CP0.n.Config & 0x7;
+		const u32 config_key = cpuRegs.CP0.n.Config & 0x10007;
 		const u8 asid = static_cast<u8>(cpuRegs.CP0.n.EntryHi);
 		const size_t cache_index = ((virtual_page >> vtlb_private::VTLB_PAGE_BITS) ^
 									   (static_cast<u32>(asid) << 1) ^ (static_cast<u32>(access_type) << 6)) &
@@ -699,7 +699,7 @@ namespace EEMemory
 		const u32 status_key = EEMmu::TranslationStatusKey(cpuRegs.CP0.n.Status.val);
 		const u32 mode_key = high_segment ? (status_key | 0x80) : (status_key & (1U << 2));
 		return mode_key |
-		       ((cpuRegs.CP0.n.Config & 0x7) << 8) |
+		       ((cpuRegs.CP0.n.Config & 0x7) << 8) | ((cpuRegs.CP0.n.Config >> 16 & 1) << 11) |
 		       ((cpuRegs.CP0.n.EntryHi & 0xff) << 16);
 	}
 

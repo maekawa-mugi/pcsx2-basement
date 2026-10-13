@@ -27,6 +27,7 @@ namespace EEMmu
 	static constexpr u32 STATUS_ERL = 0x04;
 	static constexpr u32 STATUS_EXL = 0x02;
 	static constexpr u32 STATUS_BEV = 1U << 22;
+	static constexpr u32 CONFIG_DCE = 1U << 16;
 	static constexpr u32 CAUSE_EXCCODE_MASK = 0x7c;
 	static constexpr u32 CAUSE_BD = 1U << 31;
 	static constexpr u32 ENTRY_VPN2_MASK = 0x7ffff;
@@ -221,6 +222,12 @@ namespace EEMmu
 		s_fast_lookup_dirty = ALL_TLB_ENTRIES;
 	}
 
+	// Config.DCE = 0 disables the data cache regardless of K0 and the TLB C field; needs proper testing.
+	static u8 ApplyDataCacheEnable(u8 cache_mode, u32 config)
+	{
+		return (cache_mode == 3 && (config & CONFIG_DCE) == 0) ? 2 : cache_mode;
+	}
+
 	static TranslationResult MakeDirectResult(u32 paddr, u8 cache_mode, Warning warnings)
 	{
 		TranslationResult result;
@@ -290,7 +297,7 @@ namespace EEMmu
 			if (erl && vaddr < 0x80000000)
 				return MakeDirectResult(vaddr, 2, warnings);
 			if (vaddr >= 0x80000000 && vaddr < 0xa0000000)
-				return MakeDirectResult(vaddr - 0x80000000, context.config & 0x7, warnings);
+				return MakeDirectResult(vaddr - 0x80000000, ApplyDataCacheEnable(context.config & 0x7, context.config), warnings);
 			if (vaddr >= 0xa0000000 && vaddr < 0xc0000000)
 				return MakeDirectResult(vaddr - 0xa0000000, 2, warnings);
 		}
@@ -381,7 +388,7 @@ namespace EEMmu
 		const u32 page_offset_mask = (mask << 12) | 0xfff;
 		const u32 odd_page_bit = page_offset_mask + 1;
 		const EntryLo_t& entry_lo = (vaddr & odd_page_bit) ? matched_entry->EntryLo1 : matched_entry->EntryLo0;
-		result.cache_mode = entry_lo.C;
+		result.cache_mode = ApplyDataCacheEnable(entry_lo.C, context.config);
 
 		if (!entry_lo.V)
 		{
@@ -503,6 +510,9 @@ namespace EEMmu
 		entry.EntryHi.UL = entry_hi & ~0x1f00U;
 		entry.EntryLo0.UL = entry_lo0 & ~0x7c000000U;
 		entry.EntryLo1.UL = entry_lo1 & ~0xfc000000U;
+		// A scratchpad entry (S=1) is always written with PageMask = 0; needs proper testing on hardware.
+		if (entry.isSPR())
+			entry.PageMask.UL = 0;
 
 		const u32 mask = entry.Mask();
 		entry.EntryHi.VPN2 &= ~mask;
@@ -521,6 +531,13 @@ namespace EEMmu
 		*entry_hi = entry.EntryHi.UL & ~((entry.Mask() << 13) | 0x1f00U);
 		*entry_lo0 = (entry.EntryLo0.UL & ~0x7c000001U) | global;
 		*entry_lo1 = (entry.EntryLo1.UL & ~0xfc000001U) | global;
+		if (entry.isSPR())
+		{
+			// C of a scratchpad entry is ignored on write and reads back as uncached (2).
+			constexpr u32 C_MASK = 7U << 3;
+			*entry_lo0 = (*entry_lo0 & ~C_MASK) | (2U << 3);
+			*entry_lo1 = (*entry_lo1 & ~C_MASK) | (2U << 3);
+		}
 	}
 
 	ProbeResult ProbeTLB(const tlbs* entries, size_t entry_count, u32 entry_hi)
