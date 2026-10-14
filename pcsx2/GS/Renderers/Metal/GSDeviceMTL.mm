@@ -750,6 +750,15 @@ void GSDeviceMTL::DoShadeBoost(GSTexture* sTex, GSTexture* dTex, const float par
 	RenderCopy(sTex, m_shadeboost_pipeline, GSVector4i(0, 0, dTex->GetSize().x, dTex->GetSize().y));
 }
 
+void GSDeviceMTL::DoDeband(GSTexture* sTex, GSTexture* dTex, const float params[8])
+{
+	BeginRenderPass(@"Deband", dTex, MTLLoadActionDontCare, nullptr, MTLLoadActionDontCare);
+	[m_current_render.encoder setFragmentBytes:params
+	                                    length:sizeof(float) * 8
+	                                   atIndex:GSMTLBufferIndexUniforms];
+	RenderCopy(sTex, m_deband_pipeline, GSVector4i(0, 0, dTex->GetSize().x, dTex->GetSize().y));
+}
+
 bool GSDeviceMTL::DoCAS(GSTexture* sTex, GSTexture* dTex, bool sharpen_only, const std::array<u32, NUM_CAS_CONSTANTS>& constants)
 { @autoreleasepool {
 	static_assert(sizeof(constants) == sizeof(GSMTLCASPSUniform));
@@ -1221,6 +1230,7 @@ bool GSDeviceMTL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 	m_colclip_resolve_pipeline = MakePipeline(pdesc, fs_triangle, LoadShader(@"ps_colclip_resolve"), @"ColorClip Resolve");
 	m_fxaa_pipeline = MakePipeline(pdesc, fs_triangle, LoadShader(@"ps_fxaa"), @"fxaa");
 	m_shadeboost_pipeline = MakePipeline(pdesc, fs_triangle, LoadShader(@"ps_shadeboost"), @"shadeboost");
+	m_deband_pipeline = MakePipeline(pdesc, fs_triangle, LoadShader(@"ps_deband"), @"deband");
 	m_clut_pipeline[0] = MakePipeline(pdesc, fs_triangle, LoadShader(@"ps_convert_clut_4"), @"4-bit CLUT Update");
 	m_clut_pipeline[1] = MakePipeline(pdesc, fs_triangle, LoadShader(@"ps_convert_clut_8"), @"8-bit CLUT Update");
 	pdesc.colorAttachments[0].pixelFormat = ConvertPixelFormat(GSTexture::Format::ColorClip);

@@ -49,3 +49,16 @@ repository's CMake and Visual Studio build definitions compile these sources,
 including locally modified paraLLEl-GS sources. Follow the
 [PCSX2 build guide](https://pcsx2.net/docs/advanced/building/) for the platform's
 compiler and dependency setup, and use an out-of-tree directory for CMake.
+
+## Deband post-processing filter
+
+- Files: `bin/resources/shaders/vulkan/deband.glsl`,
+  `bin/resources/shaders/opengl/deband.glsl`,
+  `bin/resources/shaders/dx11/deband.fx` and the `ps_deband` function in
+  `pcsx2/GS/Renderers/Metal/convert.metal`
+- Algorithm: re-implementation of `pl_shader_deband()` from libplacebo
+  (<https://code.videolan.org/videolan/libplacebo>), Copyright (C) the
+  libplacebo authors, licensed under LGPL-2.1-or-later
+- Random number generator: IbukiHash by Andante, marked CC0 1.0
+  (<https://creativecommons.org/publicdomain/zero/1.0/>);
+  <https://gist.github.com/andanteyk/7581e025cc7e9af796b10032c61015a8>

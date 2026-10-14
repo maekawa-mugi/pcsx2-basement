@@ -1513,6 +1513,7 @@ protected:
 	GSTexture* m_phosphor[2] = {}; // Ping-pong history for the Phosphor interlace mode.
 	int m_phosphor_idx = 0;
 	GSTexture* m_target_tmp = nullptr;
+	u32 m_deband_frame = 0;
 	GSTexture* m_current = nullptr;
 	GSTexture* m_cas = nullptr;
 	GSTexture* m_colclip_rt = nullptr; ///< Temp hw colclip texture
@@ -1526,6 +1527,9 @@ protected:
 	virtual void DoInterlace(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect, ShaderInterlace shader, Filter filter, const InterlaceConstantBuffer& cb) = 0;
 	virtual void DoFXAA(GSTexture* sTex, GSTexture* dTex) = 0;
 	virtual void DoShadeBoost(GSTexture* sTex, GSTexture* dTex, const float params[4]) = 0;
+
+	/// Applies the debanding filter. params: {threshold, radius, grain, iterations, frame, 0, 0, 0}.
+	virtual void DoDeband(GSTexture* sTex, GSTexture* dTex, const float params[8]) = 0;
 
 	/// Resolves CAS shader includes for the specified source.
 	static bool GetCASShaderSource(std::string* source);
@@ -1742,6 +1746,7 @@ public:
 	void Interlace(const GSVector2i& ds, int field, int mode, float yoffset);
 	void FXAA();
 	void ShadeBoost();
+	void Deband();
 	void Resize(int width, int height);
 
 	void CAS(GSTexture*& tex, GSVector4i& src_rect, GSVector4& src_uv, const GSVector4& draw_rect, bool sharpen_only);

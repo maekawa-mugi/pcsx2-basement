@@ -374,6 +374,7 @@ GSVector4i GSDevice::ProcessCopyArea(const GSVector4i& rtsize, const GSVector4i&
 #include "common_ffx_cas.cpp"
 #include "vulkan_cas.cpp"
 #include "vulkan_convert.cpp"
+#include "vulkan_deband.cpp"
 #include "vulkan_imgui.cpp"
 #include "vulkan_interlace.cpp"
 #include "vulkan_merge.cpp"
@@ -382,6 +383,7 @@ GSVector4i GSDevice::ProcessCopyArea(const GSVector4i& rtsize, const GSVector4i&
 #include "vulkan_tfx.cpp"
 #include "opengl_cas.cpp"
 #include "opengl_convert.cpp"
+#include "opengl_deband.cpp"
 #include "opengl_imgui.cpp"
 #include "opengl_interlace.cpp"
 #include "opengl_merge.cpp"
@@ -392,6 +394,7 @@ GSVector4i GSDevice::ProcessCopyArea(const GSVector4i& rtsize, const GSVector4i&
 #ifdef _WIN32
 #include "dx11_cas.cpp"
 #include "dx11_convert.cpp"
+#include "dx11_deband.cpp"
 #include "dx11_imgui.cpp"
 #include "dx11_interlace.cpp"
 #include "dx11_merge.cpp"
@@ -407,6 +410,7 @@ static const std::map<std::string, const unsigned char*> s_baked_shaders = {
 	{ "shaders/common/ffx_cas.h"       , common_ffx_cas },
 	{ "shaders/vulkan/cas.glsl"        , vulkan_cas },
 	{ "shaders/vulkan/convert.glsl"    , vulkan_convert},
+	{ "shaders/vulkan/deband.glsl"     , vulkan_deband },
 	{ "shaders/vulkan/imgui.glsl"      , vulkan_imgui},
 	{ "shaders/vulkan/interlace.glsl"  , vulkan_interlace},
 	{ "shaders/vulkan/merge.glsl"      , vulkan_merge },
@@ -415,6 +419,7 @@ static const std::map<std::string, const unsigned char*> s_baked_shaders = {
 	{ "shaders/vulkan/tfx.glsl"        , vulkan_tfx },
 	{ "shaders/opengl/cas.glsl"        , opengl_cas },
 	{ "shaders/opengl/convert.glsl"    , opengl_convert },
+	{ "shaders/opengl/deband.glsl"     , opengl_deband },
 	{ "shaders/opengl/imgui.glsl"      , opengl_imgui },
 	{ "shaders/opengl/interlace.glsl"  , opengl_interlace },
 	{ "shaders/opengl/merge.glsl"      , opengl_merge },
@@ -425,6 +430,7 @@ static const std::map<std::string, const unsigned char*> s_baked_shaders = {
 #ifdef _WIN32
 	{ "shaders/dx11/cas.hlsl"          , dx11_cas },
 	{ "shaders/dx11/convert.fx"        , dx11_convert },
+	{ "shaders/dx11/deband.fx"         , dx11_deband },
 	{ "shaders/dx11/imgui.fx"          , dx11_imgui },
 	{ "shaders/dx11/interlace.fx"      , dx11_interlace },
 	{ "shaders/dx11/merge.fx"          , dx11_merge },
@@ -1155,7 +1161,9 @@ void GSDevice::FXAA()
 
 void GSDevice::ShadeBoost()
 {
-	if (ResizeRenderTarget(&m_target_tmp, m_current->GetWidth(), m_current->GetHeight(), false, false))
+	// Deband may already have left the image in m_target_tmp, so don't read and write the same target.
+	GSTexture*& dTex = (m_current == m_target_tmp) ? m_merge : m_target_tmp;
+	if (ResizeRenderTarget(&dTex, m_current->GetWidth(), m_current->GetHeight(), false, false))
 	{
 		// predivide to avoid the divide (multiply) in the shader
 		const GSVector4 params(
@@ -1164,9 +1172,35 @@ void GSDevice::ShadeBoost()
 			static_cast<float>(GSConfig.ShadeBoost_Saturation) * (1.0f / 50.0f),
 			static_cast<float>(GSConfig.ShadeBoost_Gamma) * (1.0f / 50.0f));
 
-		DoShadeBoost(m_current, m_target_tmp, params.v);
+		DoShadeBoost(m_current, dTex, params.v);
 
-		m_current = m_target_tmp;
+		m_current = dTex;
+	}
+}
+
+void GSDevice::Deband()
+{
+	// Same target selection as FXAA/ShadeBoost; needs proper testing together with the other post passes.
+	GSTexture*& dTex = (m_current == m_target_tmp) ? m_merge : m_target_tmp;
+	if (ResizeRenderTarget(&dTex, m_current->GetWidth(), m_current->GetHeight(), false, false))
+	{
+		// Frame counter keeps the grain changing over time; wrapped so it stays exact as a float.
+		m_deband_frame = (m_deband_frame + 1) & 0xffff;
+
+		const float params[8] = {
+			static_cast<float>(GSConfig.Deband_Threshold),
+			static_cast<float>(GSConfig.Deband_Radius),
+			static_cast<float>(GSConfig.Deband_Grain),
+			static_cast<float>(GSConfig.Deband_Iterations),
+			static_cast<float>(m_deband_frame),
+			0.0f,
+			0.0f,
+			0.0f,
+		};
+
+		DoDeband(m_current, dTex, params);
+
+		m_current = dTex;
 	}
 }
 

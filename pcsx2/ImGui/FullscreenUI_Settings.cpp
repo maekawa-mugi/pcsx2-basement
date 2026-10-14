@@ -3450,6 +3450,22 @@ void FullscreenUI::DrawGraphicsSettingsPage(SettingsInterface* bsi, bool show_ad
 		DrawIntRangeSetting(bsi, FSUI_ICONSTR(ICON_FA_DROPLET, "Saturation"), FSUI_CSTR("Adjusts saturation. 50 is normal."), "EmuCore/GS",
 			"ShadeBoost_Saturation", 50, 1, 100, "%d", shadeboost_active);
 
+		const bool deband_active = GetEffectiveBoolSetting(bsi, "EmuCore/GS", "Deband", false);
+
+		DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_GEM, "Deband"),
+			FSUI_CSTR("Reduces color banding in gradients (libplacebo debanding, IbukiHash)."), "EmuCore/GS", "Deband", false);
+		DrawIntRangeSetting(bsi, FSUI_ICONSTR(ICON_FA_SUN, "Deband Threshold"),
+			FSUI_CSTR("Maximum color difference that is still smoothed. 4 is the default."), "EmuCore/GS", "Deband_Threshold", 4, 0, 100,
+			"%d", deband_active);
+		DrawIntRangeSetting(bsi, FSUI_ICONSTR(ICON_FA_SUN, "Deband Radius"),
+			FSUI_CSTR("Maximum distance in pixels of the pixels used for averaging."), "EmuCore/GS", "Deband_Radius", 16, 1, 64, "%d",
+			deband_active);
+		DrawIntRangeSetting(bsi, FSUI_ICONSTR(ICON_FA_SUN, "Deband Iterations"),
+			FSUI_CSTR("Number of smoothing passes."), "EmuCore/GS", "Deband_Iterations", 1, 1, 8, "%d", deband_active);
+		DrawIntRangeSetting(bsi, FSUI_ICONSTR(ICON_FA_SUN, "Deband Grain"),
+			FSUI_CSTR("Strength of the noise added after debanding. 0 disables it."), "EmuCore/GS", "Deband_Grain", 6, 0, 100, "%d",
+			deband_active);
+
 		static constexpr const char* s_tv_shaders[] = {
 			FSUI_NSTR("None (Default)"),
 			FSUI_NSTR("Scanline Filter"),

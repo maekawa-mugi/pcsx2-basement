@@ -363,6 +363,9 @@
     <None Include="..\bin\resources\shaders\opengl\present.glsl">
       <Filter>System\Ps2\GS\Shaders\OpenGL</Filter>
     </None>
+    <None Include="..\bin\resources\shaders\opengl\deband.glsl">
+      <Filter>System\Ps2\GS\Shaders\OpenGL</Filter>
+    </None>
     <None Include="..\bin\resources\shaders\opengl\shadeboost.glsl">
       <Filter>System\Ps2\GS\Shaders\OpenGL</Filter>
     </None>
@@ -390,6 +393,9 @@
     <None Include="..\bin\resources\shaders\vulkan\present.glsl">
       <Filter>System\Ps2\GS\Shaders\Vulkan</Filter>
     </None>
+    <None Include="..\bin\resources\shaders\vulkan\deband.glsl">
+      <Filter>System\Ps2\GS\Shaders\Vulkan</Filter>
+    </None>
     <None Include="..\bin\resources\shaders\vulkan\shadeboost.glsl">
       <Filter>System\Ps2\GS\Shaders\Vulkan</Filter>
     </None>
@@ -409,6 +415,9 @@
       <Filter>System\Ps2\GS\Shaders\Direct3D</Filter>
     </None>
     <None Include="..\bin\resources\shaders\dx11\present.fx">
+      <Filter>System\Ps2\GS\Shaders\Direct3D</Filter>
+    </None>
+    <None Include="..\bin\resources\shaders\dx11\deband.fx">
       <Filter>System\Ps2\GS\Shaders\Direct3D</Filter>
     </None>
     <None Include="..\bin\resources\shaders\dx11\shadeboost.fx">

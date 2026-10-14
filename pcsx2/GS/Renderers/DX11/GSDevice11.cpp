@@ -378,6 +378,22 @@ bool GSDevice11::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 	if (!m_shadeboost.ps)
 		return false;
 
+	// Deband
+
+	memset(&bd, 0, sizeof(bd));
+	bd.ByteWidth = sizeof(float) * 8;
+	bd.Usage = D3D11_USAGE_DEFAULT;
+	bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+
+	m_dev->CreateBuffer(&bd, nullptr, m_deband.cb.put());
+
+	shader = ReadShaderSource("shaders/dx11/deband.fx");
+	if (!shader.has_value())
+		return false;
+	m_deband.ps = m_shader_cache.GetPixelShader(m_dev.get(), *shader, nullptr, "ps_main");
+	if (!m_deband.ps)
+		return false;
+
 	// Vertex/Index Buffer
 
 	bd = {};
@@ -630,6 +646,7 @@ void GSDevice11::Destroy()
 	m_merge = {};
 	m_interlace = {};
 	m_shadeboost = {};
+	m_deband = {};
 	m_date = {};
 	m_cas = {};
 	m_imgui = {};
@@ -1983,6 +2000,18 @@ void GSDevice11::DoShadeBoost(GSTexture* sTex, GSTexture* dTex, const float para
 	UpdateSubresource(m_shadeboost.cb.get(), params, &m_shadeboost.cb_uniforms, sizeof(float) * 4);
 
 	DoStretchRect(sTex, sRect, dTex, dRect, m_shadeboost.ps.get(), m_shadeboost.cb.get(), Nearest);
+}
+
+void GSDevice11::DoDeband(GSTexture* sTex, GSTexture* dTex, const float params[8])
+{
+	const GSVector2i s = dTex->GetSize();
+
+	const GSVector4 sRect(0, 0, 1, 1);
+	const GSVector4 dRect(0, 0, s.x, s.y);
+
+	UpdateSubresource(m_deband.cb.get(), params, &m_deband.cb_uniforms, sizeof(float) * 8);
+
+	DoStretchRect(sTex, sRect, dTex, dRect, m_deband.ps.get(), m_deband.cb.get(), Nearest);
 }
 
 void GSDevice11::SetupVS(VSSelector sel, const GSHWDrawConfig::VSConstantBuffer* cb)

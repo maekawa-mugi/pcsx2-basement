@@ -569,3 +569,83 @@ fragment float4 ps_shadeboost(float4 p [[position]], DirectReadTextureIn<float> 
 
 	return float4(csb, 1);
 }
+
+/*
+** Debanding filter.
+**
+** The algorithm (random-direction neighbourhood averaging that is only applied where the local
+** difference stays below a threshold, followed by optional grain) follows pl_shader_deband() from
+** libplacebo, Copyright (C) the libplacebo authors, licensed under LGPL-2.1-or-later
+** (https://code.videolan.org/videolan/libplacebo). This is a re-implementation for PCSX2.
+**
+** The random number generator is IbukiHash by Andante, marked CC0 1.0
+** (https://creativecommons.org/publicdomain/zero/1.0/).
+**
+** Needs proper testing on Metal; written without access to a macOS build.
+*/
+
+// IbukiHash by Andante. This work is marked with CC0 1.0.
+static float deband_ibuki(float4 v)
+{
+	const uint4 mult = uint4(0xae3cc725u, 0x9fe72885u, 0xae36bfb5u, 0x82c1fcadu);
+
+	uint4 u = uint4(v);
+	u = u * mult;
+	u ^= u.wxyz ^ (u >> 13);
+
+	uint r = u.x * mult.x + u.y * mult.y + u.z * mult.z + u.w * mult.w;
+
+	r ^= r >> 11;
+	r = (r * r) ^ r;
+
+	return float(r) * 2.3283064365386962890625e-10;
+}
+
+static float4 deband_fetch(texture2d<float> tex, int2 p)
+{
+	const int2 size = int2(tex.get_width(), tex.get_height());
+	return tex.read(uint2(clamp(p, int2(0), size - 1)));
+}
+
+fragment float4 ps_deband(float4 p [[position]], DirectReadTextureIn<float> tex, constant float4* cb [[buffer(GSMTLBufferIndexUniforms)]])
+{
+	const float threshold = cb[0].x;
+	const float radius = cb[0].y;
+	const float grain = cb[0].z;
+	const int iterations = int(cb[0].w);
+	const float frame = cb[1].x;
+
+	const int2 pos = int2(p.xy);
+	const float4 src = deband_fetch(tex.tex, pos);
+	float4 color = src;
+	float counter = 0.0;
+
+	for (int i = 1; i <= iterations; i++)
+	{
+		// Random direction and distance, distance grows with every iteration.
+		const float dist = deband_ibuki(float4(float2(pos), frame, counter)) * radius * float(i);
+		const float dir = deband_ibuki(float4(float2(pos), frame, counter + 1.0)) * 6.28318530718;
+		counter += 2.0;
+
+		const int2 o = int2(floor(dist * float2(cos(dir), sin(dir)) + 0.5));
+		const int2 q = int2(-o.y, o.x); // quarter turn
+
+		const float4 avg = 0.25 * (deband_fetch(tex.tex, pos + o) + deband_fetch(tex.tex, pos - o) +
+		                           deband_fetch(tex.tex, pos + q) + deband_fetch(tex.tex, pos - q));
+		const float4 diff = abs(color - avg);
+		const float bound = threshold / (1000.0 * float(i));
+
+		// Keep the original where the difference is large (a real edge), otherwise smooth.
+		color = mix(avg, color, float4(diff > bound));
+	}
+
+	if (grain > 0.0)
+	{
+		const float3 noise = float3(deband_ibuki(float4(float2(pos), frame, counter)),
+		                            deband_ibuki(float4(float2(pos), frame, counter + 1.0)),
+		                            deband_ibuki(float4(float2(pos), frame, counter + 2.0)));
+		color.rgb += (noise - 0.5) * (grain / 1000.0);
+	}
+
+	return float4(color.rgb, src.a);
+}

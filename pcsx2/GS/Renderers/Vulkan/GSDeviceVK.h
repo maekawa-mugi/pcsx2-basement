@@ -443,6 +443,7 @@ private:
 	VkPipeline m_primid_image_setup_pipelines[2][4] = {}; // [depth][datm]
 	VkPipeline m_fxaa_pipeline = {};
 	VkPipeline m_shadeboost_pipeline = {};
+	VkPipeline m_deband_pipeline = {};
 
 	VkPipeline GetConvertPipeline(ShaderConvertSelector shader) const
 	{
@@ -488,6 +489,7 @@ private:
 		ShaderInterlace shader, Filter filter, const InterlaceConstantBuffer& cb) final;
 	bool SupportsPhosphor() const final { return true; }
 	void DoShadeBoost(GSTexture* sTex, GSTexture* dTex, const float params[4]) final;
+	void DoDeband(GSTexture* sTex, GSTexture* dTex, const float params[8]) final;
 	void DoFXAA(GSTexture* sTex, GSTexture* dTex) final;
 
 	bool DoCAS(

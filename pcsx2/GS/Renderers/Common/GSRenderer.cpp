@@ -251,6 +251,9 @@ bool GSRenderer::Merge(int field)
 		g_gs_device->Interlace(fs, field ^ field2, mode, offset);
 	}
 
+	if (GSConfig.Deband)
+		g_gs_device->Deband();
+
 	if (GSConfig.ShadeBoost)
 		g_gs_device->ShadeBoost();
 

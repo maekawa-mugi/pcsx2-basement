@@ -254,12 +254,20 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* settings_dialog, 
 	SettingWidgetBinder::BindWidgetToIntSetting(sif, m_post.shadeBoostContrast, "EmuCore/GS", "ShadeBoost_Contrast", Pcsx2Config::GSOptions::DEFAULT_SHADEBOOST_CONTRAST);
 	SettingWidgetBinder::BindWidgetToIntSetting(sif, m_post.shadeBoostGamma, "EmuCore/GS", "ShadeBoost_Gamma", Pcsx2Config::GSOptions::DEFAULT_SHADEBOOST_GAMMA);
 	SettingWidgetBinder::BindWidgetToIntSetting(sif, m_post.shadeBoostSaturation, "EmuCore/GS", "ShadeBoost_Saturation", Pcsx2Config::GSOptions::DEFAULT_SHADEBOOST_SATURATION);
+	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_post.deband, "EmuCore/GS", "Deband", false);
+	SettingWidgetBinder::BindWidgetToIntSetting(sif, m_post.debandThreshold, "EmuCore/GS", "Deband_Threshold", Pcsx2Config::GSOptions::DEFAULT_DEBAND_THRESHOLD);
+	SettingWidgetBinder::BindWidgetToIntSetting(sif, m_post.debandRadius, "EmuCore/GS", "Deband_Radius", Pcsx2Config::GSOptions::DEFAULT_DEBAND_RADIUS);
+	SettingWidgetBinder::BindWidgetToIntSetting(sif, m_post.debandIterations, "EmuCore/GS", "Deband_Iterations", Pcsx2Config::GSOptions::DEFAULT_DEBAND_ITERATIONS);
+	SettingWidgetBinder::BindWidgetToIntSetting(sif, m_post.debandGrain, "EmuCore/GS", "Deband_Grain", Pcsx2Config::GSOptions::DEFAULT_DEBAND_GRAIN);
 	SettingWidgetBinder::BindWidgetToIntSetting(sif, m_post.tvShader, "EmuCore/GS", "TVShader", DEFAULT_TV_SHADER_MODE);
 	SettingWidgetBinder::BindWidgetToIntSetting(sif, m_post.casMode, "EmuCore/GS", "CASMode", static_cast<int>(Pcsx2Config::GSOptions::DEFAULT_CAS_MODE));
 	SettingWidgetBinder::BindWidgetToIntSetting(sif, m_post.casSharpness, "EmuCore/GS", "CASSharpness", DEFAULT_CAS_SHARPNESS);
 
 	connect(m_post.shadeBoost, &QCheckBox::checkStateChanged, this, &GraphicsSettingsWidget::onShadeBoostChanged);
 	onShadeBoostChanged();
+
+	connect(m_post.deband, &QCheckBox::checkStateChanged, this, &GraphicsSettingsWidget::onDebandChanged);
+	onDebandChanged();
 
 	//////////////////////////////////////////////////////////////////////////
 	// Advanced Settings
@@ -908,6 +916,22 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* settings_dialog, 
 
 		dialog()->registerWidgetHelp(m_post.shadeBoostSaturation, tr("Saturation"), tr("50"), tr("Adjusts saturation. 50 is normal."));
 
+		dialog()->registerWidgetHelp(m_post.deband, tr("Deband"), tr("Unchecked"),
+			tr("Reduces color banding in smooth gradients by averaging nearby pixels where the difference is small. "
+			   "Based on the libplacebo debanding filter (LGPL-2.1+), with IbukiHash (CC0) as the random number generator."));
+
+		dialog()->registerWidgetHelp(m_post.debandThreshold, tr("Threshold"), tr("4"),
+			tr("Maximum color difference that is still smoothed. Higher values remove more banding but also blur real detail."));
+
+		dialog()->registerWidgetHelp(m_post.debandRadius, tr("Radius"), tr("16"),
+			tr("Maximum distance in pixels of the pixels used for averaging. Raise it together with the upscale multiplier."));
+
+		dialog()->registerWidgetHelp(m_post.debandIterations, tr("Iterations"), tr("1"),
+			tr("Number of smoothing passes. More iterations remove more banding at a higher GPU cost."));
+
+		dialog()->registerWidgetHelp(m_post.debandGrain, tr("Grain"), tr("6"),
+			tr("Strength of the noise added after debanding to hide leftover banding. 0 disables it."));
+
 		dialog()->registerWidgetHelp(m_post.tvShader, tr("TV Shader"), tr("None (Default)"),
 			tr("Applies a shader which replicates the visual effects of different styles of television sets."));
 	}
@@ -1091,6 +1115,15 @@ void GraphicsSettingsWidget::onTrilinearFilteringChanged()
 	const bool forced_bilinear = (dialog()->getEffectiveIntValue("EmuCore/GS", "TriFilter", static_cast<int>(Pcsx2Config::GSOptions::DEFAULT_TRILINEAR_FILTERING_MODE)) >=
 								  static_cast<int>(TriFiltering::Forced));
 	m_hw.textureFiltering->setDisabled(forced_bilinear);
+}
+
+void GraphicsSettingsWidget::onDebandChanged()
+{
+	const bool enabled = dialog()->getEffectiveBoolValue("EmuCore/GS", "Deband", false);
+	m_post.debandThreshold->setEnabled(enabled);
+	m_post.debandRadius->setEnabled(enabled);
+	m_post.debandIterations->setEnabled(enabled);
+	m_post.debandGrain->setEnabled(enabled);
 }
 
 void GraphicsSettingsWidget::onShadeBoostChanged()

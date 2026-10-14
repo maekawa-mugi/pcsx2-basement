@@ -262,6 +262,7 @@ public:
 	MRCOwned<id<MTLRenderPipelineState>> m_colclip_resolve_pipeline;
 	MRCOwned<id<MTLRenderPipelineState>> m_fxaa_pipeline;
 	MRCOwned<id<MTLRenderPipelineState>> m_shadeboost_pipeline;
+	MRCOwned<id<MTLRenderPipelineState>> m_deband_pipeline;
 	MRCOwned<id<MTLRenderPipelineState>> m_imgui_pipeline;
 
 	id<MTLRenderPipelineState> GetConvertPipeline(ShaderConvertSelector shader) const
@@ -392,6 +393,7 @@ public:
 	void DoInterlace(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect, ShaderInterlace shader, Filter filter, const InterlaceConstantBuffer& cb) override;
 	void DoFXAA(GSTexture* sTex, GSTexture* dTex) override;
 	void DoShadeBoost(GSTexture* sTex, GSTexture* dTex, const float params[4]) override;
+	void DoDeband(GSTexture* sTex, GSTexture* dTex, const float params[8]) override;
 
 	bool DoCAS(GSTexture* sTex, GSTexture* dTex, bool sharpen_only, const std::array<u32, NUM_CAS_CONSTANTS>& constants) override;
 

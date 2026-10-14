@@ -2316,6 +2316,25 @@ void GSDevice12::DoShadeBoost(GSTexture* sTex, GSTexture* dTex, const float para
 	static_cast<GSTexture12*>(dTex)->TransitionToState(GSTexture12::ResourceState::PixelShaderResource);
 }
 
+void GSDevice12::DoDeband(GSTexture* sTex, GSTexture* dTex, const float params[8])
+{
+	const GSVector4 sRect = GSVector4(0.0f, 0.0f, 1.0f, 1.0f);
+	const GSVector4i dRect = dTex->GetRect();
+	EndRenderPass();
+	OMSetRenderTargets(dTex, nullptr, nullptr, dRect);
+	SetUtilityRootSignature();
+	SetUtilityTexture(sTex, m_point_sampler_cpu);
+	BeginRenderPass(D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_DISCARD, D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE,
+		D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_NO_ACCESS, D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_NO_ACCESS);
+	dTex->SetState(GSTexture::State::Dirty);
+	SetPipeline(m_deband_pipeline.get());
+	SetUtilityPushConstants(params, sizeof(float) * 8);
+	DrawStretchRect(sRect, GSVector4(dRect), dTex->GetSize());
+	EndRenderPass();
+
+	static_cast<GSTexture12*>(dTex)->TransitionToState(GSTexture12::ResourceState::PixelShaderResource);
+}
+
 void GSDevice12::DoFXAA(GSTexture* sTex, GSTexture* dTex)
 {
 	const GSVector4 sRect = GSVector4(0.0f, 0.0f, 1.0f, 1.0f);
@@ -3163,6 +3182,27 @@ bool GSDevice12::CompilePostProcessingPipelines()
 		D3D12::SetObjectName(m_shadeboost_pipeline.get(), "Shadeboost pipeline");
 	}
 
+	{
+		const std::optional<std::string> shader = ReadShaderSource("shaders/dx11/deband.fx");
+		if (!shader)
+		{
+			Host::ReportErrorAsync("GS", "Failed to read shaders/dx11/deband.fx.");
+			return false;
+		}
+
+		ComPtr<ID3DBlob> ps(GetUtilityPixelShader(*shader, "ps_main"));
+		if (!ps)
+			return false;
+
+		gpb.SetPixelShader(ps.get());
+
+		m_deband_pipeline = gpb.Create(m_device.get(), m_shader_cache, false);
+		if (!m_deband_pipeline)
+			return false;
+
+		D3D12::SetObjectName(m_deband_pipeline.get(), "Deband pipeline");
+	}
+
 	return true;
 }
 
@@ -3186,6 +3226,7 @@ void GSDevice12::DestroyResources()
 	m_primid_image_setup_pipelines = {};
 	m_fxaa_pipeline.reset();
 	m_shadeboost_pipeline.reset();
+	m_deband_pipeline.reset();
 	m_imgui_pipeline.reset();
 
 	for (const auto& it : m_samplers)

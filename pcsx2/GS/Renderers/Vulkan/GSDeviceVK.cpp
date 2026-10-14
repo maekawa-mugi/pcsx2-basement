@@ -3564,6 +3564,23 @@ void GSDeviceVK::DoShadeBoost(GSTexture* sTex, GSTexture* dTex, const float para
 	static_cast<GSTextureVK*>(dTex)->TransitionToLayout(GSTextureVK::Layout::ShaderReadOnly);
 }
 
+void GSDeviceVK::DoDeband(GSTexture* sTex, GSTexture* dTex, const float params[8])
+{
+	const GSVector4 sRect = GSVector4(0.0f, 0.0f, 1.0f, 1.0f);
+	const GSVector4i dRect = dTex->GetRect();
+	EndRenderPass();
+	OMSetRenderTargets(dTex, nullptr, dRect);
+	SetUtilityTexture(sTex, m_point_sampler);
+	BeginRenderPass(m_utility_color_render_pass_discard, dRect);
+	dTex->SetState(GSTexture::State::Dirty);
+	SetPipeline(m_deband_pipeline);
+	SetUtilityPushConstants(params, sizeof(float) * 8);
+	DrawStretchRect(sRect, GSVector4(dRect), dTex->GetSize());
+	EndRenderPass();
+
+	static_cast<GSTextureVK*>(dTex)->TransitionToLayout(GSTextureVK::Layout::ShaderReadOnly);
+}
+
 void GSDeviceVK::DoFXAA(GSTexture* sTex, GSTexture* dTex)
 {
 	const GSVector4 sRect = GSVector4(0.0f, 0.0f, 1.0f, 1.0f);
@@ -4602,6 +4619,34 @@ bool GSDeviceVK::CompilePostProcessingPipelines()
 		Vulkan::SetObjectName(m_device, m_shadeboost_pipeline, "Shadeboost pipeline");
 	}
 
+	{
+		const std::optional<std::string> shader = ReadShaderSource("shaders/vulkan/deband.glsl");
+		if (!shader)
+		{
+			Host::ReportErrorAsync("GS", "Failed to read shaders/vulkan/deband.glsl.");
+			return false;
+		}
+
+		VkShaderModule vs = GetUtilityVertexShader(*shader);
+		ScopedGuard vs_guard([this, &vs]() { vkDestroyShaderModule(m_device, vs, nullptr); });
+		if (vs == VK_NULL_HANDLE)
+			return false;
+
+		VkShaderModule ps = GetUtilityFragmentShader(*shader);
+		ScopedGuard ps_guard([this, &ps]() { vkDestroyShaderModule(m_device, ps, nullptr); });
+		if (ps == VK_NULL_HANDLE)
+			return false;
+
+		gpb.SetVertexShader(vs);
+		gpb.SetFragmentShader(ps);
+
+		m_deband_pipeline = gpb.Create(m_device, g_vulkan_shader_cache->GetPipelineCache(true), false);
+		if (!m_deband_pipeline)
+			return false;
+
+		Vulkan::SetObjectName(m_device, m_deband_pipeline, "Deband pipeline");
+	}
+
 	return true;
 }
 
@@ -4887,6 +4932,8 @@ void GSDeviceVK::DestroyResources()
 		vkDestroyPipeline(m_device, m_fxaa_pipeline, nullptr);
 	if (m_shadeboost_pipeline != VK_NULL_HANDLE)
 		vkDestroyPipeline(m_device, m_shadeboost_pipeline, nullptr);
+	if (m_deband_pipeline != VK_NULL_HANDLE)
+		vkDestroyPipeline(m_device, m_deband_pipeline, nullptr);
 
 	for (VkPipeline it : m_cas_pipelines)
 	{

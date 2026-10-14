@@ -193,6 +193,97 @@
         </item>
        </layout>
       </item>
+      <item row="2" column="0">
+       <widget class="QCheckBox" name="deband">
+        <property name="text">
+         <string>Deband</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="1">
+       <layout class="QGridLayout" name="gridLayoutDeband" columnstretch="0,1,0,1">
+        <item row="0" column="0">
+         <widget class="QLabel" name="debandThresholdLabel">
+          <property name="text">
+           <string>Threshold:</string>
+          </property>
+          <property name="buddy">
+           <cstring>debandThreshold</cstring>
+          </property>
+         </widget>
+        </item>
+        <item row="0" column="1">
+         <widget class="QSpinBox" name="debandThreshold">
+          <property name="minimum">
+           <number>0</number>
+          </property>
+          <property name="maximum">
+           <number>100</number>
+          </property>
+         </widget>
+        </item>
+        <item row="0" column="2">
+         <widget class="QLabel" name="debandRadiusLabel">
+          <property name="text">
+           <string>Radius:</string>
+          </property>
+          <property name="buddy">
+           <cstring>debandRadius</cstring>
+          </property>
+         </widget>
+        </item>
+        <item row="0" column="3">
+         <widget class="QSpinBox" name="debandRadius">
+          <property name="minimum">
+           <number>1</number>
+          </property>
+          <property name="maximum">
+           <number>64</number>
+          </property>
+         </widget>
+        </item>
+        <item row="1" column="0">
+         <widget class="QLabel" name="debandIterationsLabel">
+          <property name="text">
+           <string>Iterations:</string>
+          </property>
+          <property name="buddy">
+           <cstring>debandIterations</cstring>
+          </property>
+         </widget>
+        </item>
+        <item row="1" column="1">
+         <widget class="QSpinBox" name="debandIterations">
+          <property name="minimum">
+           <number>1</number>
+          </property>
+          <property name="maximum">
+           <number>8</number>
+          </property>
+         </widget>
+        </item>
+        <item row="1" column="2">
+         <widget class="QLabel" name="debandGrainLabel">
+          <property name="text">
+           <string>Grain:</string>
+          </property>
+          <property name="buddy">
+           <cstring>debandGrain</cstring>
+          </property>
+         </widget>
+        </item>
+        <item row="1" column="3">
+         <widget class="QSpinBox" name="debandGrain">
+          <property name="minimum">
+           <number>0</number>
+          </property>
+          <property name="maximum">
+           <number>100</number>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
       <item row="0" column="0">
        <widget class="QLabel" name="tvShaderLabel">
         <property name="text">
@@ -275,6 +366,11 @@
   <tabstop>shadeBoostContrast</tabstop>
   <tabstop>shadeBoostGamma</tabstop>
   <tabstop>shadeBoostSaturation</tabstop>
+  <tabstop>deband</tabstop>
+  <tabstop>debandThreshold</tabstop>
+  <tabstop>debandRadius</tabstop>
+  <tabstop>debandIterations</tabstop>
+  <tabstop>debandGrain</tabstop>
  </tabstops>
  <resources/>
  <connections/>

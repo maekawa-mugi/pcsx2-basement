@@ -775,6 +775,11 @@ struct Pcsx2Config
 		static constexpr int DEFAULT_SHADEBOOST_GAMMA = 50;
 		static constexpr int DEFAULT_SHADEBOOST_SATURATION = 50;
 
+		static constexpr int DEFAULT_DEBAND_THRESHOLD = 4;
+		static constexpr int DEFAULT_DEBAND_RADIUS = 16;
+		static constexpr int DEFAULT_DEBAND_ITERATIONS = 1;
+		static constexpr int DEFAULT_DEBAND_GRAIN = 6;
+
 		union
 		{
 			u64 bitsets[2];
@@ -847,6 +852,7 @@ struct Pcsx2Config
 					UserHacks_RewriteLargeSTCoords : 1,
 					FXAA : 1,
 					ShadeBoost : 1,
+					Deband : 1,
 					DumpGSData : 1,
 					SaveRT : 1,
 					SaveFrame : 1,
@@ -939,6 +945,10 @@ struct Pcsx2Config
 		u8 ShadeBoost_Contrast = DEFAULT_SHADEBOOST_CONTRAST;
 		u8 ShadeBoost_Saturation = DEFAULT_SHADEBOOST_SATURATION;
 		u8 ShadeBoost_Gamma = DEFAULT_SHADEBOOST_GAMMA;
+		u8 Deband_Threshold = DEFAULT_DEBAND_THRESHOLD;
+		u8 Deband_Radius = DEFAULT_DEBAND_RADIUS;
+		u8 Deband_Iterations = DEFAULT_DEBAND_ITERATIONS;
+		u8 Deband_Grain = DEFAULT_DEBAND_GRAIN;
 		u8 PNGCompressionLevel = 1;
 
 		u8 PGSSuperSampling = 0;

@@ -652,7 +652,7 @@ bool GSDeviceOGL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 	// ****************************************************************
 	// Post processing
 	// ****************************************************************
-	if (!CompileShadeBoostProgram() || !CompileFXAAProgram())
+	if (!CompileShadeBoostProgram() || !CompileDebandProgram() || !CompileFXAAProgram())
 		return false;
 
 	if (GLAD_GL_VERSION_4_2 || GLAD_GL_ARB_shading_language_packing)
@@ -1139,6 +1139,7 @@ void GSDeviceOGL::DestroyResources()
 	m_cas.sharpen_ps.Destroy();
 
 	m_shadeboost.ps.Destroy();
+	m_deband.ps.Destroy();
 
 	for (GLProgram& prog : m_date.primid_ps)
 		prog.Destroy();
@@ -2446,6 +2447,42 @@ void GSDeviceOGL::DoShadeBoost(GSTexture* sTex, GSTexture* dTex, const float par
 	const GSVector4 dRect(0, 0, s.x, s.y);
 
 	DoStretchRect(sTex, sRect, dTex, dRect, m_shadeboost.ps, Nearest);
+}
+
+bool GSDeviceOGL::CompileDebandProgram()
+{
+	const std::optional<std::string> shader = ReadShaderSource("shaders/opengl/deband.glsl");
+	if (!shader.has_value())
+	{
+		Host::ReportErrorAsync("GS", "Failed to read shaders/opengl/deband.glsl.");
+		return false;
+	}
+
+	const std::string ps(GetShaderSource("ps_main", GL_FRAGMENT_SHADER, *shader));
+	if (!m_shader_cache.GetProgram(&m_deband.ps, m_convert.vs, ps))
+		return false;
+	m_deband.ps.RegisterUniform("params");
+	m_deband.ps.RegisterUniform("params2");
+	m_deband.ps.SetName("Deband pipe");
+	return true;
+}
+
+void GSDeviceOGL::DoDeband(GSTexture* sTex, GSTexture* dTex, const float params[8])
+{
+	GL_PUSH("DoDeband");
+
+	m_deband.ps.Bind();
+	m_deband.ps.Uniform4fv(0, params);
+	m_deband.ps.Uniform4fv(1, params + 4);
+
+	OMSetColorMaskState();
+
+	const GSVector2i s = dTex->GetSize();
+
+	const GSVector4 sRect(0, 0, 1, 1);
+	const GSVector4 dRect(0, 0, s.x, s.y);
+
+	DoStretchRect(sTex, sRect, dTex, dRect, m_deband.ps, Nearest);
 }
 
 void GSDeviceOGL::SetupDATE(GSTexture* rt, GSTexture* ds, SetDATM datm, const GSVector4i& bbox)

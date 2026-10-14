@@ -117,6 +117,7 @@ private:
 	void DoInterlace(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect, ShaderInterlace shader, Filter filter, const InterlaceConstantBuffer& cb) override;
 	void DoFXAA(GSTexture* sTex, GSTexture* dTex) override;
 	void DoShadeBoost(GSTexture* sTex, GSTexture* dTex, const float params[4]) override;
+	void DoDeband(GSTexture* sTex, GSTexture* dTex, const float params[8]) override;
 
 	bool CreateCASShaders();
 	bool DoCAS(GSTexture* sTex, GSTexture* dTex, bool sharpen_only, const std::array<u32, NUM_CAS_CONSTANTS>& constants) override;
@@ -260,6 +261,13 @@ private:
 		wil::com_ptr_nothrow<ID3D11Buffer> cb;
 		float cb_uniforms[4];
 	} m_shadeboost;
+
+	struct
+	{
+		wil::com_ptr_nothrow<ID3D11PixelShader> ps;
+		wil::com_ptr_nothrow<ID3D11Buffer> cb;
+		float cb_uniforms[8];
+	} m_deband;
 
 	struct
 	{

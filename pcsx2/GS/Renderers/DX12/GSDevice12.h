@@ -418,6 +418,7 @@ private:
 	std::array<std::array<ComPtr<ID3D12PipelineState>, 4>, 2> m_primid_image_setup_pipelines{}; // [depth][datm]
 	ComPtr<ID3D12PipelineState> m_fxaa_pipeline;
 	ComPtr<ID3D12PipelineState> m_shadeboost_pipeline;
+	ComPtr<ID3D12PipelineState> m_deband_pipeline;
 	ComPtr<ID3D12PipelineState> m_imgui_pipeline;
 
 	ID3D12PipelineState* GetConvertPipeline(ShaderConvertSelector shader) const
@@ -464,6 +465,7 @@ private:
 	void DoInterlace(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect,
 		ShaderInterlace shader, Filter filter, const InterlaceConstantBuffer& cb) final;
 	void DoShadeBoost(GSTexture* sTex, GSTexture* dTex, const float params[4]) final;
+	void DoDeband(GSTexture* sTex, GSTexture* dTex, const float params[8]) final;
 	void DoFXAA(GSTexture* sTex, GSTexture* dTex) final;
 
 	bool DoCAS(
