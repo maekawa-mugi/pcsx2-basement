@@ -178,6 +178,8 @@
     <ClCompile Include="CoverDownloadDialog.cpp" />
     <ClCompile Include="DisplayWidget.cpp" />
     <ClCompile Include="ShortcutCreationDialog.cpp" />
+    <ClCompile Include="AgentConsoleServer.cpp" />
+    <ClInclude Include="AgentConsoleServer.h" />
     <ClCompile Include="QtHost.cpp" />
     <ClCompile Include="MainWindow.cpp" />
     <ClCompile Include="PrecompiledHeader.cpp">

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Common.h"
+#include "AgentConsole.h"
 #include "FullTLBStats.h"
 #include "EEMemory.h"
 #include "EEMmu.h"
@@ -560,6 +561,9 @@ __fi void _cpuEventTest_Shared()
 	// Apply vsync and other counter nextCycles
 	cpuSetNextEvent(nextStartCounter, nextDeltaCounter);
 
+	// Service console input even before the guest enables video. Needs proper testing on non-x86 hosts.
+	if (AgentConsole::IsEnabled())
+		AgentConsole::Poll(true);
 	eeEventTestIsActive = false;
 }
 

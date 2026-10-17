@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Common.h"
+#include "AgentConsole.h"
 #include "Hardware.h"
 #include "IopHw.h"
 #include "ps2/HwInternal.h"
@@ -234,6 +235,7 @@ mem8_t _hwRead8(u32 mem)
 		
 		const char c = ee_sio_rx_fifo.front();
 		ee_sio_rx_fifo.pop_front();
+		AgentConsole::RecordRead();
 		return c;
 	}
 

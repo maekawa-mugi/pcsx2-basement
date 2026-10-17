@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "CDVD/CDVD.h"
+#include "AgentConsole.h"
 #include "CDVD/Ps1CD.h"
 #include "CDVD/CDVD_internal.h"
 #include "CDVD/IsoReader.h"
@@ -164,6 +165,13 @@ static std::string cdvdGetNVRAMPath()
 
 void cdvdLoadNVRAM()
 {
+	if (AgentConsole::IsDeterministic())
+	{
+		// Regional BIOS defaults beyond the Linux ELF profile need proper testing.
+		cdvdCreateNewNVM();
+		s_mecha_version = DEFAULT_MECHA_VERSION;
+		return;
+	}
 	Error error;
 	const std::string nvmfile = cdvdGetNVRAMPath();
 	auto fp = FileSystem::OpenManagedCFileTryIgnoreCase(nvmfile.c_str(), "rb", &error);
@@ -206,6 +214,8 @@ void cdvdLoadNVRAM()
 
 void cdvdSaveNVRAM()
 {
+	if (AgentConsole::IsDeterministic())
+		return;
 	Error error;
 	const std::string nvmfile = cdvdGetNVRAMPath();
 	auto fp = FileSystem::OpenManagedCFileTryIgnoreCase(nvmfile.c_str(), "r+b", &error);
@@ -963,7 +973,15 @@ void cdvdReset()
 
 	// CDVD internally uses GMT+9, 1-indexed months, and year offset of 2000 instead of 1900.
 	// tm struct uses 0-indexed months and year offset of 1900.
-	if (EmuConfig.ManuallySetRealTimeClock)
+	if (AgentConsole::IsDeterministic())
+	{
+		input_tm.tm_year = 120;
+		input_tm.tm_mon = 0;
+		input_tm.tm_mday = 1;
+		input_tm.tm_hour = 9;
+		resulting_tm = input_tm;
+	}
+	else if (EmuConfig.ManuallySetRealTimeClock)
 	{
 		resulting_tm.tm_sec = EmuConfig.RtcSecond;
 		resulting_tm.tm_min = EmuConfig.RtcMinute;

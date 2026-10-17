@@ -3,6 +3,7 @@
 
 #include "ImGui/ImGuiManager.h"
 #include "Input/InputManager.h"
+#include "AgentConsole.h"
 #include "Input/InputSource.h"
 #include "SIO/Pad/Pad.h"
 #include "SIO/Sio.h"
@@ -1108,6 +1109,8 @@ bool InputManager::IsAxisHandler(const InputEventHandler& handler)
 bool InputManager::InvokeEvents(InputBindingKey key, float value, GenericInputBinding generic_key,
 	GenericInputBinding axis_neg_key, GenericInputBinding axis_pos_key)
 {
+	if (AgentConsole::IsDeterministic())
+		return false;
 	if (DoEventHook(key, value))
 		return true;
 
@@ -1712,6 +1715,8 @@ void InputManager::CloseSources()
 
 void InputManager::PollSources()
 {
+	if (AgentConsole::IsDeterministic())
+		return;
 	for (u32 i = FIRST_EXTERNAL_INPUT_SOURCE; i < LAST_EXTERNAL_INPUT_SOURCE; i++)
 	{
 		if (s_input_sources[i]->IsInitialized())

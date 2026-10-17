@@ -73,6 +73,13 @@ INISettingsInterface::~INISettingsInterface()
 		Save();
 }
 
+std::string INISettingsInterface::Serialize() const
+{
+	std::string result;
+	m_ini.Save(result);
+	return result;
+}
+
 bool INISettingsInterface::Load()
 {
 	if (m_filename.empty())

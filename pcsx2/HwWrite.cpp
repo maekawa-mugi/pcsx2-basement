@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Common.h"
+#include "AgentConsole.h"
 #include "Hardware.h"
 #include "Gif_Unit.h"
 #include "IopHw.h"
@@ -286,6 +287,11 @@ void _hwWrite8(u32 mem, u8 value)
 #endif
 	if (mem == SIO_TXFIFO)
 	{
+		if (AgentConsole::IsEnabled())
+		{
+			AgentConsole::CaptureByte(AgentConsole::Channel::EESio, value);
+			return;
+		}
 		static bool last_char_was_cr = false;
 		
 		// skip the \n in \r\n

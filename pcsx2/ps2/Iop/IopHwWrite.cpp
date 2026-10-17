@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "IopHw_Internal.h"
+#include "AgentConsole.h"
 #include "Sif.h"
 #include "SIO/Sio2.h"
 #include "SIO/Sio0.h"
@@ -128,7 +129,9 @@ void iopHwWrite8_Page3( u32 addr, mem8_t val )
 	// all addresses are assumed to be prefixed with 0x1f803xxx:
 	pxAssert( (addr >> 12) == 0x1f803 );
 
-	if(ConsoleLogging.iopConsole.IsActive() && (addr == 0x1f80380c))	// STDOUT
+	if (addr == 0x1f80380c && AgentConsole::IsEnabled())
+		AgentConsole::CaptureByte(AgentConsole::Channel::IOPStdout, val);
+	if (!AgentConsole::IsEnabled() && ConsoleLogging.iopConsole.IsActive() && (addr == 0x1f80380c)) // STDOUT
 	{
 		static char pbuf[1024];
 		static int pidx;

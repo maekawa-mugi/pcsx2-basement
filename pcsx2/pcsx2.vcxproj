@@ -223,6 +223,8 @@
     <!-- Generate Recording GUI Image Headers -->
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="AgentConsole.cpp" />
+    <ClInclude Include="AgentConsole.h" />
     <ClCompile Include="Achievements.cpp" />
     <ClCompile Include="arm64\AsmHelpers.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'!='ARM64'">true</ExcludedFromBuild>

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Common.h"
+#include "AgentConsole.h"
 #include "DebugTools/SymbolGuardian.h"
 #include "IopBios.h"
 #include "IopMem.h"
@@ -899,8 +900,19 @@ namespace R3000A
 
 			if (fd == 1) // stdout
 			{
-				const std::string s = Ra1;
-				iopConLog(ShiftJIS_ConvertString(s.data(), a2));
+				if (AgentConsole::IsEnabled())
+				{
+					std::vector<u8> bytes(std::min<u32>(count, 1024 * 1024));
+					if (count > bytes.size() || !iopMemSafeReadBytes(data, bytes.data(), count))
+						AgentConsole::SetFault("iop_hle_read_failed_or_oversized");
+					else
+						AgentConsole::Capture(AgentConsole::Channel::IOPHLE, bytes);
+				}
+				else
+				{
+					const std::string s = Ra1;
+					iopConLog(ShiftJIS_ConvertString(s.data(), a2));
+				}
 				pc = ra;
 				v0 = a2;
 				return 1;
@@ -944,7 +956,7 @@ namespace R3000A
 			// printf-style formatting processing.  This part can be skipped if the user has the
 			// console disabled.
 
-			if (!ConsoleLogging.iopConsole.IsActive())
+			if (!AgentConsole::IsEnabled() && !ConsoleLogging.iopConsole.IsActive())
 				return 1;
 
 			// maximum allowed size for our buffer before we truncate
@@ -1059,7 +1071,11 @@ namespace R3000A
 			}
 			pxAssertRel(ptmp >= tmp && ptmp < std::end(tmp), "Overflowed tmp buffer");
 			*ptmp = 0;
-			iopConLog(ShiftJIS_ConvertString(tmp, 1023));
+			if (AgentConsole::IsEnabled())
+				AgentConsole::Capture(AgentConsole::Channel::IOPHLE,
+					{reinterpret_cast<const u8*>(tmp), static_cast<size_t>(ptmp - tmp)});
+			else
+				iopConLog(ShiftJIS_ConvertString(tmp, 1023));
 
 			return 1;
 		}

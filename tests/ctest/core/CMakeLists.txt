@@ -1,4 +1,5 @@
 add_pcsx2_test(core_test
+	agent_console_tests.cpp
 	iop_dma_tests.cpp
 	ee_config_tests.cpp
 	gs_texture_interpolation_tests.cpp

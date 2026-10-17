@@ -63,6 +63,7 @@ endif()
 
 # Main pcsx2 source
 set(pcsx2Sources
+	AgentConsole.cpp
 	Achievements.cpp
 	BuildVersion.cpp
 	Cache.cpp

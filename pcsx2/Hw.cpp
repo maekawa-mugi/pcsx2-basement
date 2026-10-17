@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Common.h"
+#include "AgentConsole.h"
 #include "Gif_Unit.h"
 #include "Hardware.h"
 #include "SPU2/spu2.h"
@@ -23,6 +24,7 @@ std::deque<u8> ee_sio_tx_fifo;
 
 void hwReset()
 {
+	AgentConsole::Reset();
 	std::memset(eeHw, 0, sizeof(eeHw));
 
 	{

@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "AutoUpdaterDialog.h"
+#include "AgentConsoleServer.h"
+#include "pcsx2/AgentConsole.h"
 #include "Debugger/DebuggerWindow.h"
 #include "DisplayWidget.h"
 #include "GameList/GameListWidget.h"
@@ -89,6 +91,7 @@ static QTimer* s_settings_save_timer = nullptr;
 static std::unique_ptr<INISettingsInterface> s_base_settings_interface;
 static std::unique_ptr<INISettingsInterface> s_secrets_settings_interface;
 static bool s_batch_mode = false;
+static QString s_agent_console_directory;
 static bool s_nogui_mode = false;
 static bool s_start_big_picture_mode = false;
 static bool s_start_fullscreen = false;
@@ -220,6 +223,12 @@ void EmuThread::startVM(std::shared_ptr<VMBootParameters> boot_params)
 		m_is_fullscreen = Host::GetBaseBoolSettingValue("UI", "StartFullscreen", false);
 
 	auto hardcore_disable_callback = [](std::string reason, VMBootRestartCallback restart_callback) {
+		if (AgentConsole::IsEnabled())
+		{
+			AgentConsole::SetStartupError("Hardcore mode must be disabled before starting an agent session: " + reason);
+			QtHost::RunOnUIThread([] { QCoreApplication::exit(EXIT_FAILURE); });
+			return;
+		}
 		QtHost::RunOnUIThread([reason = std::move(reason), restart_callback = std::move(restart_callback)]() {
 			QString title(Achievements::GetHardcoreModeDisableTitle());
 			QString text(QString::fromStdString(Achievements::GetHardcoreModeDisableText(reason.c_str())));
@@ -231,11 +240,17 @@ void EmuThread::startVM(std::shared_ptr<VMBootParameters> boot_params)
 	auto done_callback = [](VMBootResult result, const Error& error) {
 		if (result != VMBootResult::StartupSuccess)
 		{
+			if (AgentConsole::IsEnabled())
+			{
+				AgentConsole::SetStartupError(error.GetDescription());
+				QtHost::RunOnUIThread([] { QCoreApplication::exit(EXIT_FAILURE); });
+				return;
+			}
 			Host::ReportErrorAsync(TRANSLATE_STR("QtHost", "Startup Error"), error.GetDescription());
 			return;
 		}
 
-		if (!Host::GetBoolSettingValue("UI", "StartPaused", false))
+		if (!AgentConsole::IsDeterministic() && !Host::GetBoolSettingValue("UI", "StartPaused", false))
 		{
 			// This will come back and call OnVMResumed().
 			VMManager::SetState(VMState::Running);
@@ -391,6 +406,8 @@ void EmuThread::run()
 	// Main CPU thread loop.
 	while (!m_shutdown_flag.load())
 	{
+		if (AgentConsole::IsEnabled())
+			AgentConsole::Poll();
 		switch (VMManager::GetState())
 		{
 			case VMState::Initializing:
@@ -581,7 +598,7 @@ void EmuThread::connectSignals()
 void EmuThread::loadSettings(SettingsInterface& si, std::unique_lock<std::mutex>& lock)
 {
 	m_verbose_status = si.GetBoolValue("UI", "VerboseStatusBar", false);
-	m_pause_on_focus_loss = si.GetBoolValue("UI", "PauseOnFocusLoss", false);
+	m_pause_on_focus_loss = !AgentConsole::IsDeterministic() && si.GetBoolValue("UI", "PauseOnFocusLoss", false);
 }
 
 void Host::LoadSettings(SettingsInterface& si, std::unique_lock<std::mutex>& lock)
@@ -1332,6 +1349,11 @@ bool QtHost::InitializeConfig()
 
 	if (!EmuFolders::SetResourcesDirectory())
 	{
+		if (!s_agent_console_directory.isEmpty())
+		{
+			std::fprintf(stderr, "Agent console: resources directory missing.\n");
+			return false;
+		}
 		QMessageBox::critical(nullptr, QStringLiteral("PCSX2"),
 			QStringLiteral("Resources directory is missing, your installation is incomplete."));
 		return false;
@@ -1339,6 +1361,11 @@ bool QtHost::InitializeConfig()
 
 	if (!EmuFolders::SetDataDirectory(&error))
 	{
+		if (!s_agent_console_directory.isEmpty())
+		{
+			std::fprintf(stderr, "Agent console: data directory: %s\n", error.GetDescription().c_str());
+			return false;
+		}
 		// no point translating, config isn't loaded
 		QMessageBox::critical(
 			nullptr, QStringLiteral("PCSX2"),
@@ -1363,6 +1390,11 @@ bool QtHost::InitializeConfig()
 	Host::Internal::SetBaseSettingsLayer(s_base_settings_interface.get());
 	if (!settings_exists || !s_base_settings_interface->Load() || !VMManager::Internal::CheckSettingsVersion())
 	{
+		if (!s_agent_console_directory.isEmpty())
+		{
+			std::fprintf(stderr, "Agent console: explicit configuration missing, invalid, or incompatible: %s\n", path.c_str());
+			return false;
+		}
 		// If the config file doesn't exist, assume this is a new install and don't prompt to overwrite.
 		if (FileSystem::FileExists(s_base_settings_interface->GetFileName().c_str()) &&
 			QMessageBox::question(nullptr, QStringLiteral("PCSX2"),
@@ -1420,6 +1452,11 @@ bool QtHost::InitializeConfig()
 	// Setup wizard was incomplete last time?
 	s_run_setup_wizard =
 		s_run_setup_wizard || s_base_settings_interface->GetBoolValue("UI", "SetupWizardIncomplete", false);
+	if (s_run_setup_wizard && !s_agent_console_directory.isEmpty())
+	{
+		std::fprintf(stderr, "Agent console: configuration requires setup; complete it before starting an agent session.\n");
+		return false;
+	}
 
 	// TODO: -nogui console block?
 
@@ -1692,6 +1729,11 @@ void Host::ReportInfoAsync(const std::string_view title, const std::string_view 
 
 void Host::ReportErrorAsync(const std::string_view title, const std::string_view message)
 {
+	if (AgentConsole::IsEnabled())
+	{
+		AgentConsole::SetFault("host_error: " + std::string(title) + ": " + std::string(message));
+		return;
+	}
 	if (!title.empty() && !message.empty())
 		ERROR_LOG("ReportErrorAsync: {}: {}", title, message);
 	else if (!message.empty())
@@ -2132,6 +2174,8 @@ void QtHost::PrintCommandLineHelp(const std::string_view progname)
 	std::fprintf(stderr, "  -help: Displays this information and exits.\n");
 	std::fprintf(stderr, "  -version: Displays version information and exits.\n");
 	std::fprintf(stderr, "  -batch: Enables batch mode (exits after shutting down).\n");
+	std::fprintf(stderr, "  -agent-console <directory>: Enables the RAW console API in a fresh run directory (implies -nogui).\n");
+	std::fprintf(stderr, "  -agent-deterministic: Paused, isolated ELF profile; control execution with the agent API.\n");
 	std::fprintf(stderr, "  -nogui: Hides main window while running (implies batch mode).\n");
 	std::fprintf(stderr, "  -portable: Force enable portable mode to store data in local PCSX2 path instead of the default configuration path. Overrides '-datapath'.\n");
 	std::fprintf(stderr, "  -datapath <path>: Specify the directory to be used for all application data.\n");
@@ -2174,6 +2218,7 @@ std::shared_ptr<VMBootParameters>& QtHost::AutoBoot(std::shared_ptr<VMBootParame
 bool QtHost::ParseCommandLineOptions(const QStringList& args, std::shared_ptr<VMBootParameters>& autoboot)
 {
 	bool no_more_args = false;
+	const bool agent_mode_requested = args.contains(QStringLiteral("-agent-console"));
 
 	if (args.empty())
 	{
@@ -2197,6 +2242,18 @@ bool QtHost::ParseCommandLineOptions(const QStringList& args, std::shared_ptr<VM
 			{
 				PrintCommandLineVersion();
 				return false;
+			}
+			else if (CHECK_ARG_PARAM(QStringLiteral("-agent-console")))
+			{
+				s_agent_console_directory = *++it;
+				s_batch_mode = true;
+				s_nogui_mode = true;
+				continue;
+			}
+			else if (CHECK_ARG(QStringLiteral("-agent-deterministic")))
+			{
+				AgentConsole::ConfigureDeterministic(true);
+				continue;
 			}
 			else if (CHECK_ARG(QStringLiteral("-batch")))
 			{
@@ -2336,6 +2393,11 @@ bool QtHost::ParseCommandLineOptions(const QStringList& args, std::shared_ptr<VM
 			}
 			else if ((*it)[0] == '-')
 			{
+				if (agent_mode_requested)
+				{
+					std::fprintf(stderr, "Agent console: unknown or incomplete parameter: %s\n", it->toUtf8().constData());
+					return false;
+				}
 				QMessageBox::critical(nullptr, QStringLiteral("Error"), QStringLiteral("Unknown parameter: '%1'").arg(*it));
 				return false;
 			}
@@ -2368,12 +2430,22 @@ bool QtHost::ParseCommandLineOptions(const QStringList& args, std::shared_ptr<VM
 	// scanning the game list).
 	if (s_batch_mode && !s_start_big_picture_mode && !autoboot)
 	{
+		if (agent_mode_requested)
+		{
+			std::fprintf(stderr, "Agent console: explicit boot parameters are required.\n");
+			return false;
+		}
 		QMessageBox::critical(nullptr, QStringLiteral("Error"),
 			s_nogui_mode ? QStringLiteral("Cannot use no-gui mode, because no boot filename was specified.") :
 						   QStringLiteral("Cannot use batch mode, because no boot filename was specified."));
 		return false;
 	}
 
+	if (AgentConsole::IsDeterministic() && s_agent_console_directory.isEmpty())
+	{
+		std::fprintf(stderr, "-agent-deterministic requires -agent-console.\n");
+		return false;
+	}
 	return true;
 }
 
@@ -2509,6 +2581,16 @@ int main(int argc, char* argv[])
 	QtHost::UpdateApplicationTheme();
 
 	// Start logging early.
+	if (!s_agent_console_directory.isEmpty())
+	{
+		QString error;
+		if (!AgentConsoleServer::Start(s_agent_console_directory, &error))
+		{
+			std::fprintf(stderr, "Agent console: %s\n", error.toUtf8().constData());
+			return EXIT_FAILURE;
+		}
+		VMManager::Internal::SetBlockSystemConsole(true);
+	}
 	LogWindow::updateSettings();
 
 	// Start up the CPU thread.
@@ -2564,6 +2646,7 @@ int main(int argc, char* argv[])
 shutdown_and_exit:
 	// Shutting down.
 	EmuThread::stop();
+	AgentConsoleServer::Stop();
 	if (g_main_window)
 	{
 		g_main_window->close();

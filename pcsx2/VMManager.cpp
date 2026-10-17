@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Achievements.h"
+#include "AgentConsole.h"
 #include "BuildVersion.h"
 #include "CDVD/CDVD.h"
 #include "CDVD/IsoReader.h"
@@ -637,6 +638,7 @@ void VMManager::LoadSettings()
 	std::unique_lock<std::mutex> lock = Host::GetSettingsLock();
 	SettingsInterface* si = Host::GetSettingsInterface();
 	LoadCoreSettings(*si);
+	AgentConsole::PinSettings(EmuConfig);
 	Pad::LoadConfig(*si);
 	Host::LoadSettings(*si, lock);
 	InputManager::ReloadSources(*si, lock);
@@ -648,6 +650,7 @@ void VMManager::LoadSettings()
 		WarnAboutUnsafeSettings();
 		ApplyGameFixes();
 	}
+	AgentConsole::PinSettings(EmuConfig);
 }
 
 void VMManager::ReloadInputSources()
@@ -824,6 +827,7 @@ void VMManager::ApplyCoreSettings()
 		ApplyGameFixes();
 	}
 
+	AgentConsole::PinSettings(EmuConfig);
 	CheckForConfigChanges(old_config);
 }
 
@@ -1386,6 +1390,12 @@ void VMManager::InitializeAsync(
 
 VMBootResult VMManager::Initialize(const VMBootParameters& boot_params, Error* error)
 {
+	if (AgentConsole::IsDeterministic() && (!boot_params.filename.empty() ||
+											   (boot_params.source_type.has_value() && boot_params.source_type.value() != CDVD_SourceType::NoDisc)))
+	{
+		Error::SetString(error, "Deterministic profile requires an ELF cold boot without disc media.");
+		return VMBootResult::StartupFailure;
+	}
 	const Common::Timer init_timer;
 	if (s_state.load(std::memory_order_acquire) != VMState::Shutdown)
 	{
@@ -2119,6 +2129,11 @@ u32 VMManager::DeleteSaveStates(const char* game_serial, u32 game_crc, bool also
 
 bool VMManager::LoadState(const char* filename, Error* error)
 {
+	if (AgentConsole::IsEnabled())
+	{
+		Error::SetString(error, "Agent console sessions require a cold boot; savestate loading is not supported yet.");
+		return false;
+	}
 	if (Achievements::IsHardcoreModeActive())
 	{
 		Error::SetString(error,

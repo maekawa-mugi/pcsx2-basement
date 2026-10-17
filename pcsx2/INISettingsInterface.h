@@ -20,6 +20,7 @@ public:
 	bool IsDirty() const { return m_dirty; }
 
 	bool Load();
+	std::string Serialize() const;
 	bool Save(Error* error = nullptr) override;
 
 	void Clear() override;
