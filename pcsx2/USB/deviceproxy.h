@@ -61,6 +61,10 @@ public:
 	virtual float GetBindingValue(const USBDevice* dev, u32 bind) const;
 	virtual void SetBindingValue(USBDevice* dev, u32 bind, float value) const;
 
+	// Native set-1 keyboard events, independent of logical shortcut bindings.
+	virtual void PhysicalKeyboardEvent(USBDevice* dev, u32 scancode, bool pressed) const {}
+	virtual void ClearPhysicalKeyboardState(USBDevice* dev) const {}
+
 	virtual bool Freeze(USBDevice* dev, StateWrapper& sw) const;
 	virtual void UpdateSettings(USBDevice* dev, SettingsInterface& si) const;
 

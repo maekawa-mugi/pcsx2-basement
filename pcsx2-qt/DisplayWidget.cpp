@@ -8,6 +8,8 @@
 
 #include "pcsx2/ImGui/FullscreenUI.h"
 #include "pcsx2/ImGui/ImGuiManager.h"
+#include "pcsx2/USB/USB.h"
+#include "pcsx2/USB/usb-hid/physical-keyboard.h"
 
 #include "common/Assertions.h"
 #include "common/Console.h"
@@ -31,6 +33,15 @@
 DisplaySurface::DisplaySurface()
 	: QWindow()
 {
+	// Child QWindows do not receive FocusOut on every platform/window setup.
+	connect(qApp, &QGuiApplication::applicationStateChanged, this, [](Qt::ApplicationState state) {
+		if (state != Qt::ApplicationActive)
+			Host::RunOnCPUThread([]() { USB::ClearPhysicalKeyboardState(); });
+	});
+	connect(qApp, &QGuiApplication::focusWindowChanged, this, [this](QWindow* window) {
+		if (window != this)
+			Host::RunOnCPUThread([]() { USB::ClearPhysicalKeyboardState(); });
+	});
 	m_resize_debounce_timer = new QTimer(this);
 	m_resize_debounce_timer->setSingleShot(true);
 	m_resize_debounce_timer->setTimerType(Qt::PreciseTimer);
@@ -244,6 +255,16 @@ void DisplaySurface::handleKeyInputEvent(QEvent* event)
 
 			if (key_event->isAutoRepeat())
 				return;
+#ifdef _WIN32
+			// Preserve native positions before Qt's US-oriented text remapping.
+			const u32 scancode = usb_hid::NormalizeWindowsScanCode(key_event->nativeScanCode());
+			if (scancode && !ImGuiManager::WantsTextInput() && !FullscreenUI::HasActiveWindow())
+			{
+				Host::RunOnCPUThread([scancode, pressed = (event->type() == QEvent::KeyPress)]() {
+					USB::PhysicalKeyboardEvent(scancode, pressed);
+				});
+			}
+#endif
 
 			// For some reason, Windows sends "fake" key events.
 			// Scenario: Press shift, press F1, release shift, release F1.
@@ -291,6 +312,11 @@ bool DisplaySurface::event(QEvent* event)
 {
 	switch (event->type())
 	{
+		case QEvent::FocusOut:
+		case QEvent::WindowDeactivate:
+			Host::RunOnCPUThread([]() { USB::ClearPhysicalKeyboardState(); });
+			return QWindow::event(event);
+
 		case QEvent::KeyPress:
 		case QEvent::KeyRelease:
 		{

@@ -37,6 +37,10 @@ namespace USB
 	float GetDeviceBindValue(u32 port, u32 bind_index);
 	void SetDeviceBindValue(u32 port, u32 bind_index, float value);
 
+	/// Called on the CPU thread for native physical keyboard events/focus loss.
+	void PhysicalKeyboardEvent(u32 scancode, bool pressed);
+	void ClearPhysicalKeyboardState();
+
 	/// Called when a new input device is connected.
 	void InputDeviceConnected(const std::string_view identifier);
 

@@ -34,6 +34,7 @@
 
 #include "IconsPromptFont.h"
 #include "common/Console.h"
+#include <array>
 
 namespace usb_hid
 {
@@ -51,6 +52,8 @@ namespace usb_hid
 		u32 port = 0;
 
 		std::map<u32, QKeyCode> keycode_mapping;
+		bool physical_keyboard = false;
+		std::array<bool, 256> physical_keys{};
 
 		void SetKeycodeMapping();
 
@@ -771,6 +774,9 @@ namespace usb_hid
 	USBDevice* HIDKbdDevice::CreateDevice(SettingsInterface& si, u32 port, u32 subtype) const
 	{
 		UsbHIDState* s = new UsbHIDState(port);
+#ifdef _WIN32
+		s->physical_keyboard = USB::GetConfigBool(si, port, TypeName(), "PhysicalKeyInput", false);
+#endif
 		s->desc.full = &s->desc_dev;
 		s->desc.str = beatmania_dadada_desc_strings;
 
@@ -807,6 +813,9 @@ namespace usb_hid
 	{
 		UsbHIDState* s = USB_CONTAINER_OF(dev, UsbHIDState, dev);
 
+		if (s->physical_keyboard)
+			return;
+
 		const auto it = s->keycode_mapping.find(bind);
 		if (it == s->keycode_mapping.end())
 			return;
@@ -840,6 +849,49 @@ namespace usb_hid
 		return info;
 	}
 
+	std::span<const SettingInfo> HIDKbdDevice::Settings(u32 subtype) const
+	{
+#ifdef _WIN32
+		static constexpr const SettingInfo info[] = {
+			{SettingInfo::Type::Boolean, "PhysicalKeyInput", TRANSLATE_NOOP("USB", "Physical Keyboard Input (Windows)"),
+				TRANSLATE_NOOP("USB", "Send physical key positions to the guest, preserving JIS and US layouts. Bypasses the logical Keyboard binding. Select the matching layout in the guest. Restart the VM after changing this setting."), "false"},
+		};
+		return info;
+#else
+		return {};
+#endif
+	}
+
+	void HIDKbdDevice::PhysicalKeyboardEvent(USBDevice* dev, u32 scancode, bool pressed) const
+	{
+		UsbHIDState* s = USB_CONTAINER_OF(dev, UsbHIDState, dev);
+		if (!s->physical_keyboard || scancode == 0 || scancode >= s->physical_keys.size() ||
+			s->physical_keys[scancode] == pressed)
+			return;
+		s->physical_keys[scancode] = pressed;
+		KeyValue kv{};
+		kv.type = KEY_VALUE_KIND_NUMBER;
+		kv.u.number = scancode;
+		s->QueueKeyboardState(kv, pressed);
+	}
+
+	void HIDKbdDevice::ClearPhysicalKeyboardState(USBDevice* dev) const
+	{
+		UsbHIDState* s = USB_CONTAINER_OF(dev, UsbHIDState, dev);
+		if (!s->physical_keyboard)
+			return;
+		// Focus loss must release even a full queue of held modifiers/keys.
+		s->physical_keys.fill(false);
+		s->hid.head = 0;
+		// A queued no-op is required: otherwise hid_has_events() would NAK
+		// forever, and the guest would never receive the all-released report.
+		s->hid.n = 1;
+		s->hid.kbd.keycodes[0] = 0;
+		s->hid.kbd.modifiers = s->hid.kbd.keys = 0;
+		std::fill(std::begin(s->hid.kbd.key), std::end(s->hid.kbd.key), 0);
+		s->hid.event(&s->hid);
+	}
+
 	bool HIDKbdDevice::Freeze(USBDevice* dev, StateWrapper& sw) const
 	{
 		UsbHIDState* s = USB_CONTAINER_OF(dev, UsbHIDState, dev);
@@ -858,6 +910,8 @@ namespace usb_hid
 		sw.Do(&s->hid.protocol);
 		sw.Do(&s->hid.idle);
 
+		if (sw.IsReading())
+			ClearPhysicalKeyboardState(dev);
 		return !sw.HasError();
 	}
 

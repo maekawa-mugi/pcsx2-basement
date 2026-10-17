@@ -628,6 +628,20 @@ void USB::SetDeviceBindValue(u32 port, u32 bind_index, float value)
 	s_usb_device_proxy[port]->SetBindingValue(s_usb_device[port], bind_index, value);
 }
 
+void USB::PhysicalKeyboardEvent(u32 scancode, bool pressed)
+{
+	for (u32 i = 0; i < NUM_PORTS; i++)
+		if (s_usb_device[i])
+			s_usb_device_proxy[i]->PhysicalKeyboardEvent(s_usb_device[i], scancode, pressed);
+}
+
+void USB::ClearPhysicalKeyboardState()
+{
+	for (u32 i = 0; i < NUM_PORTS; i++)
+		if (s_usb_device[i])
+			s_usb_device_proxy[i]->ClearPhysicalKeyboardState(s_usb_device[i]);
+}
+
 void USB::InputDeviceConnected(const std::string_view identifier)
 {
 	for (u32 i = 0; i < NUM_PORTS; i++)
