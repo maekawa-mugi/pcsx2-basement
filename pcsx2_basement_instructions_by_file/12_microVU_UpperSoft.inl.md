@@ -1,0 +1,12 @@
+# pcsx2/x86/microVU_UpperSoft.inl
+
+**Source:** [`pcsx2/x86/microVU_UpperSoft.inl`](https://github.com/maekawa-mugi/pcsx2-basement/blob/main/pcsx2/x86/microVU_UpperSoft.inl)
+
+> Source-specific instructions only. `P1`/`P2`/`P3` are proposals; `EXISTING` items are already implemented. Match the current source, preserve CPU feature gates and emulation semantics, and verify generated code and performance before accepting changes.
+
+- **[P1 · US01 · L1196–1205](https://github.com/maekawa-mugi/pcsx2-basement/blob/main/pcsx2/x86/microVU_UpperSoft.inl#L1196-L1205)** — Delete `AND(eax, product_status_sign)` after `AND(eax, 0x80000000); SHR(eax, 30)`: result is already 0 or 2. One instruction removed with no extra state.
+- **[P2 · US02 · L2790–2905](https://github.com/maekawa-mugi/pcsx2-basement/blob/main/pcsx2/x86/microVU_UpperSoft.inl#L2790-L2905)** — Replace eligible SoftFloat MUL Booth-correction `PCMP + MOVMSKPS + GPR` lane predicates with `VPCMPD` plus direct `KTEST/KMOV` where this genuinely cuts instructions or live XMM temps. Keep exact active-lane and slow-fallback behavior; watch reserved `k1`–`k5`.
+- **[P2 · US03 · L2780–2928](https://github.com/maekawa-mugi/pcsx2-basement/blob/main/pcsx2/x86/microVU_UpperSoft.inl#L2780-L2928)** — Measure removing temporary XMM comparison masks in native MUL/SoftFloat checks, especially before `MOVMSKPS`; optimize register pressure, not merely opcode count.
+- **[P3 · US04 · L4433–4555](https://github.com/maekawa-mugi/pcsx2-basement/blob/main/pcsx2/x86/microVU_UpperSoft.inl#L4433-L4555)** — Existing recognizer finds `MULA → MADDA → … → MADD` dot-product sequences but emits exact steps separately. Prototype a fused register-resident kernel retaining ACC/operands between steps; preserve per-instruction rounding, ACC/MAC flags and dependency checks.
+- **[P3 · US05 · L230–270, L2750–2850](https://github.com/maekawa-mugi/pcsx2-basement/blob/main/pcsx2/x86/microVU_UpperSoft.inl#L230-L270)** — For partial VF commits, evaluate leaving results in high XMM16–31 temporary homes rather than repeatedly loading/storing low XMM/memory; respect the current allocator and high-register invalidation on calls.
+- **[EXISTING · US06 · L260–275, L2745–2830](https://github.com/maekawa-mugi/pcsx2-basement/blob/main/pcsx2/x86/microVU_UpperSoft.inl#L2745-L2830)** — AVX-512 SoftFloat compare masks, high XMM register reservations, and a stackless native MUL fast path already exist. Do not duplicate them; isolate remaining `MOVMSKPS` boundaries.
