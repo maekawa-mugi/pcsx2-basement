@@ -56,7 +56,8 @@ IOP-to-EE interrupt forwarding are separate from host-window focus handling.
 
 ## Local AgentConsole integration
 
-The standalone physical-input commit does not depend on the separate local
-AgentConsole development patches. Their additional deterministic-input guards
-in USB.cpp remain in the working tree alongside those uncommitted patches.
-The running development build includes the guards used during validation.
+A separate follow-up commit adds deterministic host-input guards in USB.cpp.
+It depends on the local AgentConsole interface (AgentConsole.h). The other
+pre-existing AgentConsole implementation/build changes are outside these
+keyboard commits. The running development build includes both the feature
+and its integration guards, as used during validation.

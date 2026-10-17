@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Host.h"
+#include "AgentConsole.h"
 #include "StateWrapper.h"
 #include "USB/USB.h"
 #include "USB/deviceproxy.h"
@@ -630,6 +631,8 @@ void USB::SetDeviceBindValue(u32 port, u32 bind_index, float value)
 
 void USB::PhysicalKeyboardEvent(u32 scancode, bool pressed)
 {
+	if (AgentConsole::IsDeterministic())
+		return;
 	for (u32 i = 0; i < NUM_PORTS; i++)
 		if (s_usb_device[i])
 			s_usb_device_proxy[i]->PhysicalKeyboardEvent(s_usb_device[i], scancode, pressed);
@@ -637,6 +640,8 @@ void USB::PhysicalKeyboardEvent(u32 scancode, bool pressed)
 
 void USB::ClearPhysicalKeyboardState()
 {
+	if (AgentConsole::IsDeterministic())
+		return;
 	for (u32 i = 0; i < NUM_PORTS; i++)
 		if (s_usb_device[i])
 			s_usb_device_proxy[i]->ClearPhysicalKeyboardState(s_usb_device[i]);
