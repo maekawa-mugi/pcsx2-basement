@@ -629,6 +629,9 @@
     <ClCompile Include="MMI.cpp">
       <Filter>System\Ps2\EmotionEngine\EE\Interpreter</Filter>
     </ClCompile>
+    <ClCompile Include="x86\PrecompiledHeaderAVX512.cpp">
+      <Filter>System\Ps2\EmotionEngine\EE\Interpreter</Filter>
+    </ClCompile>
     <ClCompile Include="x86\InterpreterAVX512.cpp">
       <Filter>System\Ps2\EmotionEngine\EE\Interpreter</Filter>
     </ClCompile>

@@ -687,9 +687,16 @@
     <ClCompile Include="FPU.cpp" />
     <ClCompile Include="Interpreter.cpp" />
     <ClCompile Include="MMI.cpp" />
+    <ClCompile Include="x86\PrecompiledHeaderAVX512.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'!='x64'">true</ExcludedFromBuild>
+      <EnableEnhancedInstructionSet>AdvancedVectorExtensions512</EnableEnhancedInstructionSet>
+      <PrecompiledHeader>Create</PrecompiledHeader>
+      <PrecompiledHeaderOutputFile>$(IntDir)pcsx2_avx512.pch</PrecompiledHeaderOutputFile>
+    </ClCompile>
     <ClCompile Include="x86\InterpreterAVX512.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'!='x64'">true</ExcludedFromBuild>
       <EnableEnhancedInstructionSet>AdvancedVectorExtensions512</EnableEnhancedInstructionSet>
+      <PrecompiledHeaderOutputFile>$(IntDir)pcsx2_avx512.pch</PrecompiledHeaderOutputFile>
     </ClCompile>
     <ClCompile Include="x86\AVX512Profile.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'!='x64'">true</ExcludedFromBuild>

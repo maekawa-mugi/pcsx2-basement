@@ -125,3 +125,6 @@ CMakeSettings.json
 /ci-artifacts/
 /out/
 /.cache/
+
+# Local source download; extracted fmt sources are already tracked.
+/3rdparty/fmt.zip
