@@ -128,3 +128,6 @@ CMakeSettings.json
 
 # Local source download; extracted fmt sources are already tracked.
 /3rdparty/fmt.zip
+
+# Python test/tool bytecode.
+__pycache__/
