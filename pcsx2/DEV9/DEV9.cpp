@@ -108,7 +108,7 @@ static void OpenATADevices()
 	if (!master_requested && !linux_swap_requested)
 		return;
 
-	dev9.ata->Open(hdd_path, master_requested, linux_swap_requested);
+	dev9.ata->Open(hdd_path, master_requested, linux_swap_requested, EmuConfig.DEV9.HddSwapFormat == "NetBSD");
 	if (master_requested && !dev9.ata->IsMasterPresent())
 		EmuConfig.DEV9.HddEnable = false;
 	if (linux_swap_requested && !dev9.ata->IsLinuxSwapPresent())
@@ -1255,6 +1255,7 @@ void DEV9CheckChanges(const Pcsx2Config& old_config)
 	// primary/slave selection and volatile swap lifetime remain deterministic.
 	if (EmuConfig.DEV9.HddEnable != old_config.DEV9.HddEnable ||
 		EmuConfig.DEV9.HddEnableLinuxSwap != old_config.DEV9.HddEnableLinuxSwap ||
+		EmuConfig.DEV9.HddSwapFormat != old_config.DEV9.HddSwapFormat ||
 		EmuConfig.DEV9.HddFile != old_config.DEV9.HddFile)
 	{
 		dev9.ata->Close();

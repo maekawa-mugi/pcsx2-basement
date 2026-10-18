@@ -1496,6 +1496,7 @@ void Pcsx2Config::DEV9Options::LoadSave(SettingsWrapper& wrap)
 		SettingsWrapSection("DEV9/Hdd");
 		SettingsWrapEntry(HddEnable);
 		SettingsWrapEntry(HddEnableLinuxSwap);
+		SettingsWrapEntry(HddSwapFormat);
 		SettingsWrapEntry(HddFile);
 	}
 }
@@ -1529,6 +1530,7 @@ bool Pcsx2Config::DEV9Options::operator==(const DEV9Options& right) const
 
 		   OpEqu(HddEnable) &&
 		   OpEqu(HddEnableLinuxSwap) &&
+		   OpEqu(HddSwapFormat) &&
 		   OpEqu(HddFile);
 }
 

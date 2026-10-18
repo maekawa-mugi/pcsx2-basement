@@ -171,6 +171,11 @@ DEV9SettingsWidget::DEV9SettingsWidget(SettingsWindow* settings_dialog, QWidget*
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_ui.hddEnabled, "DEV9/Hdd", "HddEnable", false);
 	SettingWidgetBinder::BindWidgetToBoolSetting(
 		sif, m_ui.hddLinuxSwap, "DEV9/Hdd", "HddEnableLinuxSwap", false);
+	m_ui.hddSwapFormat->addItem(tr("Linux swap"), QStringLiteral("Linux"));
+	m_ui.hddSwapFormat->addItem(tr("NetBSD swap"), QStringLiteral("NetBSD"));
+	SettingWidgetBinder::BindWidgetToStringSetting(sif, m_ui.hddSwapFormat, "DEV9/Hdd", "HddSwapFormat", "Linux");
+	m_ui.hddSwapFormat->setEnabled(m_ui.hddLinuxSwap->isChecked());
+	connect(m_ui.hddLinuxSwap, &QCheckBox::toggled, m_ui.hddSwapFormat, &QWidget::setEnabled);
 
 	if (dialog()->isPerGameSettings())
 	{

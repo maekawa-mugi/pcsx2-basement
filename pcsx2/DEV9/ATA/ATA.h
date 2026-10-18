@@ -29,6 +29,7 @@ private:
 	std::FILE* hddImage = nullptr;
 	u64 hddImageSize = 0;
 	std::unique_ptr<u8[]> linuxSwapData;
+	bool swapDiskIsNetBSD = false;
 
 	bool hddSparse = false;
 	u64 hddSparseBlockSize;
@@ -166,7 +167,7 @@ public:
 	ATA();
 	~ATA();
 
-	void Open(const std::string& hddPath, bool enableMaster, bool enableLinuxSwap);
+	void Open(const std::string& hddPath, bool enableMaster, bool enableLinuxSwap, bool swapIsNetBSD = false);
 	void Close();
 	bool IsMasterPresent() const { return hddImage != nullptr; }
 	bool IsLinuxSwapPresent() const { return linuxSwapData != nullptr; }
@@ -188,6 +189,7 @@ private:
 	bool OpenMaster(const std::string& hddPath);
 	bool OpenLinuxSwap();
 	void InitializeLinuxSwapDisk();
+	void InitializeNetBSDSwapDisk();
 	void InitSparseSupport(const std::string& hddPath);
 	bool IsSelectedDevicePresent() const;
 	bool IsSelectedLinuxSwap() const;
@@ -285,6 +287,7 @@ private:
 	void HDD_ReadPIO(bool isLBA48);
 	void HDD_ReadPIOS2();
 	void HDD_ReadPIOEndBlock();
+	void HDD_WriteMultiple(bool isLBA48);
 	void HDD_WriteSectors(bool isLBA48);
 	void HDD_WritePIO(bool isLBA48);
 	void HDD_WritePIOEndBlock();

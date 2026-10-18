@@ -1145,6 +1145,8 @@ struct Pcsx2Config
 
 		bool HddEnable{false};
 		bool HddEnableLinuxSwap{false};
+		// Format of the volatile primary-slave swap RAM disk: "Linux" or "NetBSD".
+		std::string HddSwapFormat{"Linux"};
 		std::string HddFile;
 
 		DEV9Options();

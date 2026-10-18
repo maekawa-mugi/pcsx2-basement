@@ -35,7 +35,7 @@ ATA::~ATA()
 	Close();
 }
 
-void ATA::Open(const std::string& hddPath, bool enableMaster, bool enableLinuxSwap)
+void ATA::Open(const std::string& hddPath, bool enableMaster, bool enableLinuxSwap, bool swapIsNetBSD)
 {
 	readBufferLen = 256 * 512;
 	readBuffer = new u8[readBufferLen];
@@ -43,6 +43,7 @@ void ATA::Open(const std::string& hddPath, bool enableMaster, bool enableLinuxSw
 
 	if (enableMaster)
 		OpenMaster(hddPath);
+	swapDiskIsNetBSD = swapIsNetBSD;
 	if (enableLinuxSwap)
 		OpenLinuxSwap();
 
@@ -137,8 +138,16 @@ bool ATA::OpenLinuxSwap()
 	}
 	std::memset(linuxSwapData.get(), 0, static_cast<size_t>(LINUX_SWAP_SIZE));
 
-	InitializeLinuxSwapDisk();
-	DevCon.WriteLn("DEV9: ATA: Added 1 GiB Linux swap RAM disk with MBR partition as primary slave");
+	if (swapDiskIsNetBSD)
+	{
+		InitializeNetBSDSwapDisk();
+		DevCon.WriteLn("DEV9: ATA: Added 1 GiB NetBSD swap RAM disk with BSD disklabel as primary slave");
+	}
+	else
+	{
+		InitializeLinuxSwapDisk();
+		DevCon.WriteLn("DEV9: ATA: Added 1 GiB Linux swap RAM disk with MBR partition as primary slave");
+	}
 	return true;
 }
 
@@ -201,6 +210,71 @@ void ATA::InitializeLinuxSwapDisk()
 	constexpr char volume_label[] = "PCSX2 swap";
 	std::memcpy(&linuxSwapData[partition_offset + 1052], volume_label, sizeof(volume_label) - 1);
 	std::memcpy(&linuxSwapData[partition_offset + page_size - (sizeof(magic) - 1)], magic, sizeof(magic) - 1);
+}
+
+void ATA::InitializeNetBSDSwapDisk()
+{
+	// BSD disklabel as read by NetBSD/playstation2 (LABELSECTOR 1, LABELOFFSET 0,
+	// little-endian, MAXPARTITIONS 16). Partition 'b' is FS_SWAP and starts after a
+	// reserved first track; 'c' is the whole disk (RAW_PART). Offsets follow
+	// struct disklabel in <sys/disklabel.h>.
+	constexpr u32 sector_size = 512;
+	constexpr u32 sectors_per_track = 63;
+	constexpr u32 heads = 16;
+	constexpr u32 sectors_per_cyl = sectors_per_track * heads;
+	constexpr u32 disk_sectors = static_cast<u32>(LINUX_SWAP_SIZE / sector_size);
+	constexpr u32 cylinders = disk_sectors / sectors_per_cyl;
+	constexpr u32 swap_start = sectors_per_track;
+	constexpr u32 swap_end = cylinders * sectors_per_cyl;
+	constexpr u32 swap_size = swap_end - swap_start;
+	constexpr size_t label_offset = 1 * sector_size; // LABELSECTOR * secsize + LABELOFFSET
+	constexpr size_t partitions_offset = 148;
+	constexpr u16 npartitions = 3; // a, b, c
+	constexpr size_t label_size = partitions_offset + npartitions * 16;
+	static_assert(label_offset + label_size <= sector_size * 2);
+
+	u8* label = &linuxSwapData[label_offset];
+	auto w16 = [label](size_t o, u32 v) {
+		label[o] = static_cast<u8>(v);
+		label[o + 1] = static_cast<u8>(v >> 8);
+	};
+	auto w32 = [&w16](size_t o, u32 v) {
+		w16(o, v);
+		w16(o + 2, v >> 16);
+	};
+
+	w32(0, 0x82564557); // DISKMAGIC
+	w16(4, 0); // d_type: unknown
+	std::memcpy(label + 8, "pcsx2-swap", 10); // d_typename
+	std::memcpy(label + 24, "swap", 4); // d_packname
+	w32(40, sector_size);
+	w32(44, sectors_per_track);
+	w32(48, heads);
+	w32(52, cylinders);
+	w32(56, sectors_per_cyl);
+	w32(60, disk_sectors);
+	w16(72, 3600); // d_rpm
+	w16(74, 1); // d_interleave
+	w32(132, 0x82564557); // d_magic2
+	w16(138, npartitions);
+	w32(140, 8192); // d_bbsize
+	w32(144, 8192); // d_sbsize
+
+	auto partition = [&](unsigned idx, u32 size, u32 offset, u8 fstype) {
+		const size_t o = partitions_offset + idx * 16;
+		w32(o, size);
+		w32(o + 4, offset);
+		label[o + 12] = fstype;
+	};
+	partition(0, 0, 0, 0); // a: unused
+	partition(1, swap_size, swap_start, 1); // b: FS_SWAP
+	partition(2, disk_sectors, 0, 0); // c: whole disk
+
+	// d_checksum: XOR of all 16-bit words in the label including used partitions.
+	u16 sum = 0;
+	for (size_t i = 0; i < label_size; i += 2)
+		sum ^= static_cast<u16>(label[i] | (label[i + 1] << 8));
+	w16(136, sum);
 }
 
 bool ATA::IsSelectedDevicePresent() const

@@ -174,6 +174,18 @@ void ATA::HDD_ReadPIOEndBlock()
 //Write Buffer
 
 //Write Multiple
+void ATA::HDD_WriteMultiple(bool isLBA48)
+{
+	sectorsPerInterrupt = curMultipleSectorsSetting;
+	if (sectorsPerInterrupt == 0)
+	{
+		if (!PreCmd())
+			return;
+		CmdNoDataAbort();
+		return;
+	}
+	HDD_WritePIO(isLBA48);
+}
 
 //Write Sectors
 void ATA::HDD_WriteSectors(bool isLBA48)
@@ -220,7 +232,8 @@ void ATA::HDD_WritePIOEndBlock()
 	wrTransferred += sizeof(pioBuffer);
 	if (wrTransferred < static_cast<int>(currentWriteLength))
 	{
-		DRQCmdPIODataFromHost(true);
+		// One INTRQ per block of sectorsPerInterrupt sectors (1 for WRITE SECTORS).
+		DRQCmdPIODataFromHost((wrTransferred / 512) % sectorsPerInterrupt == 0);
 		return;
 	}
 

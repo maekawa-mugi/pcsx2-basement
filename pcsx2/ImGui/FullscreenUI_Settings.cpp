@@ -4318,9 +4318,17 @@ void FullscreenUI::DrawNetworkHDDSettingsPage()
 
 	DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_FLOPPY_DISK, "Enable HDD"),
 		FSUI_CSTR("Enables the internal Hard Disk Drive for expanded storage."), "DEV9/Hdd", "HddEnable", false);
-	DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_MEMORY, "Add 1 GiB Linux Swap RAM Disk as Primary Slave"),
-		FSUI_CSTR("Adds a volatile RAM disk, preformatted as Linux swap, as the primary ATA slave (/dev/hdb). Its contents are discarded when emulation stops."),
+	DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_MEMORY, "Add 1 GiB Swap RAM Disk as Primary Slave"),
+		FSUI_CSTR("Adds a volatile RAM disk, preformatted as swap, as the primary ATA slave (Linux /dev/hdb, NetBSD wd1). Its contents are discarded when emulation stops."),
 		"DEV9/Hdd", "HddEnableLinuxSwap", false);
+	{
+		static const char* const swap_format_names[] = {"Linux swap", "NetBSD swap"};
+		static const char* const swap_format_values[] = {"Linux", "NetBSD"};
+		DrawStringListSetting(bsi, FSUI_ICONSTR(ICON_FA_MEMORY, "Swap RAM Disk Format"),
+			FSUI_CSTR("Selects whether the swap RAM disk carries an MBR with a Linux swap partition or a BSD disklabel with a NetBSD swap partition (wd1b)."),
+			"DEV9/Hdd", "HddSwapFormat", "Linux", swap_format_names, swap_format_values, std::size(swap_format_names), false,
+			GetEffectiveBoolSetting(bsi, "DEV9/Hdd", "HddEnableLinuxSwap", false));
+	}
 
 	const bool hdd_enabled = GetEffectiveBoolSetting(bsi, "DEV9/Hdd", "HddEnable", false);
 

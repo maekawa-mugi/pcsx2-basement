@@ -38,6 +38,12 @@ void ATA::IDE_ExecCmd(u16 value)
 			else
 				HDD_Unk();
 			break;
+		case 0x39:
+			if (SelectedDeviceSupportsLBA48())
+				HDD_WriteMultiple(true);
+			else
+				HDD_Unk();
+			break;
 		case 0x40:
 			HDD_ReadVerifySectors(false);
 			break;
@@ -62,6 +68,9 @@ void ATA::IDE_ExecCmd(u16 value)
 		case 0xC4:
 			HDD_ReadMultiple(false);
 			break;
+		case 0xC5:
+			HDD_WriteMultiple(false);
+			break;
 		case 0xC6:
 			HDD_SetMultipleMode();
 			break;
@@ -83,6 +92,7 @@ void ATA::IDE_ExecCmd(u16 value)
 			else
 				HDD_Unk();
 			break;
+		case 0xE0: // STANDBY IMMEDIATE (issued by NetBSD wd at shutdown); no spindle to stop
 		case 0xE1:
 			HDD_IdleImmediate();
 			break;

@@ -409,13 +409,20 @@
         </property>
        </widget>
       </item>
-      <item row="3" column="0" colspan="3">
+      <item row="3" column="0" colspan="2">
        <widget class="QCheckBox" name="hddLinuxSwap">
         <property name="toolTip">
-         <string>Adds a volatile 1 GiB RAM disk, preformatted as Linux swap, as the primary ATA slave (/dev/hdb). Its contents are discarded when emulation stops.</string>
+         <string>Adds a volatile 1 GiB RAM disk, preformatted as swap, as the primary ATA slave (Linux /dev/hdb, NetBSD wd1). Its contents are discarded when emulation stops.</string>
         </property>
         <property name="text">
-         <string>Add 1 GiB Linux Swap RAM Disk as Primary Slave</string>
+         <string>Add 1 GiB Swap RAM Disk as Primary Slave</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="2">
+       <widget class="QComboBox" name="hddSwapFormat">
+        <property name="toolTip">
+         <string>Format of the swap RAM disk: an MBR with a Linux swap partition, or a BSD disklabel with a NetBSD swap partition (wd1b).</string>
         </property>
        </widget>
       </item>
@@ -470,6 +477,7 @@
   <tabstop>ethHosts</tabstop>
   <tabstop>hddEnabled</tabstop>
   <tabstop>hddLinuxSwap</tabstop>
+  <tabstop>hddSwapFormat</tabstop>
   <tabstop>hddLBA48</tabstop>
   <tabstop>hddFile</tabstop>
   <tabstop>hddBrowseFile</tabstop>

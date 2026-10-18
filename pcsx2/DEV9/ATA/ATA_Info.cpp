@@ -40,7 +40,7 @@ void ATA::CreateHDDinfo()
 {
 	u64 sizeSectors = GetSelectedDeviceSize() / 512;
 	const bool supports_lba48 = SelectedDeviceSupportsLBA48();
-	const std::string device_name = IsSelectedLinuxSwap() ? "PCSX2-LINUX-SWAP" : "PCSX2-DEV9-ATA-HDD";
+	const std::string device_name = IsSelectedLinuxSwap() ? (swapDiskIsNetBSD ? "PCSX2-NETBSD-SWAP" : "PCSX2-LINUX-SWAP") : "PCSX2-DEV9-ATA-HDD";
 
 	//PS2 is limited to 48bit size HDD (2TB), however,
 	//we don't yet support 48bit, so limit to 28bit size
