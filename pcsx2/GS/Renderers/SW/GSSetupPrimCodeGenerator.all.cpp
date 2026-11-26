@@ -405,8 +405,11 @@ void GSSetupPrimCodeGenerator::Color()
 
 		// constexpr VectorI mask16 = VectorI::cxpr(0xFFFF);
 		XYm mask16 = XYm(many_regs ? 12 : m_sel.notest ? 6 : 8);
-		pcmpeqd(mask16, mask16);
-		psrld(mask16, 16);
+		// one constant load instead of pcmpeqd + psrld (needs proper testing)
+		if (isXmm)
+			movdqa(mask16, ptr[&g_const_128b.m_dword_ffff]);
+		else
+			movdqa(mask16, ptr[&g_const_256b.m_dword_ffff]);
 
 		// local.d4.c = (GSVector4i(dscan.c * step_shift) & mask16).xzyw().pu32();
 		THREEARG(mulps, xmm1, xmm0, xmm3);

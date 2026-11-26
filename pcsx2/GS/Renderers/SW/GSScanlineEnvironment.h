@@ -288,6 +288,9 @@ struct alignas(64) GSScanlineConstantData256B
 	alignas(32) u32 m_dword_sign[8] = {};
 	alignas(32) u16 m_word_80[16] = {};
 	alignas(32) u32 m_dword_ffff[8] = {};
+	alignas(32) u16 m_word_1[16] = {}; // 0x0001 per word (bilinear uv1 = uv0 + 1)
+	alignas(32) u32 m_dword_mant[8] = {}; // 0x007fffff per dword (LOD mantissa)
+	alignas(32) u32 m_zmask[4][8] = {}; // 0xffffffff >> (zpsm * 8) per dword
 	// VBMI VPMULTISHIFTQB controls for the 5551 <-> 8888 conversions (same windows as MMI PEXT5/PPAC5).
 	// m_c5_expand_ctrl: RGBA5551 per dword -> bytes [R<<3, G<<3, B<<3, A<<7]; the rb/ga masks
 	// are applied after the 16-bit split ([R,0,B,0] / [G,0,A,0]).
@@ -331,6 +334,13 @@ struct alignas(64) GSScanlineConstantData256B
 		}
 		for (size_t i = 0; i < std::size(m_word_80); i++)
 			m_word_80[i] = 0x0080;
+		for (size_t i = 0; i < std::size(m_word_1); i++)
+			m_word_1[i] = 0x0001;
+		for (size_t i = 0; i < std::size(m_dword_mant); i++)
+			m_dword_mant[i] = 0x007fffffu;
+		for (size_t z = 0; z < 4; z++)
+			for (size_t i = 0; i < std::size(m_zmask[z]); i++)
+				m_zmask[z][i] = 0xffffffffu >> (z * 8);
 		for (int lane = 0; lane < 2; lane++)
 		{
 			for (int i = 0; i < 4; i++)
@@ -397,6 +407,9 @@ struct alignas(64) GSScanlineConstantData128B
 	alignas(16) u32 m_dword_sign[4] = {};
 	alignas(16) u16 m_word_80[8] = {};
 	alignas(16) u32 m_dword_ffff[4] = {};
+	alignas(16) u16 m_word_1[8] = {}; // 0x0001 per word (bilinear uv1 = uv0 + 1)
+	alignas(16) u32 m_dword_mant[4] = {}; // 0x007fffff per dword (LOD mantissa)
+	alignas(16) u32 m_zmask[4][4] = {}; // 0xffffffff >> (zpsm * 8) per dword
 
 	constexpr GSScanlineConstantData128B()
 	{
@@ -410,6 +423,13 @@ struct alignas(64) GSScanlineConstantData128B
 		}
 		for (size_t i = 0; i < std::size(m_word_80); i++)
 			m_word_80[i] = 0x0080;
+		for (size_t i = 0; i < std::size(m_word_1); i++)
+			m_word_1[i] = 0x0001;
+		for (size_t i = 0; i < std::size(m_dword_mant); i++)
+			m_dword_mant[i] = 0x007fffffu;
+		for (size_t z = 0; z < 4; z++)
+			for (size_t i = 0; i < std::size(m_zmask[z]); i++)
+				m_zmask[z][i] = 0xffffffffu >> (z * 8);
 		for (size_t n = 0; n < std::size(log2_coef); ++n)
 		{
 			for (size_t i = 0; i < 4; ++i)

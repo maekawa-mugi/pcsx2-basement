@@ -1225,22 +1225,21 @@ void GSDrawScanlineCodeGenerator::TestZ(const XYm& temp1, const XYm& temp2)
 
 		if (m_sel.zpsm)
 		{
-			pslld(temp2, static_cast<u8>(m_sel.zpsm * 8));
-			psrld(temp2, static_cast<u8>(m_sel.zpsm * 8));
+			// one AND with a zpsm-specific constant instead of pslld + psrld (needs proper testing)
+			pand(temp2, ptr[_m_const + offsetof(GConstType, m_zmask) + m_sel.zpsm * vecsize]);
 		}
 
 		if (m_sel.zpsm == 0)
 		{
 			// GSVector4i o = GSVector4i::x80000000();
 
-			pcmpeqd(temp1, temp1);
-			pslld(temp1, 31);
-
+			// zs - o and zd - o only flip the sign bit, so XOR with a constant sign vector is identical
+			// (needs proper testing)
 			// GSVector4i zso = zs - o;
 			// GSVector4i zdo = zd - o;
 
-			psubd(xym0, temp1);
-			psubd(temp2, temp1);
+			pxor(xym0, ptr[_m_const + offsetof(GConstType, m_dword_sign)]);
+			pxor(temp2, ptr[_m_const + offsetof(GConstType, m_dword_sign)]);
 		}
 
 		switch (m_sel.ztst)
@@ -1369,9 +1368,8 @@ void GSDrawScanlineCodeGenerator::SampleTexture()
 	{
 		// GSVector4i uv1 = uv0.add16(GSVector4i::x0001());
 
-		// x - (-1) == x + 1
-		pcmpeqd(xym0, xym0);
-		THREEARG(psubw, xym3, xym2, xym0);
+		// constant 0x0001 words instead of pcmpeqd + psubw (needs proper testing)
+		THREEARG(paddw, xym3, xym2, ptr[_m_const + offsetof(GConstType, m_word_1)]);
 
 		// uv0 = Wrap(uv0);
 		// uv1 = Wrap(uv1);
@@ -1750,8 +1748,8 @@ void GSDrawScanlineCodeGenerator::SampleTextureLOD()
 
 		// xym0 = (float)(exp(q) - 127)
 
-		pslld(xym4, 9);
-		psrld(xym4, 9);
+		// keep the 23 mantissa bits (needs proper testing)
+		pand(xym4, ptr[_m_const + offsetof(GConstType, m_dword_mant)]);
 
 #if USING_YMM
 		auto load_log2_coeff = [this](const XYm& reg, int i)
@@ -1999,8 +1997,7 @@ void GSDrawScanlineCodeGenerator::SampleTextureLOD()
 	{
 		// GSVector4i uv1 = uv0.add16(GSVector4i::x0001());
 
-		pcmpeqd(xym1, xym1);
-		THREEARG(psubw, xym3, xym2, xym1);
+		THREEARG(paddw, xym3, xym2, ptr[_m_const + offsetof(GConstType, m_word_1)]);
 
 		// uv0 = Wrap(uv0);
 		// uv1 = Wrap(uv1);
@@ -2080,8 +2077,7 @@ void GSDrawScanlineCodeGenerator::SampleTextureLOD()
 		{
 			// GSVector4i uv1 = uv0.add16(GSVector4i::x0001());
 
-			pcmpeqd(xym1, xym1);
-			THREEARG(psubw, xym3, xym2, xym1);
+			THREEARG(paddw, xym3, xym2, ptr[_m_const + offsetof(GConstType, m_word_1)]);
 
 			// uv0 = Wrap(uv0);
 			// uv1 = Wrap(uv1);
