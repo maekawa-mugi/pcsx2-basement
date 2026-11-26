@@ -1073,6 +1073,7 @@ bool GSDeviceMTL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 	m_features.depth_feedback = getDepthFeedback(m_dev, m_features.framebuffer_fetch);
 	m_features.aa1 = GSConfig.HWAA1 && m_features.vs_expand;
 	m_features.rov = m_dev.features.rov && !m_features.framebuffer_fetch;
+	m_features.copyless_ds_as_rt = m_features.framebuffer_fetch;
 	m_max_texture_size = m_dev.features.max_texsize;
 
 	// Init metal stuff
@@ -2361,8 +2362,14 @@ void GSDeviceMTL::RenderHW(GSHWDrawConfig& config)
 	if (config.tex && (config.ds == config.tex || config.rt == config.tex))
 		EndRenderPass(); // Barrier
 
-	if (m_dev.features.broken_shader_depth && (config.depth.ztst >= ZTST_GEQUAL || config.depth.zwe))
-		config.ps.zfloor = true; // Depth must always go through shader (see tfx vs for comment with details)
+	if (m_dev.features.broken_shader_depth)
+	{
+		// Depth must always go through shader (see tfx vs for comment with details)
+		if (config.depth.ztst >= ZTST_GEQUAL || config.depth.zwe)
+			config.ps.zfloor = true;
+		if (config.alpha_second_pass.depth.ztst >= ZTST_GEQUAL || config.alpha_second_pass.depth.zwe)
+			config.alpha_second_pass.ps.zfloor = true;
+	}
 
 	size_t vertsize = config.nverts * sizeof(*config.verts);
 	size_t idxsize = config.vs.UseFixedExpandIndexBuffer() ? 0 : (config.nindices * sizeof(*config.indices));
@@ -2440,7 +2447,7 @@ void GSDeviceMTL::RenderHW(GSHWDrawConfig& config)
 				case GSTexture::State::Cleared:
 				{
 					BeginRenderPass(@"ColorClip Clear", colclip_rt, MTLLoadActionDontCare, nullptr, MTLLoadActionDontCare);
-					GSVector4 color = GSVector4::rgba32(config.rt->GetClearColor()) / GSVector4::cxpr(65535, 65535, 65535, 255);
+					GSVector4 color = rt->GetColorClipClearColor();
 					[m_current_render.encoder setFragmentBytes:&color length:sizeof(color) atIndex:GSMTLBufferIndexUniforms];
 					RenderCopy(nullptr, m_colclip_clear_pipeline, copy_rect);
 					break;

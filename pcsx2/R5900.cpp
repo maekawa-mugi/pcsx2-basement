@@ -73,8 +73,7 @@ void cpuReset()
 	cpuRegs.CP0.n.Config = 0x440;
 	cpuRegs.CP0.n.Status.val = 0x70400004; //0x10900000 <-- wrong; // COP0 enabled | BEV = 1 | TS = 1
 	cpuRegs.CP0.n.PRid = 0x00002e20; // PRevID = Revision ID, same as R5900
-	fpuRegs.fprc[0] = 0x00002e30; // fpu Revision..
-	fpuRegs.fprc[31] = 0x01000001; // fpu Status/Control
+	fpuRegs.fcr31 = 0x01000001; // fpu Status/Control
 	if (EmuConfig.Cpu.EnableExperimentalEETLB)
 	{
 		cpuRegs.CP0.n.Random = 47;

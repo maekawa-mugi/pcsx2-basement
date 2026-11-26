@@ -746,6 +746,7 @@ Pcsx2Config::GSOptions::GSOptions()
 	OsdShowGPU = false;
 	OsdShowGPUDebug = false;
 	OsdShowGPUStats = false;
+	OsdShowGPUShadersStats = false;
 	OsdShowIndicators = true;
 	OsdShowFrameTimes = false;
 	OsdShowHardwareInfo = false;
@@ -875,6 +876,9 @@ bool Pcsx2Config::GSOptions::OptionsAreEqual(const GSOptions& right) const
 		OpEqu(UserHacks_TextureInsideRt) &&
 		OpEqu(UserHacks_Limit24BitDepth) &&
 		OpEqu(UserHacks_BilinearHack) &&
+		OpEqu(UserHacks_DrawBuffering) &&
+		OpEqu(UserHacks_RewriteLargeSTCoords) &&
+		OpEqu(UserHacks_TargetPageRearranging) &&
 		OpEqu(OverrideTextureBarriers) &&
 		OpEqu(DepthFeedbackMode) &&
 
@@ -1014,6 +1018,7 @@ void Pcsx2Config::GSOptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapBitBool(OsdShowGPU);
 	SettingsWrapBitBool(OsdShowGPUDebug);
 	SettingsWrapBitBool(OsdShowGPUStats);
+	SettingsWrapBitBool(OsdShowGPUShadersStats);
 	SettingsWrapBitBool(OsdShowResolution);
 	SettingsWrapBitBool(OsdShowGSStats);
 	SettingsWrapBitBool(OsdShowIndicators);
@@ -1076,6 +1081,7 @@ void Pcsx2Config::GSOptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapBitBoolEx(UserHacks_EstimateTextureRegion, "UserHacks_EstimateTextureRegion");
 	SettingsWrapBitBoolEx(UserHacks_DrawBuffering, "UserHacks_DrawBuffering");
 	SettingsWrapBitBoolEx(UserHacks_RewriteLargeSTCoords, "UserHacks_RewriteLargeSTCoords");
+	SettingsWrapBitBoolEx(UserHacks_TargetPageRearranging, "UserHacks_TargetPageRearranging");
 	SettingsWrapBitBoolEx(FXAA, "fxaa");
 	SettingsWrapBitBool(ShadeBoost);
 	SettingsWrapBitBool(Deband);
@@ -1235,6 +1241,7 @@ void Pcsx2Config::GSOptions::MaskUserHacks()
 	UserHacks_EstimateTextureRegion = false;
 	UserHacks_DrawBuffering = false;
 	UserHacks_RewriteLargeSTCoords = false;
+	UserHacks_TargetPageRearranging = false;
 	UserHacks_TCOffsetX = 0;
 	UserHacks_TCOffsetY = 0;
 	UserHacks_CPUSpriteRenderBW = 0;

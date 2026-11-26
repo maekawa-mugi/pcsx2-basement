@@ -152,7 +152,12 @@ void D2_DBGP(const u8 *inbuffer, u8 *outbuffer, char *message, char *eepc, char 
 					case  3:break;//performance counter 32x3
 					case  4:break;//hw debug reg 32x8
 					case  5:memcpy(eregs[i].value, &fpuRegs.fpr[eregs[i].number], 4);break;
-					case  6:memcpy(eregs[i].value, &fpuRegs.fprc[eregs[i].number], 4);break;
+					case  6:
+					{
+						const u32 value = eregs[i].number >= 16 ? fpuRegs.fcr31 : FPU_REVISION;
+						memcpy(eregs[i].value, &value, sizeof(value));
+						break;
+					}
 					case  7:memcpy(eregs[i].value, &VU0.VF[eregs[i].number], 16);break;
 					case  8:memcpy(eregs[i].value, &VU0.VI[eregs[i].number], 4);break;
 					case  9:memcpy(eregs[i].value, &VU1.VF[eregs[i].number], 16);break;
@@ -202,7 +207,10 @@ void D2_DBGP(const u8 *inbuffer, u8 *outbuffer, char *message, char *eepc, char 
 					case  3:break;//performance counter 32x3
 					case  4:break;//hw debug reg 32x8
 					case  5:memcpy(&fpuRegs.fpr[eregs[i].number], eregs[i].value, 4);break;
-					case  6:memcpy(&fpuRegs.fprc[eregs[i].number], eregs[i].value, 4);break;
+					case  6:
+						if (eregs[i].number == 31)
+							memcpy(&fpuRegs.fcr31, eregs[i].value, sizeof(fpuRegs.fcr31));
+						break;
 					case  7:memcpy(&VU0.VF[eregs[i].number], eregs[i].value, 16);break;
 					case  8:memcpy(&VU0.VI[eregs[i].number], eregs[i].value, 4);break;
 					case  9:memcpy(&VU1.VF[eregs[i].number], eregs[i].value, 16);break;

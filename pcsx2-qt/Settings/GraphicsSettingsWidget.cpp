@@ -195,6 +195,7 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* settings_dialog, 
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_fixes.estimateTextureRegion, "EmuCore/GS", "UserHacks_EstimateTextureRegion", false);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_fixes.drawBuffering, "EmuCore/GS", "UserHacks_DrawBuffering", false);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_fixes.rewriteLargeSTCoords, "EmuCore/GS", "UserHacks_RewriteLargeSTCoords", false);
+	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_fixes.targetPageRearranging, "EmuCore/GS", "UserHacks_TargetPageRearranging", false);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_fixes.gpuPaletteConversion, "EmuCore/GS", "paltex", false);
 	connect(m_fixes.cpuSpriteRenderBW, &QComboBox::currentIndexChanged, this,
 		&GraphicsSettingsWidget::onCPUSpriteRenderBWChanged);
@@ -290,6 +291,7 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* settings_dialog, 
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_advanced.spinGPUDuringReadbacks, "EmuCore/GS", "HWSpinGPUForReadbacks", false);
 	SettingWidgetBinder::BindWidgetToBoolSetting(sif, m_advanced.rovBarriersVK, "EmuCore/GS", "HWROVBarriersVK", false);
 	SettingWidgetBinder::BindWidgetToIntSetting(sif, m_advanced.texturePreloading, "EmuCore/GS", "texture_preloading", static_cast<int>(TexturePreloadingLevel::Off));
+	SettingWidgetBinder::BindWidgetToIntSetting(sif, m_advanced.depthFeedback, "EmuCore/GS", "DepthFeedbackMode", static_cast<int>(GSDepthFeedbackMode::Auto));
 
 	setTabVisible(m_advanced_tab, QtHost::ShouldShowAdvancedSettings());
 
@@ -632,6 +634,10 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* settings_dialog, 
 			tr("Uploads entire textures at once instead of in small pieces, avoiding redundant uploads when possible. "
 			   "Improves performance in most games, but can make a small selection slower."));
 
+		dialog()->registerWidgetHelp(m_advanced.depthFeedback, tr("Depth Feedback Mode"), tr("Auto (Default)"),
+			tr("Depth feedback mode to use for AAT (accurate alpha test) and AA1 (antialiasing). "
+			   "'Depth as RT' is more compatible though slower than 'Depth'. Keep at Auto unless testing."));
+
 		dialog()->registerWidgetHelp(m_fixes.gpuPaletteConversion, tr("GPU Palette Conversion"), tr("Unchecked"),
 			tr("When enabled the GPU will convert colormap textures, otherwise the CPU will. "
 			   "It is a trade-off between GPU and CPU."));
@@ -830,6 +836,9 @@ GraphicsSettingsWidget::GraphicsSettingsWidget(SettingsWindow* settings_dialog, 
 		
 		dialog()->registerWidgetHelp(m_fixes.rewriteLargeSTCoords, tr("Rewrite Large ST"), tr("Unchecked"),
 			tr("Rewrite large ST coordinates and clamp the values (mainly for Ridge Racer V and Destruction Derby Arena)."));
+
+		dialog()->registerWidgetHelp(m_fixes.targetPageRearranging, tr("Target Page Rearranging"), tr("Unchecked"),
+			tr("Rearranges memory pages of a target if the game changes the layout at that current VRAM address."));
 	}
 
 	// Upscaling Fixes tab

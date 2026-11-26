@@ -196,7 +196,7 @@ static bool Address2Symbol(u64 address, SmallString& buf)
 	{
 		buf.append_format("cpuRegs.nextEventCycle");
 	}
-	else if (address >= A(fpuRegs.fpr) && address < A(fpuRegs.fprc))
+	else if (address >= A(fpuRegs.fpr) && address < A(fpuRegs.fcr31))
 	{
 		buf.append_format("fpuRegs.f{:02}", static_cast<u32>(address - A(fpuRegs.fpr)) / 4u);
 	}
@@ -2289,7 +2289,7 @@ static void PreBlockCheck(u32 blockpc)
 			std::fprintf(fp, " %s: %08X%08X%08X%08X", R3000A::disRNameGPR[i], cpuRegs.GPR.r[i].UL[3], cpuRegs.GPR.r[i].UL[2], cpuRegs.GPR.r[i].UL[1], cpuRegs.GPR.r[i].UL[0]);
 		}
 #if 1
-		std::fprintf(fp, "\nFPR: CR: %08X ACC: %08X", fpuRegs.fprc[31], fpuRegs.ACC.UL);
+		std::fprintf(fp, "\nFPR: CR: %08X ACC: %08X", fpuRegs.fcr31, fpuRegs.ACC.UL);
 		for (int i = 0; i < 32; i++)
 			std::fprintf(fp, " %08X", fpuRegs.fpr[i].UL);
 #endif

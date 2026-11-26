@@ -47,7 +47,7 @@
 #define _FAValSl_    fpuRegs.ACC.SL
 
 // FPU Control Reg (FCR31)
-#define _ContVal_    fpuRegs.fprc[ 31 ]
+#define _ContVal_    fpuRegs.fcr31
 
 // FCR31 Flags
 #define FPUflagC	0X00800000
@@ -331,17 +331,15 @@ void C_LT() {
 void CFC1() {
 	if (!_Rt_) return;
 
-	if (_Fs_ == 31)
-		cpuRegs.GPR.r[_Rt_].SD[0] = (s32)fpuRegs.fprc[31];	// force sign extension to 64 bit
-	else if (_Fs_ == 0)
-		cpuRegs.GPR.r[_Rt_].SD[0] = 0x2E00;
+	if (_Fs_ >= 16)
+		cpuRegs.GPR.r[_Rt_].SD[0] = (fpuRegs.fcr31 & 0x0083c078) | 0x01000001;
 	else
-		cpuRegs.GPR.r[_Rt_].SD[0] = 0;
+		cpuRegs.GPR.r[_Rt_].SD[0] = FPU_REVISION;
 }
 
 void CTC1() {
 	if ( _Fs_ != 31 ) return;
-	fpuRegs.fprc[_Fs_] = cpuRegs.GPR.r[_Rt_].UL[0];
+	fpuRegs.fcr31 = cpuRegs.GPR.r[_Rt_].UL[0];
 }
 
 void CVT_S() {
@@ -534,19 +532,22 @@ void RSQRT_S() {
 	}
 	else
 	{
-		FPRreg temp;
+		if ( _FtValUl_ & 0x80000000 ) // Ft is negative
+			_ContVal_ |= FPUflagI | FPUflagSI;
 
-		if ( ( _FtValUl_ & 0x7F800000 ) == 0 ) { // Ft is zero (Denormals are Zero)
-			_ContVal_ |= FPUflagD | FPUflagSD;
-			_FdValUl_ = ( _FtValUl_ & 0x80000000 ) | posFmax;
+		if ( ( _FtValUl_ & 0x7F800000 ) == 0 ) // Ft is zero (Denormals are Zero)
+		{
+			if ( ( _FsValUl_ & 0x7F800000 ) == 0 )
+				_ContVal_ |= FPUflagI | FPUflagSI; // 0 / 0
+			else
+				_ContVal_ |= FPUflagD | FPUflagSD; // x / 0
+			_FdValUl_ = ( _FsValUl_ & 0x80000000 ) | posFmax;
 			return;
 		}
-		else if ( _FtValUl_ & 0x80000000 ) { // Ft is negative
-			_ContVal_ |= FPUflagI | FPUflagSI;
-			temp.f = sqrt( fabs( fpuDouble( _FtValUl_ ) ) );
-			_FdValf_ = fpuDouble( _FsValUl_ ) / fpuDouble( temp.UL );
+		else
+		{
+			_FdValf_ = fpuDouble( _FsValUl_ ) / sqrt( fabs( fpuDouble( _FtValUl_ ) ) );
 		}
-		else { _FdValf_ = fpuDouble( _FsValUl_ ) / sqrt( fpuDouble( _FtValUl_ ) ); } // Ft is positive and not zero
 
 		if (checkOverflow( _FdValUl_, 0)) return;
 		checkUnderflow( _FdValUl_, 0);
@@ -564,16 +565,16 @@ void SQRT_S() {
 		if (checkOverflowUnderflowSoft(sqrtres, FPUflagO | FPUflagSO, true)) return;
 		checkOverflowUnderflowSoft(sqrtres, FPUflagU | FPUflagSU, false);
 	}
-	else if ((_FtValUl_ & 0x7F800000) == 0) // If Ft = +/-0
-		_FdValUl_ = _FtValUl_ & 0x80000000; // result is 0
-	else if (_FtValUl_ & 0x80000000)
-	{
-		// If Ft is Negative
-		_ContVal_ |= FPUflagI | FPUflagSI;
-		_FdValf_ = sqrt(fabs(fpuDouble(_FtValUl_)));
-	}
 	else
-		_FdValf_ = sqrt(fpuDouble(_FtValUl_)); // If Ft is Positive
+	{
+		if ( _FtValUl_ & 0x80000000 ) // Ft is negative
+			_ContVal_ |= FPUflagI | FPUflagSI;
+
+		if ( ( _FtValUl_ & 0x7F800000 ) == 0 ) // If Ft = +/-0
+			_FdValUl_ = 0; // result is 0
+		else
+			_FdValf_ = sqrt( fabs( fpuDouble( _FtValUl_ ) ) );
+	}
 }
 
 void SUB_S() {

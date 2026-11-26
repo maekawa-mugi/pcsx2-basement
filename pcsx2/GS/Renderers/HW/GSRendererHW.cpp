@@ -104,7 +104,7 @@ void GSRendererHW::VSync(u32 field, bool registers_written, bool idle_frame)
 	{
 		// If it did draws very recently, we should keep the recent stuff in case it hasn't been preloaded/used yet.
 		// Rocky Legend does this with the main menu FMV's.
-		if ((s_n - s_last_transfer_draw_n) < 5)
+		if ((s_n - s_last_transfer_draw_n) < 20)
 		{
 			for (auto iter = m_draw_transfers.rbegin(); iter != m_draw_transfers.rend(); iter++)
 			{
@@ -604,7 +604,7 @@ GSRendererHW::TextureShuffleInfo GSRendererHW::DetectTextureShuffleImpl()
 		}
 		else
 		{
-			pxFail("Impossible.");
+			pxFail(fmt::format("Impossible: x_offset should be 0 or 8: {}", x_offset).c_str());
 		}
 	}
 
@@ -1554,6 +1554,8 @@ GSVector2i GSRendererHW::GetValidSize(const GSTextureCache::Source* tex, const b
 			src_width >>= 1;
 			src_height >>= 1;
 		}
+		else if (m_cached_ctx.FRAME.FBW != 1 && src_width > static_cast<int>(m_cached_ctx.FRAME.FBW * 64))
+			src_width = (m_cached_ctx.FRAME.FBW * 64);
 
 		width = (std::max(src_width, width) + page_x) & ~page_x;
 		height = (std::max(src_height, height) + page_y) & ~page_y;
@@ -2241,6 +2243,8 @@ void GSRendererHW::HandleManualDeswizzle()
 	GSIndexBuff& idx_buff = *m_index;
 	// Check for page quadrant and compare it to the quadrant from the verts, if it does match then we need to do correction.
 	const GSVector2i page_quadrant = GSLocalMemory::m_psm[m_cached_ctx.FRAME.PSM].pgs / 2;
+	const GSVector2i page_mask = GSVector2i(GSLocalMemory::m_psm[m_cached_ctx.FRAME.PSM].pgs.x - 1, GSLocalMemory::m_psm[m_cached_ctx.FRAME.PSM].pgs.y - 1);
+	const GSVector2i ofxy = GSVector2i(m_context->XYOFFSET.OFX, m_context->XYOFFSET.OFY);
 
 	if (PRIM->FST)
 	{
@@ -2251,6 +2255,10 @@ void GSRendererHW::HandleManualDeswizzle()
 
 			if ((abs((v[index_last].U) - (v[index_first].U)) >> 4) != page_quadrant.x || (abs((v[index_last].V) - (v[index_first].V)) >> 4) != page_quadrant.y)
 				return;
+
+			if ((abs(((v[index_first].U >> 4) & page_mask.x) - (((v[index_first].XYZ.X - ofxy.x) >> 4) & page_mask.x)) < (page_quadrant.x >> 1)) ||
+				(abs(((v[index_first].V >> 4) & page_mask.y) - (((v[index_first].XYZ.Y - ofxy.y) >> 4) & page_mask.y)) < (page_quadrant.y >> 1)))
+				return;
 		}
 	}
 	else
@@ -2259,10 +2267,16 @@ void GSRendererHW::HandleManualDeswizzle()
 		{
 			const u32 index_first = idx_buff.buff[i];
 			const u32 index_last = idx_buff.buff[i + 1];
-			const u32 x = abs(((v[index_last].ST.S / v[index_last].RGBAQ.Q) * (1 << m_context->TEX0.TW)) - ((v[index_first].ST.S / v[index_first].RGBAQ.Q) * (1 << m_context->TEX0.TW)));
-			const u32 y = abs(((v[index_last].ST.T / v[index_last].RGBAQ.Q) * (1 << m_context->TEX0.TH)) - ((v[index_first].ST.T / v[index_first].RGBAQ.Q) * (1 << m_context->TEX0.TH)));
+			const float first_x = ((v[index_first].ST.S / v[index_first].RGBAQ.Q) * (1 << m_context->TEX0.TW));
+			const float first_y = ((v[index_first].ST.T / v[index_first].RGBAQ.Q) * (1 << m_context->TEX0.TH));
+			const u32 x = abs(((v[index_last].ST.S / v[index_last].RGBAQ.Q) * (1 << m_context->TEX0.TW)) - first_x);
+			const u32 y = abs(((v[index_last].ST.T / v[index_last].RGBAQ.Q) * (1 << m_context->TEX0.TH)) - first_y);
 
 			if (x != static_cast<u32>(page_quadrant.x) || y != static_cast<u32>(page_quadrant.y))
+				return;
+
+			if ((abs(((v[index_first].U >> 4) & page_mask.x) - (static_cast<int>(first_x) & page_mask.x)) < (page_quadrant.x >> 1)) ||
+				(abs(((v[index_first].V >> 4) & page_mask.y) - (static_cast<int>(first_y) & page_mask.y)) < (page_quadrant.y >> 1)))
 				return;
 		}
 	}
@@ -2374,6 +2388,7 @@ void GSRendererHW::Move()
 			transfer.draw = s_n;
 			transfer.was_hardware_only = true;
 			m_draw_transfers.push_back(transfer);
+			s_last_transfer_draw_n = s_n;
 		}
 		else
 		{
@@ -3012,7 +3027,11 @@ void GSRendererHW::Draw()
 	const bool all_depth_tests_pass = IsDepthAlwaysPassing();
 	bool no_ds = (zm != 0 && all_depth_tests_pass) ||
 	             // No color or Z being written.
-	             (no_rt && zm != 0);
+	             (no_rt && zm != 0) ||
+	             // Writing to Z and RT RGB channel positions at the same memory is unsupported.
+	             (!no_rt && zm == 0 && m_cached_ctx.ZBUF.ZBP == m_cached_ctx.FRAME.FBP &&
+	                 (GSLocalMemory::m_psm[m_cached_ctx.ZBUF.PSM].trbpp != 24 ||
+	                 ((m_cached_ctx.FRAME.FBMSK & 0xFFFFFF) & fm_mask) != (fm_mask & 0xFFFFFF)));
 
 	// No Z test if no z buffer.
 	if (no_ds || all_depth_tests_pass)
@@ -3346,6 +3365,18 @@ void GSRendererHW::Draw()
 
 				// Force clear of memory but don't invalidate anything.
 				TryGSMemClear(frame_masked, false, false, 0, z_masked, false, false, 0);
+			}
+		}
+		else if (GSConfig.UserHacks_TargetPageRearranging)
+		{
+			// Try not to do black draws if the mem clear happens but target invalidation doesn't and no target exists.
+			no_rt |= is_zero_color_clear && !preserve_rt_color && (no_rt || g_texture_cache->GetTargetWithSharedBits(m_cached_ctx.FRAME.Block(), m_cached_ctx.FRAME.PSM) == nullptr);
+			no_ds |= is_zero_depth_clear && !preserve_depth && (no_ds || g_texture_cache->GetTargetWithSharedBits(m_cached_ctx.ZBUF.Block(), m_cached_ctx.ZBUF.PSM) == nullptr);
+
+			if (no_rt && no_ds)
+			{
+				CleanupDraw(false);
+				return;
 			}
 		}
 	}
@@ -4674,6 +4705,21 @@ void GSRendererHW::Draw()
 			if (FRAME_TEX0.TBW != 1 || (m_r.width() > frame_psm.pgs.x || m_r.height() > frame_psm.pgs.y) || (scale_draw == 1 && !scaled_copy))
 			{
 				FRAME_TEX0.TBP0 = rt->m_TEX0.TBP0;
+
+				if (GSConfig.UserHacks_TargetPageRearranging && FRAME_TEX0.TBW != rt->m_TEX0.TBW)
+				{
+					bool can_recycle = true;
+					if (src && src->m_from_target && src->m_from_target == rt)
+					{
+						src->m_target_direct = false;
+						src->m_shared_texture = false;
+						src->m_texture = rt->m_texture;
+						can_recycle = false;
+					}
+
+					rt->RearrangeTarget(FRAME_TEX0.TBW, can_recycle);
+				}
+
 				rt->m_TEX0 = FRAME_TEX0;
 			}
 
@@ -4684,12 +4730,44 @@ void GSRendererHW::Draw()
 				rt->ResizeValidity(new_valid_width);
 			}
 		}
+		else if (GSConfig.UserHacks_TargetPageRearranging && !m_in_target_draw && rt && is_possible_mem_clear)
+		{
+			if (FRAME_TEX0.TBW != rt->m_TEX0.TBW)
+			{
+				bool can_recycle = true;
+				if (src && src->m_from_target && src->m_from_target == rt)
+				{
+					src->m_target_direct = false;
+					src->m_shared_texture = false;
+					src->m_texture = rt->m_texture;
+					can_recycle = false;
+				}
+				rt->RearrangeTarget(FRAME_TEX0.TBW, can_recycle);
+			}
+			else
+				rt->m_TEX0.TBW = FRAME_TEX0.TBW;
+		}
 
 		if (ds && (!is_possible_mem_clear || ds->m_TEX0.PSM != ZBUF_TEX0.PSM || (rt && ds->m_TEX0.TBW != rt->m_TEX0.TBW)) && !m_in_target_draw)
 		{
 			if (ZBUF_TEX0.TBW != 1 || (m_r.width() > frame_psm.pgs.x || m_r.height() > frame_psm.pgs.y) || (scale_draw == 1 && !scaled_copy))
 			{
 				ZBUF_TEX0.TBP0 = ds->m_TEX0.TBP0;
+
+				if (GSConfig.UserHacks_TargetPageRearranging && ZBUF_TEX0.TBW != ds->m_TEX0.TBW)
+				{
+					bool can_recycle = true;
+					if (src && src->m_from_target && src->m_from_target == ds && (ZBUF_TEX0.TBW != ds->m_TEX0.TBW))
+					{
+						src->m_target_direct = false;
+						src->m_shared_texture = false;
+						src->m_texture = ds->m_texture;
+						can_recycle = false;
+					}
+
+					ds->RearrangeTarget(ZBUF_TEX0.TBW, can_recycle);
+				}
+
 				ds->m_TEX0 = ZBUF_TEX0;
 			}
 			if (valid_width_change)
@@ -4698,6 +4776,24 @@ void GSRendererHW::Draw()
 				new_valid_width.z = std::min(new_valid_width.z, static_cast<int>(ds->m_TEX0.TBW) * 64);
 				ds->ResizeValidity(new_valid_width);
 			}
+		}
+		else if (GSConfig.UserHacks_TargetPageRearranging && !m_in_target_draw && ds && is_possible_mem_clear)
+		{
+			if (ZBUF_TEX0.TBW != ds->m_TEX0.TBW)
+			{
+				bool can_recycle = true;
+				if (src && src->m_from_target && src->m_from_target == ds && (ZBUF_TEX0.TBW != ds->m_TEX0.TBW))
+				{
+					src->m_target_direct = false;
+					src->m_shared_texture = false;
+					src->m_texture = ds->m_texture;
+					can_recycle = false;
+				}
+
+				ds->RearrangeTarget(ZBUF_TEX0.TBW, can_recycle);
+			}
+			else
+				ds->m_TEX0.TBW = ZBUF_TEX0.TBW;
 		}
 
 		if (rt)
@@ -4712,13 +4808,60 @@ void GSRendererHW::Draw()
 		if (rt)
 		{
 			const bool update_fbw = (FRAME_TEX0.TBW != rt->m_TEX0.TBW || rt->m_TEX0.TBW == 1) && !m_in_target_draw && (m_channel_shuffle && src->m_target) && (!NeedsBlending() || IsOpaque() || m_context->ALPHA.IsBlack());
-			rt->m_TEX0.TBW = update_fbw ? ((src && src->m_from_target && src->m_from_target->m_32_bits_fmt) ? src->m_from_target->m_TEX0.TBW : FRAME_TEX0.TBW) : std::max(rt->m_TEX0.TBW, FRAME_TEX0.TBW);
+
+			if (GSConfig.UserHacks_TargetPageRearranging && !m_in_target_draw && update_fbw && FRAME_TEX0.TBW != rt->m_TEX0.TBW)
+			{
+				bool can_recycle = true;
+				if (src && src->m_from_target && src->m_from_target == rt)
+				{
+					src->m_target_direct = false;
+					src->m_shared_texture = false;
+					src->m_texture = rt->m_texture;
+					can_recycle = false;
+				}
+				rt->RearrangeTarget(((src && src->m_from_target && src->m_from_target->m_32_bits_fmt) ? src->m_from_target->m_TEX0.TBW : FRAME_TEX0.TBW), can_recycle);
+			}
+			else
+				rt->m_TEX0.TBW = update_fbw ? ((src && src->m_from_target && src->m_from_target->m_32_bits_fmt) ? src->m_from_target->m_TEX0.TBW : FRAME_TEX0.TBW) : std::max(rt->m_TEX0.TBW, FRAME_TEX0.TBW);
+
 			rt->m_TEX0.PSM = FRAME_TEX0.PSM;
 		}
 		if (ds)
 		{
-			ds->m_TEX0.TBW = std::max(ds->m_TEX0.TBW, ZBUF_TEX0.TBW);
+			if (GSConfig.UserHacks_TargetPageRearranging && !m_in_target_draw && ZBUF_TEX0.TBW != ds->m_TEX0.TBW)
+			{
+				bool can_recycle = true;
+				if (src && src->m_from_target && src->m_from_target == ds && (ZBUF_TEX0.TBW != ds->m_TEX0.TBW))
+				{
+					src->m_target_direct = false;
+					src->m_shared_texture = false;
+					src->m_texture = ds->m_texture;
+					can_recycle = false;
+				}
+				ds->RearrangeTarget(ZBUF_TEX0.TBW, can_recycle);
+			}
+			else
+				ds->m_TEX0.TBW = std::max(ds->m_TEX0.TBW, ZBUF_TEX0.TBW);
+
 			ds->m_TEX0.PSM = ZBUF_TEX0.PSM;
+		}
+	}
+	else if (GSConfig.UserHacks_TargetPageRearranging && m_texture_shuffle && rt && FRAME_TEX0.TBW > 1 && ((FRAME_TEX0.TBW != rt->m_TEX0.TBW * 2) || (src && src->m_from_target && src->m_from_target->m_TEX0.TBW == FRAME_TEX0.TBW)))
+	{
+		// Could check it's using the exact RT, but it might be shuffling the Z which will be a copy on the rt side, so it won't match.
+		if (!m_in_target_draw && src && src->m_from_target && src->m_from_target->m_TEX0.TBP0 != rt->m_TEX0.TBP0 && src->m_from_target->m_TEX0.TBW != rt->m_TEX0.TBW)
+		{
+			rt->RearrangeTarget(FRAME_TEX0.TBW);
+
+			if (ds)
+			{
+				if (!m_in_target_draw && ZBUF_TEX0.TBW != ds->m_TEX0.TBW)
+				{
+					ds->RearrangeTarget(ZBUF_TEX0.TBW);
+				}
+				else
+					ds->m_TEX0.TBW = ZBUF_TEX0.TBW;
+			}
 		}
 	}
 
@@ -4792,9 +4935,10 @@ void GSRendererHW::Draw()
 		// We still need to make sure the dimensions of the targets match.
 		// Limit new size to 2048, the GS can't address more than this so may avoid some bugs/crashes.
 		GSVector2i ds_size = m_using_temp_z ? GSVector2i(g_texture_cache->GetTemporaryZ()->GetSize() / ds->m_scale) : (ds ? ds->m_unscaled_size : GSVector2i(0,0));
-
-		const int new_w = std::min(2048, std::max(new_size.x, std::max(rt ? rt->m_unscaled_size.x : 0, ds ? ds_size.x : 0)));
-		const int new_h = std::min(2048, std::max(new_size.y, std::max(rt ? rt->m_unscaled_size.y : 0, ds ? ds_size.y : 0)));
+		// This is an artificial limit, however when we're rearranging pages, the amount of data can go over 2048, we need to let it remember that information.
+		const int size_max = GSConfig.UserHacks_TargetPageRearranging ? 999999 : 2048;
+		const int new_w = std::min(size_max, std::max(new_size.x, std::max(rt ? rt->m_unscaled_size.x : 0, ds ? ds_size.x : 0)));
+		const int new_h = std::min(size_max, std::max(new_size.y, std::max(rt ? rt->m_unscaled_size.y : 0, ds ? ds_size.y : 0)));
 
 		const bool full_cover_clear = is_possible_mem_clear && GSLocalMemory::IsPageAligned(m_cached_ctx.FRAME.PSM, m_r) && m_r.x == 0 && m_r.y == 0 && !preserve_rt_rgb &&
 									  !IsPageCopy() && m_r.width() == (m_cached_ctx.FRAME.FBW * 64);
@@ -4829,8 +4973,17 @@ void GSRendererHW::Draw()
 				}
 			}*/
 
-			if ((new_w > rt->m_unscaled_size.x || new_h > rt->m_unscaled_size.y) && GSConfig.UserHacks_TextureInsideRt >= GSTextureInRtMode::InsideTargets)
+			if ((new_w > rt->m_unscaled_size.x || new_h > rt->m_unscaled_size.y || !m_r.rintersect(rt->m_valid).eq(m_r)) && GSConfig.UserHacks_TextureInsideRt >= GSTextureInRtMode::InsideTargets)
 				merge_targets = true;
+
+			if (GSConfig.PreloadFrameWithGSData && m_r.w > rt->m_valid.w)
+			{
+				RGBAMask mask;
+				mask._u32 = GSUtil::GetChannelMask(rt->m_TEX0.PSM);
+				GSVector4i dirty_rect = GSVector4i(std::min(rt->m_valid.x, m_r.x), rt->m_valid.w, std::max(rt->m_valid.z, m_r.z), m_r.w);
+				if (!(dirty_rect.rintersect(m_r).eq(dirty_rect) || !preserve_rt_color))
+					g_texture_cache->AddDirtyRectTarget(rt, dirty_rect, rt->m_TEX0.PSM, rt->m_TEX0.TBW, mask, false);
+			}
 
 			rt->ResizeTexture(new_w, new_h);
 
@@ -4847,6 +5000,7 @@ void GSRendererHW::Draw()
 					g_texture_cache->GetTargetSize(rt->m_TEX0.TBP0, rt->m_TEX0.TBW, rt->m_TEX0.PSM, 0, new_h);
 				}
 				const bool rt_cover = full_cover_clear && (m_r.height() + frame_psm.pgs.y) >= rt->m_valid.height();
+
 				rt->ResizeValidity(rt_cover ? update_rect : rt->m_valid.rintersect(rt->GetUnscaledRect()));
 				rt->ResizeDrawn(rt_cover ? update_rect : rt->m_drawn_since_read.rintersect(rt->GetUnscaledRect()));
 			}
@@ -4903,6 +5057,15 @@ void GSRendererHW::Draw()
 			pxAssert(ds->GetScale() == target_scale);
 			if (ds->GetUnscaledWidth() != new_w || ds->GetUnscaledHeight() != new_h)
 				GL_INS("HW: Resize DS from %dx%d to %dx%d", ds->GetUnscaledWidth(), ds->GetUnscaledHeight(), new_w, new_h);
+
+			if (GSConfig.PreloadFrameWithGSData && m_r.w > ds->m_valid.w)
+			{
+				RGBAMask mask;
+				mask._u32 = GSUtil::GetChannelMask(ds->m_TEX0.PSM);
+				GSVector4i dirty_rect = GSVector4i(std::min(ds->m_valid.x, m_r.x), ds->m_valid.w, std::max(ds->m_valid.z, m_r.z), m_r.w);
+				if (!dirty_rect.rintersect(m_r).eq(dirty_rect))
+					g_texture_cache->AddDirtyRectTarget(ds, dirty_rect, ds->m_TEX0.PSM, ds->m_TEX0.TBW, mask, false);
+			}
 
 			ds->ResizeTexture(new_w, new_h);
 
@@ -5704,10 +5867,8 @@ void GSRendererHW::CalculateAlphaRange(GSTextureCache::Target* rt, GSTextureCach
 			const int s_alpha_max = GetAlphaMinMax().max | fba_value;
 			const int s_alpha_min = GetAlphaMinMax().min | fba_value;
 
-			const bool afail_always_fb_alpha = m_cached_ctx.TEST.AFAIL == AFAIL_FB_ONLY || (m_cached_ctx.TEST.AFAIL == AFAIL_RGB_ONLY && GSLocalMemory::m_psm[m_cached_ctx.FRAME.PSM].trbpp != 32);
-			const bool always_passing_alpha = !m_cached_ctx.TEST.ATE || afail_always_fb_alpha || (m_cached_ctx.TEST.ATE && m_cached_ctx.TEST.ATST == ATST_ALWAYS);
-			const bool full_cover = rt->m_valid.rintersect(m_r).eq(rt->m_valid) && m_primitive_covers_without_gaps == NoGapsType::FullCover &&
-				!(date_options.enabled || !always_passing_alpha || !IsDepthAlwaysPassing());
+			const bool full_cover = rt->m_valid.rintersect(m_r).eq(rt->m_valid) &&
+				m_primitive_covers_without_gaps == NoGapsType::FullCover && !AreAnyPixelsDiscarded();
 
 			// On DX FBMask emulation can be missing on lower blend levels, so we'll do whatever the API does.
 			const u32 fb_mask = m_conf.colormask.wa ? (m_conf.ps.fbmask ? m_conf.cb_ps.FbMask.a : 0) : 0xFF;
@@ -6254,16 +6415,9 @@ void GSRendererHW::DetermineBarriers(GSTextureCache::Target* rt, GSTextureCache:
 		if (m_conf.require_one_barrier || m_conf.require_full_barrier)
 			pxAssert(!m_conf.blend.enable);
 
-		// If we use depth feedback directly, we must use barriers for the depth texture.
-		// If we use depth-as-color feedback, then FB fetch can be used for depth also.
-		const bool need_barriers_for_depth = m_conf.ps.IsFeedbackLoopDepth() && features.depth_feedback;
-
-		if (!need_barriers_for_depth)
-		{
-			// Barriers aren't needed with fbfetch
-			m_conf.require_one_barrier = false;
-			m_conf.require_full_barrier = false;
-		}
+		// Barriers aren't needed with fbfetch
+		m_conf.require_one_barrier = false;
+		m_conf.require_full_barrier = false;
 	}
 	// Multi-pass algorithms shouldn't be needed with full barrier and backends may not handle this correctly
 	pxAssert(!m_conf.require_full_barrier || !m_conf.ps.colclip_hw);
@@ -6664,9 +6818,12 @@ __ri u32 GSRendererHW::EmulateChannelShuffle(GSTextureCache::Target* src, bool t
 	// the rendered size of the framebuffer
 
 	const GSLocalMemory::psm_t frame_psm = GSLocalMemory::m_psm[m_context->FRAME.PSM];
-	m_full_screen_shuffle = (m_r.height() > frame_psm.pgs.y) || (m_r.width() > frame_psm.pgs.x) || GSConfig.UserHacks_TextureInsideRt == GSTextureInRtMode::Disabled;
+
+	// Encourage full screen channel shuffles if either the source or target depth type doesn't match the configured format, as this will likely be doing some kind of deswizzle, which we don't handle well.
+	const bool depth_mismatch = (src->m_texture->IsDepthStencil() && !(!!GSLocalMemory::m_psm[m_cached_ctx.FRAME.PSM].depth)) || !!GSLocalMemory::m_psm[m_cached_ctx.FRAME.PSM].depth != rt->m_texture->IsDepthStencil();
+	m_full_screen_shuffle = (m_r.height() > frame_psm.pgs.y) || (m_r.width() > frame_psm.pgs.x) || GSConfig.UserHacks_TextureInsideRt == GSTextureInRtMode::Disabled || depth_mismatch;
 	m_channel_shuffle_src_valid = src->m_valid;
-	if (GSConfig.UserHacks_TextureInsideRt == GSTextureInRtMode::Disabled || ((src->m_TEX0.TBW == rt->m_TEX0.TBW) && (!m_in_target_draw && IsPageCopy())) || m_conf.ps.urban_chaos_hle || m_conf.ps.tales_of_abyss_hle)
+	if (GSConfig.UserHacks_TextureInsideRt == GSTextureInRtMode::Disabled || ((src->m_TEX0.TBW == rt->m_TEX0.TBW) && (!m_in_target_draw && (IsPageCopy() || depth_mismatch))) || m_conf.ps.urban_chaos_hle || m_conf.ps.tales_of_abyss_hle)
 	{
 		GSVertex* s = &m_vertex->buff[0];
 		s[0].XYZ.X = static_cast<u16>(m_context->XYOFFSET.OFX + 0);
@@ -7197,9 +7354,8 @@ void GSRendererHW::EmulateBlending(int rt_alpha_min, int rt_alpha_max, DATEOptio
 		// then the rest of then conditions can be added.
 		if (can_scale_rt_alpha && !new_rt_alpha_scale && m_conf.colormask.wa)
 		{
-			const bool afail_fb_only = m_cached_ctx.TEST.AFAIL == AFAIL_FB_ONLY;
-			const bool full_cover = rt->m_valid.rintersect(m_r).eq(rt->m_valid) && m_primitive_covers_without_gaps == NoGapsType::FullCover &&
-				!(date_options.enabled || !afail_fb_only || !IsDepthAlwaysPassing());
+			const bool full_cover = rt->m_valid.rintersect(m_r).eq(rt->m_valid) &&
+				m_primitive_covers_without_gaps == NoGapsType::FullCover && !AreAnyPixelsDiscarded();
 
 			// Restrict this to only when we're overwriting the whole target.
 			new_rt_alpha_scale = full_cover;
@@ -7344,10 +7500,8 @@ void GSRendererHW::EmulateBlending(int rt_alpha_min, int rt_alpha_max, DATEOptio
 		const bool rta_correction = can_scale_rt_alpha && !blend_ad_alpha_masked && m_conf.ps.blend_c == 1 && !(blend_flag & BLEND_A_MAX);
 		if (rta_correction)
 		{
-			const bool afail_always_fb_alpha = m_cached_ctx.TEST.AFAIL == AFAIL_FB_ONLY || (m_cached_ctx.TEST.AFAIL == AFAIL_RGB_ONLY && GSLocalMemory::m_psm[m_cached_ctx.FRAME.PSM].trbpp != 32);
-			const bool always_passing_alpha = !m_cached_ctx.TEST.ATE || afail_always_fb_alpha || (m_cached_ctx.TEST.ATE && m_cached_ctx.TEST.ATST == ATST_ALWAYS);
-			const bool full_cover = rt->m_valid.rintersect(m_r).eq(rt->m_valid) && m_primitive_covers_without_gaps == NoGapsType::FullCover &&
-				!(date_options.primid || date_options.barrier || !always_passing_alpha || !IsDepthAlwaysPassing());
+			const bool full_cover = rt->m_valid.rintersect(m_r).eq(rt->m_valid) &&
+				m_primitive_covers_without_gaps == NoGapsType::FullCover && !AreAnyPixelsDiscarded();
 
 			if (!full_cover)
 			{
@@ -8184,7 +8338,7 @@ __ri void GSRendererHW::EmulateTextureSampler(const GSTextureCache::Target* rt, 
 		}
 
 		if (m_vt.m_primclass == GS_SPRITE_CLASS && m_index->tail >= 4 && GSLocalMemory::m_psm[m_cached_ctx.TEX0.PSM].bpp >= 16 &&
-			((tex->m_from_target_TEX0.PSM & 0x30) == 0x30 || GSLocalMemory::m_psm[m_cached_ctx.TEX0.PSM].pal > 0))
+			((tex->m_from_target_TEX0.PSM & 0x30) == 0x30 || tex->m_from_target->m_from_depth || GSLocalMemory::m_psm[m_cached_ctx.TEX0.PSM].pal > 0))
 		{
 			HandleManualDeswizzle();
 		}
@@ -9437,10 +9591,8 @@ __ri void GSRendererHW::DrawPrims(GSTextureCache::Target* rt, GSTextureCache::Ta
 
 		if (can_scale_rt_alpha && !new_scale_rt_alpha && m_conf.colormask.wa)
 		{
-			const bool afail_always_fb_alpha = m_cached_ctx.TEST.AFAIL == AFAIL_FB_ONLY || (m_cached_ctx.TEST.AFAIL == AFAIL_RGB_ONLY && GSLocalMemory::m_psm[m_cached_ctx.FRAME.PSM].trbpp != 32);
-			const bool always_passing_alpha = !m_cached_ctx.TEST.ATE || afail_always_fb_alpha || (m_cached_ctx.TEST.ATE && m_cached_ctx.TEST.ATST == ATST_ALWAYS);
-			const bool full_cover = rt->m_valid.rintersect(m_r).eq(rt->m_valid) && m_primitive_covers_without_gaps == NoGapsType::FullCover &&
-				!(date_options.enabled || !always_passing_alpha || !IsDepthAlwaysPassing());
+			const bool full_cover = rt->m_valid.rintersect(m_r).eq(rt->m_valid) &&
+				m_primitive_covers_without_gaps == NoGapsType::FullCover && !AreAnyPixelsDiscarded();
 
 			// Restrict this to only when we're overwriting the whole target.
 			new_scale_rt_alpha = full_cover || rt->m_last_draw >= s_n;
@@ -9583,7 +9735,8 @@ __ri void GSRendererHW::DrawPrims(GSTextureCache::Target* rt, GSTextureCache::Ta
 	else
 		m_last_rt = rt;
 
-	if (g_gs_device->IsDSInRTActive())
+	// Copyless DS as RT doesn't require caching the copy between draws.
+	if (g_gs_device->Features().copyless_ds_as_rt && g_gs_device->IsDSAsRTActive())
 		g_gs_device->EndDSAsRT();
 }
 
@@ -9980,6 +10133,43 @@ bool GSRendererHW::DetectDoubleHalfClear(bool& no_rt, bool& no_ds)
 	if (m_cached_ctx.TEST.ZTST != ZTST_ALWAYS || m_cached_ctx.ZBUF.ZMSK)
 		return false;
 
+	const u32 write_color = GetConstantDirectWriteMemClearColor();
+	const u32 write_depth = GetConstantDirectWriteMemClearDepth();
+
+	if (write_color != write_depth)
+		return false;
+
+	if (m_cached_ctx.FRAME.PSM == 0)
+	{
+		if ((m_cached_ctx.ZBUF.PSM & 0xF) == 1 && (m_cached_ctx.FRAME.FBMSK & GSLocalMemory::m_psm[m_cached_ctx.FRAME.PSM].fmsk) == (0xFF000000 & GSLocalMemory::m_psm[m_cached_ctx.FRAME.PSM].fmsk))
+		{
+			m_cached_ctx.FRAME.PSM |= 1;
+			m_context->offset.fb = m_mem.GetOffset(m_cached_ctx.FRAME.Block(), m_cached_ctx.FRAME.FBW, m_cached_ctx.FRAME.PSM);
+		}
+		// Common with Guitar Hero/Tony Hawk engine games.
+		else if (write_color == 0 && ((m_cached_ctx.FRAME.FBMSK & GSLocalMemory::m_psm[m_cached_ctx.FRAME.PSM].fmsk) & 0xFF000000) == 0x7F000000)
+		{
+			GSTextureCache::Target* frame = g_texture_cache->GetExactTarget(m_cached_ctx.FRAME.Block(), m_cached_ctx.FRAME.FBW, GSTextureCache::RenderTarget, m_cached_ctx.FRAME.Block());
+
+			if (frame)
+			{
+				// If there is no information in the top bit but that's the only one not masked, treat it as masked.
+				if (frame->m_alpha_max < 128)
+				{
+					m_cached_ctx.FRAME.PSM |= 1;
+					m_context->offset.fb = m_mem.GetOffset(m_cached_ctx.FRAME.Block(), m_cached_ctx.FRAME.FBW, m_cached_ctx.FRAME.PSM);
+				}
+
+				frame = nullptr;
+			}
+			else
+			{
+				m_cached_ctx.FRAME.PSM |= 1;
+				m_context->offset.fb = m_mem.GetOffset(m_cached_ctx.FRAME.Block(), m_cached_ctx.FRAME.FBW, m_cached_ctx.FRAME.PSM);
+			}
+		}
+	}
+
 	// Block when any bits are masked. Too many false positives if we don't.
 	// Siren does a C32+Z24 clear with A masked, GTA:LCS does C32+Z24 but doesn't set FBMSK, leaving half
 	// of the alpha channel untouched (no effect because it uses Z24 elsewhere).
@@ -10008,11 +10198,6 @@ bool GSRendererHW::DetectDoubleHalfClear(bool& no_rt, bool& no_ds)
 	if (m_vt.m_eq.rgba != 0xFFFF || !m_vt.m_eq.z || (no_ds != no_rt))
 		return false;
 
-	const u32 write_color = GetConstantDirectWriteMemClearColor();
-	const u32 write_depth = GetConstantDirectWriteMemClearDepth();
-	if (write_color != write_depth)
-		return false;
-
 	// Frame and depth pointer can be inverted
 	const bool clear_depth = (m_cached_ctx.FRAME.FBP > m_cached_ctx.ZBUF.ZBP);
 	const u32 base = clear_depth ? m_cached_ctx.ZBUF.ZBP : m_cached_ctx.FRAME.FBP;
@@ -10032,7 +10217,13 @@ bool GSRendererHW::DetectDoubleHalfClear(bool& no_rt, bool& no_ds)
 	// double-half cleared. For testing, ignore any targets that don't have the bits we're drawing to.
 	const bool req_valid_alpha = ((frame_psm.fmsk & zbuf_psm.fmsk) & 0xFF000000u) != 0;
 	GSTextureCache::Target* half_point = g_texture_cache->GetExactTarget(half << 5, m_cached_ctx.FRAME.FBW, clear_depth ? GSTextureCache::RenderTarget : GSTextureCache::DepthStencil, half << 5);
-	half_point = (half_point && half_point->m_valid_rgb && half_point->HasValidAlpha() == req_valid_alpha) ? half_point : nullptr;
+	if (half_point)
+	{
+		int half_point_pages = 0;
+		half_point_pages = (half_point->m_valid.z + (zbuf_psm.pgs.x - 1)) / zbuf_psm.pgs.x;
+		half_point_pages *= (half_point->m_valid.w + (zbuf_psm.pgs.y - 1)) / zbuf_psm.pgs.y;
+		half_point = (half_point && half_point->m_valid_rgb && half_point->HasValidAlpha() == req_valid_alpha && half_point_pages >= static_cast<int>(written_pages)) ? half_point : nullptr;
+	}
 	if (half_point && half_point->m_age <= 1)
 		return false;
 
@@ -10373,6 +10564,7 @@ bool GSRendererHW::TryGSMemClear(bool no_rt, bool preserve_rt, bool invalidate_r
 			clear_queue.blit.DPSM = m_cached_ctx.FRAME.PSM;
 			clear_queue.was_hardware_only = false;
 			m_draw_transfers.push_back(clear_queue);
+			s_last_transfer_draw_n = s_n;
 		}
 		else
 		{
@@ -10404,6 +10596,7 @@ bool GSRendererHW::TryGSMemClear(bool no_rt, bool preserve_rt, bool invalidate_r
 			clear_queue.blit.DPSM = m_cached_ctx.ZBUF.PSM;
 			clear_queue.was_hardware_only = false;
 			m_draw_transfers.push_back(clear_queue);
+			s_last_transfer_draw_n = s_n;
 		}
 	}
 
@@ -10635,11 +10828,12 @@ bool GSRendererHW::OI_BlitFMV(GSTextureCache::Target* _rt, GSTextureCache::Sourc
 	return true;
 }
 
-bool GSRendererHW::AreAnyPixelsDiscarded() const
+bool GSRendererHW::AreAnyPixelsDiscarded()
 {
-	return ((m_draw_env->SCANMSK.MSK & 2) || // skipping rows
-	        (m_cached_ctx.TEST.ATE && m_cached_ctx.TEST.AFAIL != AFAIL_FB_ONLY) || // testing alpha (might discard some pixels)
-	        m_cached_ctx.TEST.DATE); // reading alpha
+	return (m_draw_env->SCANMSK.MSK & 2) || // skipping rows
+		(m_cached_ctx.TEST.ATE && m_cached_ctx.TEST.GetAFAIL(m_cached_ctx.FRAME.PSM) != AFAIL_FB_ONLY && m_cached_ctx.TEST.ATST != ATST_ALWAYS) || // testing alpha (might discard some pixels)
+		(m_cached_ctx.TEST.DATE && m_cached_ctx.FRAME.PSM != PSMCT24) || // reading alpha
+		!IsDepthAlwaysPassing(); // depth testing
 }
 
 bool GSRendererHW::IsDiscardingDstColor()
@@ -11049,6 +11243,7 @@ GSHWDrawConfig& GSRendererHW::BeginHLEHardwareDraw(
 	config.ps.key_lo = 0;
 	config.ps.key_hi = 0;
 	config.ps.tfx = tex ? TFX_DECAL : TFX_NONE;
+	config.ps.tcc = true;
 	config.ps.iip = true;
 	config.ps.fst = true;
 
@@ -11088,9 +11283,14 @@ void GSRendererHW::EndHLEHardwareDraw(bool force_copy_on_hazard /* = false */)
 			config.require_one_barrier = !features.framebuffer_fetch;
 		}
 		else if (!force_copy_on_hazard && config.tex == config.ds && !config.depth.zwe &&
-				 features.test_and_sample_depth)
+				 (features.test_and_sample_depth || features.feedback_loops()))
 		{
-			// Safe to read depth buffer.
+			// Check if depth buffer is safe to read.
+			if (!features.test_and_sample_depth)
+			{
+				config.tex_hazard = GSHWDrawConfig::TEX_HAZARD_DEPTH;
+				config.require_one_barrier = !features.framebuffer_fetch;
+			}
 		}
 		else
 		{

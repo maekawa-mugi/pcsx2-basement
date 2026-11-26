@@ -798,7 +798,12 @@ static int DynGenFullTLBReadNonQuad(u32 bits, bool sign, bool xmm, int addr_reg,
 	if (!addr_const && CanUseFullTLBSpeculativeFastmemRead())
 	{
 		pxAssert(addr_reg == arg1regd.GetId());
-		EE::Profiler.EmitMem(addr_reg);
+#ifdef eeProfileProg
+		// Unlike the other Full TLB paths, this fast path has not flushed caller-saved registers.
+		_freeX86reg(eax);
+		_freeX86reg(arg3reg.GetId());
+#endif
+		EE::Profiler.EmitMem();
 		return DynGenFullTLBSpeculativeFastmemReadNonQuad(bits, sign, xmm, addr_reg, dest_reg_alloc);
 	}
 
@@ -821,7 +826,7 @@ static int DynGenFullTLBReadNonQuad(u32 bits, bool sign, bool xmm, int addr_reg,
 	}
 	else
 	{
-		EE::Profiler.EmitMem(addr_reg);
+		EE::Profiler.EmitMem();
 	}
 	if (trace_gp_related_load)
 		xMOV(ptr32[EEMemory::GetFullTLBDiagnosticReadVAddrAddress()], original_address);
@@ -887,7 +892,7 @@ static int DynGenFullTLBReadQuad(int addr_reg, vtlb_ReadRegAllocCallback dest_re
 	}
 	else
 	{
-		EE::Profiler.EmitMem(addr_reg);
+		EE::Profiler.EmitMem();
 	}
 
 	DynGenFullTLBKsegFastmemPath(original_address, EEMmu::AccessType::Load, 0xf, -1,
@@ -1105,7 +1110,7 @@ static void DynGenFullTLBMergeWrite(u32 bits, bool left, int addr_reg, int value
 	}
 	else
 	{
-		EE::Profiler.EmitMem(addr_reg);
+		EE::Profiler.EmitMem();
 	}
 	xAND(merge_index, address_mask);
 	xAND(original_address, ~address_mask);
@@ -1249,7 +1254,7 @@ static void DynGenFullTLBWrite(u32 bits, bool xmm, int addr_reg, int value_reg,
 	}
 	else
 	{
-		EE::Profiler.EmitMem(addr_reg);
+		EE::Profiler.EmitMem();
 	}
 
 	DynGenFullTLBKsegFastmemPath(original_address, EEMmu::AccessType::Store, (bits / 8) - 1,
@@ -1374,7 +1379,6 @@ namespace vtlb_private
 	static void DynGen_PrepRegs(int addr_reg, int value_reg, u32 sz, bool xmm)
 	{
 		_freeX86reg(arg1regd);
-		EE::Profiler.EmitMem(addr_reg);
 		xMOV(arg1regd, xRegister32(addr_reg));
 
 		if (value_reg >= 0)
@@ -1398,6 +1402,9 @@ namespace vtlb_private
 				xMOV(arg2reg, xRegister64(value_reg));
 			}
 		}
+
+		// eax and arg3reg are free to use now that the arguments are copied.
+		EE::Profiler.EmitMem();
 
 		xMOV(eax, arg1regd);
 		xSHR(eax, VTLB_PAGE_BITS);
@@ -2246,7 +2253,7 @@ static void DynGenFullTLBCacheTranslate(int addr_reg, const u32* addr_const)
 	}
 	else
 	{
-		EE::Profiler.EmitMem(addr_reg);
+		EE::Profiler.EmitMem();
 	}
 	DynGenFullTLBTranslate(original_address, EEMmu::AccessType::Cache, 0);
 	_freeX86reg(original_reg);

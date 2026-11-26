@@ -2418,6 +2418,7 @@ void GSState::FlushWrite()
 			if (m_draw_transfers.size() > 0 && m_tr.m_blit.DBP == m_draw_transfers.back().blit.DBP)
 			{
 				m_draw_transfers.back().rect = m_draw_transfers.back().rect.runion(r);
+				s_last_transfer_draw_n = s_n;
 			}
 		}
 	}
@@ -4828,7 +4829,7 @@ bool GSState::SpriteDrawWithoutGaps()
 			else
 			{
 				const int dpY = v[i + 1].XYZ.Y - v[i].XYZ.Y;
-				if ((std::abs(dpY - first_dpY) >= 16 && (i + 2) < next_count) || std::abs(this_start_X - last_pX) >= 16)
+				if ((std::abs(dpY - first_dpY) >= 16 && (i + 2) < next_count) || (this_start_X - last_pX) >= 16)
 					return false;
 			}
 		}
@@ -6235,11 +6236,14 @@ GSState::TextureMinMaxResult GSState::GetTextureMinMax(GIFRegTEX0 TEX0, GIFRegCL
 			// since this was making it take the full texture even though it wasn't needed.
 			if (!clamp_to_tsize)
 			{
-				const u32 mask = (m_vt.m_min.t.floor() == GSVector4::zero()).mask();
+				GSVector4 min_t = m_vt.m_min.t;
+				min_t.x = min_t.x - (static_cast<int>(min_t.x) & ~(GSLocalMemory::m_psm[TEX0.PSM].pgs.x - 1));
+				min_t.y = min_t.y - (static_cast<int>(min_t.y) & ~(GSLocalMemory::m_psm[TEX0.PSM].pgs.y - 1));
+				const u32 mask = (min_t.floor() == GSVector4::zero()).mask();
 				if (mask & 1) // X == 0
-					st.x = st.max(GSVector4::zero()).x;
+					st.x = st.max(m_vt.m_min.t.floor()).x;
 				if (mask & 2) // Y == 0
-					st.y = st.max(GSVector4::zero()).y;
+					st.y = st.max(m_vt.m_min.t.floor()).y;
 			}
 		}
 

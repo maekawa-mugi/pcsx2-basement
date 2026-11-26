@@ -96,6 +96,12 @@ namespace Host
 	/// Cancels game list refresh, if there is one in progress.
 	void CancelGameListRefresh();
 
+	/// Notifies the host when a favorite changes. May be called from any thread.
+	void OnGameListFavoriteChanged(const std::string& path);
+
+	/// Notifies the host when settings for a game change. May be called from any thread.
+	void OnGameSettingsChanged(const std::string& path);
+
 	/// Requests shut down of the current virtual machine.
 	void RequestVMShutdown(bool allow_confirm, bool allow_save_state, bool default_save_state);
 

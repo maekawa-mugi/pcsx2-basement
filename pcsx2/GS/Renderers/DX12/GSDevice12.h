@@ -217,6 +217,7 @@ private:
 	void LoadAgilitySDK();
 
 	bool CreateDevice(u32& vendor_id);
+	HRESULT CheckFeatureSupport(D3D12_FEATURE feature, void* data, UINT size) const;
 	bool CreateDescriptorHeaps();
 	bool CreateCommandLists();
 	bool CreateTimestampQuery();
@@ -226,6 +227,7 @@ private:
 
 	ComPtr<IDXGIAdapter1> m_adapter;
 	ComPtr<ID3D12Device> m_device;
+	ComPtr<ID3D12Device16> m_device16;
 	ComPtr<ID3D12CommandQueue> m_command_queue;
 	ComPtr<D3D12MA::Allocator> m_allocator;
 
@@ -383,6 +385,7 @@ private:
 	bool m_using_allow_tearing = false;
 	bool m_is_exclusive_fullscreen = false;
 	D3D_SHADER_MODEL m_shader_model = D3D_SHADER_MODEL_5_1;
+	D3D12_RENDER_PASS_TIER m_render_pass_tier = D3D12_RENDER_PASS_TIER_0;
 	bool m_uma = false;
 	bool m_typed_casting_supported = false;
 	bool m_enhanced_barriers = false;

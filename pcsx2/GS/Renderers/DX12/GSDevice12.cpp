@@ -133,12 +133,22 @@ GSDevice12::ComPtr<ID3D12RootSignature> GSDevice12::CreateRootSignature(const D3
 	return rs;
 }
 
+HRESULT GSDevice12::CheckFeatureSupport(D3D12_FEATURE feature, void* data, UINT size) const
+{
+	// Avoid the CheckFeatureSupport deprecation warning on newer runtimes.
+	if (m_device16)
+		return m_device16->CheckFeatureSupport1(feature, data, size, D3D12_SDK_VERSION);
+
+	// Use the old API if Device16 isn't available.
+	return m_device->CheckFeatureSupport(feature, data, size);
+}
+
 bool GSDevice12::SupportsTextureFormat(DXGI_FORMAT format)
 {
 	constexpr u32 required = D3D12_FORMAT_SUPPORT1_TEXTURE2D | D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE;
 
 	D3D12_FEATURE_DATA_FORMAT_SUPPORT support = {format};
-	return SUCCEEDED(m_device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support))) &&
+	return SUCCEEDED(CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support))) &&
 	       (support.Support1 & required) == required;
 }
 
@@ -147,21 +157,21 @@ bool GSDevice12::IsTextureFormatUAVCapable(DXGI_FORMAT format)
 	constexpr u32 required = D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW;
 
 	D3D12_FEATURE_DATA_FORMAT_SUPPORT support = { format };
-	return SUCCEEDED(m_device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support))) &&
+	return SUCCEEDED(CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support))) &&
 		(support.Support1 & required) == required;
 }
 
 bool GSDevice12::SupportsProgrammableSamplePositions()
 {
 	D3D12_FEATURE_DATA_D3D12_OPTIONS2 options = {};
-	if (SUCCEEDED(m_device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS2, &options, sizeof(options))))
+	if (SUCCEEDED(CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS2, &options, sizeof(options))))
 		return options.ProgrammableSamplePositionsTier != D3D12_PROGRAMMABLE_SAMPLE_POSITIONS_TIER_NOT_SUPPORTED;
 
 	return false;
 }
 
 D3D_SHADER_MODEL GSDevice12::DetectShaderModelSupport() {
-	// CheckFeatureSupport will fail if the runtime dosen't support a requested shader model.
+	// CheckFeatureSupport will fail if the runtime doesn't support a requested shader model.
 	// Loop though ranges of valid shader models until the check succeeds.
 	constexpr std::array<std::array<D3D_SHADER_MODEL, 2>, 2> shader_model_ranges{{
 		{D3D_SHADER_MODEL_6_5, D3D_SHADER_MODEL_6_0},
@@ -173,7 +183,7 @@ D3D_SHADER_MODEL GSDevice12::DetectShaderModelSupport() {
 		for (int i = range[0]; i >= range[1]; i--)
 		{
 			D3D12_FEATURE_DATA_SHADER_MODEL shader_model_device = {static_cast<D3D_SHADER_MODEL>(i)};
-			const HRESULT hr = m_device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &shader_model_device, sizeof(shader_model_device));
+			const HRESULT hr = CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &shader_model_device, sizeof(shader_model_device));
 			if (SUCCEEDED(hr))
 				return shader_model_device.HighestShaderModel;
 		}
@@ -332,6 +342,9 @@ bool GSDevice12::CreateDevice(u32& vendor_id)
 		Console.Error("D3D12: Failed to create device: %08X", hr);
 		return false;
 	}
+
+	// CheckFeatureSupport1 is optional.
+	m_device16 = m_device.try_query<ID3D12Device16>();
 
 	if (!m_adapter)
 	{
@@ -1172,9 +1185,11 @@ bool GSDevice12::CreateSwapChain()
 			&fs_desc, fullscreen_output.get(), m_swap_chain.put());
 		if (FAILED(hr))
 		{
-			Console.Warning("D3D12: Failed to create fullscreen swap chain, trying windowed.");
+			Console.Warning("D3D12: Failed to create fullscreen swap chain: 0x%08X, trying windowed.", hr);
 			m_is_exclusive_fullscreen = false;
 			m_using_allow_tearing = m_allow_tearing_supported;
+			if (m_using_allow_tearing)
+				swap_chain_desc.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
 		}
 	}
 
@@ -1574,17 +1589,22 @@ bool GSDevice12::CheckFeatures(const u32& vendor_id)
 	Console.WriteLnFmt("D3D12: Shader Model: {}.{}", (m_shader_model & 0xF0) >> 4, (m_shader_model & 0xF));
 
 	D3D12_FEATURE_DATA_ARCHITECTURE1 device_architecture1 = {};
-	hr = m_device->CheckFeatureSupport(D3D12_FEATURE_ARCHITECTURE1, &device_architecture1, sizeof(device_architecture1));
+	hr = CheckFeatureSupport(D3D12_FEATURE_ARCHITECTURE1, &device_architecture1, sizeof(device_architecture1));
 	m_uma = SUCCEEDED(hr) && device_architecture1.UMA;
 	Console.WriteLnFmt("D3D12: {}", m_uma ? (device_architecture1.CacheCoherentUMA ? "Cache Coherent Unified Memory Architecture" : "Unified Memory Architecture") : "Non-Unified Memory Architecture");
 
 	D3D12_FEATURE_DATA_D3D12_OPTIONS3 device_options3 = {};
-	hr = m_device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS3, &device_options3, sizeof(device_options3));
+	hr = CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS3, &device_options3, sizeof(device_options3));
 	m_typed_casting_supported = SUCCEEDED(hr) && device_options3.CastingFullyTypedFormatSupported;
 	Console.WriteLnFmt("D3D12: Casting Fully Typed Formats: {}", m_typed_casting_supported ? "Supported" : "Not Supported");
 
+	D3D12_FEATURE_DATA_D3D12_OPTIONS5 device_options5 = {};
+	hr = m_device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &device_options5, sizeof(device_options5));
+	m_render_pass_tier = SUCCEEDED(hr) ? device_options5.RenderPassesTier : D3D12_RENDER_PASS_TIER_0;
+	Console.WriteLnFmt("D3D12: Render Passes: Tier {}", static_cast<u32>(m_render_pass_tier));
+
 	D3D12_FEATURE_DATA_D3D12_OPTIONS12 device_options12 = {};
-	hr = m_device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS12, &device_options12, sizeof(device_options12));
+	hr = CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS12, &device_options12, sizeof(device_options12));
 	if (SUCCEEDED(hr))
 	{
 		Console.WriteLnFmt("D3D12: Enhanced Barriers: {}", device_options12.EnhancedBarriersSupported ? "Supported" : "Not Supported");
@@ -1598,7 +1618,7 @@ bool GSDevice12::CheckFeatures(const u32& vendor_id)
 	}
 
 	D3D12_FEATURE_DATA_D3D12_OPTIONS options{};
-	m_device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(D3D12_FEATURE_DATA_D3D12_OPTIONS));
+	CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options));
 	m_features.rov = options.TypedUAVLoadAdditionalFormats && options.ROVsSupported;
 	for (u32 fmt = static_cast<u32>(GSTexture::Format::Color); fmt <= static_cast<u32>(GSTexture::Format::PrimID); fmt++)
 	{
@@ -1742,6 +1762,9 @@ void GSDevice12::CopyRect(GSTexture* sTex, GSTexture* dTex, const GSVector4i& r,
 		GL_INS("D3D12: CopyRect rect empty.");
 		return;
 	}
+
+	if (dTex->IsDepthStencil())
+		InvalidateDSAsRT(dTex);
 
 	GSTexture12* const sTex12 = static_cast<GSTexture12*>(sTex);
 	GSTexture12* const dTex12 = static_cast<GSTexture12*>(dTex);
@@ -2265,7 +2288,7 @@ void GSDevice12::DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, 
 		OMSetRenderTargets(sTex[2], nullptr, nullptr, fbarea);
 		BeginRenderPass(
 			D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_PRESERVE, D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE);
-		DrawStretchRect(full_r, dRect[2], dsize);
+		DrawStretchRect(full_r, dRect[2], fbsize);
 	}
 
 	EndRenderPass();
@@ -2653,6 +2676,13 @@ void GSDevice12::OMSetRenderTargets(GSTexture* rt, GSTexture* ds_as_rt, GSTextur
 		if (d12Ds)
 			d12Ds->TransitionToState(depth_read ? GSTexture12::ResourceState::DepthReadStencil : GSTexture12::ResourceState::DepthWriteStencil);
 	}
+
+	// Invalidate DS as RT if we're updating DS alone.
+	if (d12Ds && !d12DsRt)
+		InvalidateDSAsRT(d12Ds);
+
+	// Make sure something didn't go wrong with DS as RT caching.
+	pxAssert(!d12DsRt || m_ds_as_rt_orig == d12Ds);
 
 	// This is used to set/initialize the framebuffer for tfx rendering.
 	const GSVector2i size = d12Rt ? d12Rt->GetSize() :
@@ -3277,6 +3307,7 @@ void GSDevice12::DestroyResources()
 
 	m_allocator.reset();
 	m_command_queue.reset();
+	m_device16.reset();
 	m_device.reset();
 }
 
@@ -3986,6 +4017,33 @@ void GSDevice12::BeginRenderPass(D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE color_b
 	if (stencil_end == D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_DISCARD)
 		GL_INS("D3D12: BeginRenderPass() end stencil is DISCARDED.");
 
+	if (m_render_pass_tier == D3D12_RENDER_PASS_TIER_0)
+	{
+		ID3D12GraphicsCommandList4* cmdlist = GetCommandList().list4.get();
+		if (m_current_render_target && color_begin == D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_CLEAR)
+			cmdlist->ClearRenderTargetView(m_current_render_target->GetWriteDescriptor(), clear_color.v, 0, nullptr);
+
+		if (m_current_depth_render_target && GetLoadOpForTexture(m_current_depth_render_target) == D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_CLEAR)
+			cmdlist->ClearRenderTargetView(m_current_depth_render_target->GetWriteDescriptor(), m_current_depth_render_target->GetClearForFormat().v, 0, nullptr);
+
+		if (m_current_depth_target)
+		{
+			D3D12_CLEAR_FLAGS clear_flags = {};
+			if (depth_begin == D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_CLEAR)
+				clear_flags |= D3D12_CLEAR_FLAG_DEPTH;
+			if (stencil_begin == D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_CLEAR)
+				clear_flags |= D3D12_CLEAR_FLAG_STENCIL;
+			if (clear_flags != 0)
+			{
+				cmdlist->ClearDepthStencilView(m_current_depth_target->GetWriteDescriptor(),
+					clear_flags, clear_depth, clear_stencil, 0, nullptr);
+			}
+		}
+
+		ApplyBaseState(DIRTY_FLAG_RENDER_TARGET, cmdlist);
+		return;
+	}
+
 	std::array<D3D12_RENDER_PASS_RENDER_TARGET_DESC, 2> rt = {};
 	u32 num_rts = 0;
 	if (m_current_render_target)
@@ -4004,9 +4062,18 @@ void GSDevice12::BeginRenderPass(D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE color_b
 
 	if (m_current_depth_render_target)
 	{
+		const D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE depth_color_begin = GetLoadOpForTexture(m_current_depth_render_target);
+
 		rt[num_rts].cpuDescriptor = m_current_depth_render_target->GetWriteDescriptor();
 		rt[num_rts].EndingAccess.Type = D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE;
-		rt[num_rts].BeginningAccess.Type = D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_PRESERVE;
+		rt[num_rts].BeginningAccess.Type = depth_color_begin;
+		if (depth_color_begin == D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_CLEAR)
+		{
+			LookupNativeFormat(m_current_depth_render_target->GetFormat(), nullptr,
+				&rt[num_rts].BeginningAccess.Clear.ClearValue.Format, nullptr, nullptr, nullptr);
+			GSVector4::store<false>(rt[num_rts].BeginningAccess.Clear.ClearValue.Color,
+				m_current_depth_render_target->GetClearForFormat());
+		}
 		num_rts++;
 	}
 
@@ -4048,7 +4115,8 @@ void GSDevice12::EndRenderPass()
 
 	g_perfmon.Put(GSPerfMon::RenderPasses, 1);
 
-	GetCommandList().list4->EndRenderPass();
+	if (m_render_pass_tier != D3D12_RENDER_PASS_TIER_0)
+		GetCommandList().list4->EndRenderPass();
 }
 
 void GSDevice12::SetViewport(const D3D12_VIEWPORT& viewport)
@@ -4456,8 +4524,6 @@ void GSDevice12::RenderHW(GSHWDrawConfig& config)
 	GSTexture12* draw_ds_rov = config.ps.HasDepthROV() ? static_cast<GSTexture12*>(config.ds) : nullptr;
 	GSTexture12* draw_rt_clone = nullptr;
 
-	const bool feedback = draw_rt && (config.require_one_barrier || (config.require_full_barrier && m_features.texture_barrier) || (config.tex && config.tex == config.rt));
-
 	// Align the render area to 128x128, hopefully avoiding render pass restarts for small render area changes (e.g. Ratchet and Clank).
 	const GSVector2i rtsize(config.rt ? config.rt->GetSize() : config.ds->GetSize());
 
@@ -4621,7 +4687,8 @@ void GSDevice12::RenderHW(GSHWDrawConfig& config)
 		m_pipeline_selector.ds = true;
 	}
 
-	GSTexture12* draw_ds_as_rt = static_cast<GSTexture12*>(m_ds_as_rt);
+	GSTexture12* draw_ds_as_rt = (config.ps.IsFeedbackLoopDepth() && !config.ps.HasDepthROV()) ?
+		static_cast<GSTexture12*>(m_ds_as_rt) : nullptr;
 
 	const bool feedback_rt = draw_rt && (((config.require_one_barrier || (config.require_full_barrier && m_features.texture_barrier)) && (config.IsFeedbackLoopRT(config.ps) ||
 		config.IsFeedbackLoopRT(config.alpha_second_pass.ps))));
@@ -4693,11 +4760,6 @@ void GSDevice12::RenderHW(GSHWDrawConfig& config)
 	if (!InRenderPass())
 	{
 		GSVector4 clear_color = draw_rt ? draw_rt->GetClearForFormat() : GSVector4::zero();
-		if (pipe.ps.colclip_hw)
-		{
-			// Denormalize clear color for hw colclip.
-			clear_color *= GSVector4::cxpr(255.0f / 65535.0f, 255.0f / 65535.0f, 255.0f / 65535.0f, 1.0f);
-		}
 
 		const bool stencil_DATE = config.destination_alpha == GSHWDrawConfig::DestinationAlphaMode::Stencil ||
 		                          config.destination_alpha == GSHWDrawConfig::DestinationAlphaMode::StencilOne;
@@ -4899,7 +4961,7 @@ void GSDevice12::UpdateHWPipelineSelector(GSHWDrawConfig& config)
 	m_pipeline_selector.topology = static_cast<u32>(config.topology);
 	m_pipeline_selector.rt = config.rt != nullptr && !config.ps.HasColorROV();
 	m_pipeline_selector.ds = config.ds != nullptr && !config.ps.HasDepthROV();
-	m_pipeline_selector.ds_as_rt = m_ds_as_rt != nullptr && !config.ps.HasDepthROV();
+	m_pipeline_selector.ds_as_rt = m_ds_as_rt != nullptr && config.ps.IsFeedbackLoopDepth() && !config.ps.HasDepthROV();
 }
 
 void GSDevice12::UploadHWDrawVerticesAndIndices(GSHWDrawConfig& config)

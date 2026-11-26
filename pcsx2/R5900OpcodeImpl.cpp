@@ -1053,7 +1053,12 @@ namespace R5900
 				if (addr & 7) [[unlikely]]
 					RaiseAddressError(addr, false);
 
-				cpuRegs.GPR.r[_Rt_].UD[0] = EERead64(addr);
+				if (!_Rt_ && !EmuConfig.Cpu.EnableExperimentalEETLB)
+					return;
+
+				const u64 value = EERead64(addr);
+				if (_Rt_)
+					cpuRegs.GPR.r[_Rt_].UD[0] = value;
 			}
 
 			static const u64 LDL_MASK[8] =

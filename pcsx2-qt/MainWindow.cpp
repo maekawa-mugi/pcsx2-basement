@@ -5,6 +5,7 @@
 #include "AutoUpdaterDialog.h"
 #include "CoverDownloadDialog.h"
 #include "DisplayWidget.h"
+#include "GameList/GameListModel.h"
 #include "GameList/GameListRefreshThread.h"
 #include "GameList/GameListWidget.h"
 #include "LogWindow.h"
@@ -1545,6 +1546,19 @@ void MainWindow::refreshGameList(bool invalidate_cache, bool popup_on_error)
 	m_game_list_widget->refresh(invalidate_cache, popup_on_error);
 }
 
+void MainWindow::refreshGameListFavorite(const std::string& path)
+{
+	m_game_list_widget->getModel()->refreshDecorations(path);
+	if (MTGS::IsOpen())
+		Host::RunOnGSThread(&FullscreenUI::GameListFavoriteChanged);
+}
+
+void MainWindow::refreshGameSettingsIndicators(const std::string& path)
+{
+	m_game_list_widget->getModel()->refreshDecorations(path);
+	updateGameDependentActions();
+}
+
 void MainWindow::cancelGameListRefresh()
 {
 	m_game_list_widget->cancelRefresh();
@@ -1858,6 +1872,8 @@ void MainWindow::onGameListEntryContextMenuRequested(const QPoint& point)
 
 	if (entry.has_value())
 	{
+		const bool is_favorite = entry->is_favorite;
+
 		QAction* action = menu.addAction(tr("Properties..."));
 		action->setEnabled(!entry->serial.empty() || entry->type == GameList::EntryType::ELF);
 		if (action->isEnabled())
@@ -1883,6 +1899,11 @@ void MainWindow::onGameListEntryContextMenuRequested(const QPoint& point)
 
 		connect(menu.addAction(tr("Exclude From List")), &QAction::triggered,
 			[this, entry]() { getSettingsWindow()->getGameListSettingsWidget()->addExcludedPath(entry->path); });
+
+		action = menu.addAction(is_favorite ? tr("Remove from Favorites") : tr("Add to Favorites"));
+		connect(action, &QAction::triggered, this, [entry, is_favorite]() {
+			GameList::SaveFavoriteForPath(entry->path, !is_favorite);
+		});
 
 		const time_t entry_played_time = GameList::GetCachedPlayedTimeForSerial(entry->serial);
 		// Best two options given zero play time are to grey this out or to not show it at all.
@@ -1911,7 +1932,6 @@ void MainWindow::onGameListEntryContextMenuRequested(const QPoint& point)
 		{
 			action = menu.addAction(tr("Default Boot"));
 			connect(action, &QAction::triggered, [this, entry]() { startGameListEntry(*entry); });
-
 			// Make bold to indicate it's the default choice when double-clicking
 			if (!VMManager::HasSaveStateInSlot(entry->serial.c_str(), entry->crc, -1))
 				QtUtils::MarkActionAsDefault(action);

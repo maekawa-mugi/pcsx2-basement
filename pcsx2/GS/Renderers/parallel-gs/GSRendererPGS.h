@@ -11,6 +11,10 @@
 #include "gs_interface.hpp"
 #include "device.hpp"
 #include "context.hpp"
+#if defined(_WIN32) && defined(HAVE_WSI_DXGI_INTEROP)
+// Granite's WSI includes the SDK's d3d12.h, which shares a guard with DirectX-Headers.
+#include <directx/d3d12.h>
+#endif
 #include "wsi.hpp"
 #include "analog_video.hpp"
 #include "GS/Renderers/Common/GSTexture.h"
