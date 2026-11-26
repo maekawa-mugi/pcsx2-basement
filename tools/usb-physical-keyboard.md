@@ -1,31 +1,35 @@
-# Physical keyboard input for the Konami USB keyboard
+# PCSX2 Keyboard
 
-The existing HID Keyboard (Konami) device now has an opt-in setting:
-**Physical Keyboard Input (Windows)**. Leave it disabled for the existing
-logical Keyboard binding. Enable it for a guest OS that decodes physical
-US/JIS key positions itself. Restart the VM after changing the option.
+Select **PCSX2 Keyboard** as the USB device for a guest operating system.
+It is independent of HID Keyboard (Konami); the Konami device keeps its
+original logical Keyboard binding and no longer exposes Physical Key Input.
 
-The setting is device-specific. For USB port 1 in PCSX2.ini:
+The new device reports manufacturer `PCSX2` and product `PCSX2 Keyboard` to
+the guest. Its development VID/PID is 0000:0001, without borrowing Konami's
+commercial identity or claiming a registered vendor assignment.
+
+For the current NetBSD development profile:
 
 ```ini
 [USB1]
-Type = hidkbd
-hidkbd_PhysicalKeyInput = true
+Type = pcsx2kbd
+pcsx2kbd_JISLayout = true
 ```
 
-This sends native Windows set-1 make positions through the existing QEMU
-keyboard/HID report queue. It bypasses the logical Keyboard binding for this
-device, including Qt's US-oriented Shift+symbol normalization. The device
-identity and USB protocol remain Konami's. It does not claim or forward a
-physical USB device through libusb/WinUSB. Other keyboard bindings/hotkeys
-retain their existing behavior.
+On Windows, native set-1 physical positions are sent automatically, bypassing
+Qt's US-oriented Shift+symbol normalization. There is no logical Keyboard
+binding for this device on Windows. This does not forward a physical USB
+device through libusb/WinUSB. Other frontend bindings/hotkeys retain their
+existing behavior. Non-Windows frontends use the logical Keyboard binding
+as a fallback; native physical mapping there remains future work.
 
-JIS Ro/Yen/Kana/Henkan/Muhenkan positions are mapped to the corresponding
-USB HID usages. The guest still selects its layout: NetBSD PS2's native
-console recognizes this Konami model as JIS. It implements the ASCII subset;
-an IME is not supplied. Native E0 variants are normalized, fake extended
-Shift is ignored, and E1/Pause is currently unsupported. Non-Windows
-frontends keep the existing input path and do not expose this option.
+The Japanese Keyboard (JIS) setting defaults on and reports HID country 15.
+Disable it for US country 33; restart the VM after changing the setting.
+The guest still chooses its layout. NetBSD's console detects the country
+without a product-specific quirk and supports the ASCII subset, without IME.
+JIS Ro/Yen/Kana/Henkan/Muhenkan positions use their corresponding HID usages.
+E0 variants are normalized, fake extended Shift is ignored, and E1/Pause
+is currently unsupported.
 
 Host autorepeat events are ignored; the guest handles repetition. Focus
 loss and application deactivation clear held keys/modifiers, discard queued
@@ -34,7 +38,8 @@ report. Returning focus permits fresh presses. Loading a state clears the
 host physical-key state in this mode. Deterministic agent sessions reject
 physical input and focus-loss mutations, like the existing logical path.
 
-Validation on 2026-10-17:
+Validation of the shared input path on 2026-10-17 (then exposed as a
+Konami option):
 
 - Clang AVX2 build succeeded (the existing dual WinMain entry warning remains).
 - `wsl.exe -d Ubuntu --exec python3 /mnt/c/Users/mugi/Desktop/pcsx2-basement/tests/test_usb_keyboard_physical.py`
@@ -61,3 +66,17 @@ It depends on the local AgentConsole interface (AgentConsole.h). The other
 AgentConsole implementation/build changes are committed separately from the
 keyboard feature. The running development build includes both the feature
 and its integration guards, as used during validation.
+
+## Dedicated device validation, 2026-10-18
+
+- Clang AVX2 rebuild passed; the existing dual WinMain linker warning remains.
+- `tests/test_usb_keyboard_device.py` compiles the production factory for
+  Windows and non-Windows modes and verifies guest identity, HID boot protocol,
+  endpoint size, JIS/US country codes, and isolation from the Konami device.
+- `tests/test_usb_keyboard_physical.py` still passes native scan/JIS/modifier,
+  duplicate press, and focus-release queue/report checks.
+- NetBSD run52 enumerates `PCSX2 (0x0000) PCSX2 Keyboard (0x0001)` and attaches
+  its JIS console keyboard before reaching the RAM-root shell. No Computer
+  Use or synthetic keyboard input was used. Earlier manual focus/typing
+  confirmations cover the unchanged shared input delivery path; this run
+  confirms the new device's enumeration rather than another manual typing test.

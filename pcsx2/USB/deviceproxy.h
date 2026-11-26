@@ -42,6 +42,7 @@ enum DeviceType : s32
 	DEVTYPE_GAMETRAK,
 	DEVTYPE_REALPLAY,
 	DEVTYPE_TRAIN,
+	DEVTYPE_PCSX2KEYBOARD, // Append: preserve existing savestate device numbers.
 };
 
 class DeviceProxy

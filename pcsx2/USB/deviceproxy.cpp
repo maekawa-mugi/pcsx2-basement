@@ -72,6 +72,7 @@ void RegisterDevice::Register()
 	inst.Add(DEVTYPE_MICROPHONE, new usb_mic::MicrophoneDevice());
 	inst.Add(DEVTYPE_LOGITECH_HEADSET, new usb_mic::HeadsetDevice());
 	inst.Add(DEVTYPE_HIDKEYBOARD, new usb_hid::HIDKbdDevice());
+	inst.Add(DEVTYPE_PCSX2KEYBOARD, new usb_hid::PCSX2KbdDevice());
 	inst.Add(DEVTYPE_HIDMOUSE, new usb_hid::HIDMouseDevice());
 	inst.Add(DEVTYPE_RBKIT, new usb_pad::RBDrumKitDevice());
 	inst.Add(DEVTYPE_DJ, new usb_pad::DJTurntableDevice());

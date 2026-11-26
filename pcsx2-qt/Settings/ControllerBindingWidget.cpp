@@ -1047,6 +1047,7 @@ QIcon USBDeviceWidget::getIcon() const
 		{"logitech_usbmic", "mic-line"}, // Logitech USB Mic
 		{"headset", "headset-line"}, // Logitech Headset Mic
 		{"hidkbd", "keyboard-2-line"}, // HID Keyboard
+		{"pcsx2kbd", "keyboard-2-line"}, // PCSX2 Keyboard
 		{"hidmouse", "mouse-line"}, // HID Mouse
 		{"RBDrumKit", "drum-line"}, // Rock Band Drum Kit
 		{"BuzzDevice", "buzz-controller-line"}, // Buzz Controller

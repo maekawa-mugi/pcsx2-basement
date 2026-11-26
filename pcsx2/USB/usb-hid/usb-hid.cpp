@@ -45,6 +45,7 @@ namespace usb_hid
 		USBDevice dev{};
 		USBDesc desc{};
 		USBDescDevice desc_dev{};
+		std::array<uint8_t, 34> keyboard_config{};
 
 		USBEndpoint* intr = nullptr;
 		HIDState hid{};
@@ -90,6 +91,30 @@ namespace usb_hid
 		"",
 		"KONAMI CPJ1",
 		"USB JIS Mini Keyboard",
+	};
+
+	static const USBDescStrings pcsx2_keyboard_desc_strings = {
+		"",
+		"PCSX2",
+		"PCSX2 Keyboard",
+	};
+
+	// Virtual development device, with no borrowed commercial USB identity.
+	static const uint8_t pcsx2_keyboard_dev_desc[] = {
+		0x12,
+		0x01,
+		WBVAL(0x0110),
+		0x00,
+		0x00,
+		0x00,
+		0x08,
+		WBVAL(0x0000),
+		WBVAL(0x0001),
+		WBVAL(0x0100),
+		1,
+		2,
+		0,
+		1,
 	};
 
 	/* mostly the same values as the Bochs USB Mouse device */
@@ -771,18 +796,23 @@ namespace usb_hid
 		hid.kbd.eh_entry(&hid, &evt);
 	}
 
-	USBDevice* HIDKbdDevice::CreateDevice(SettingsInterface& si, u32 port, u32 subtype) const
+	static USBDevice* CreateKeyboardDevice(u32 port, bool pcsx2, bool jis)
 	{
 		UsbHIDState* s = new UsbHIDState(port);
 #ifdef _WIN32
-		s->physical_keyboard = USB::GetConfigBool(si, port, TypeName(), "PhysicalKeyInput", false);
+		s->physical_keyboard = pcsx2;
 #endif
 		s->desc.full = &s->desc_dev;
-		s->desc.str = beatmania_dadada_desc_strings;
+		s->desc.str = pcsx2 ? pcsx2_keyboard_desc_strings : beatmania_dadada_desc_strings;
+		const uint8_t* device_desc = pcsx2 ? pcsx2_keyboard_dev_desc : beatmania_dev_desc;
+		const size_t device_size = pcsx2 ? sizeof(pcsx2_keyboard_dev_desc) : sizeof(beatmania_dev_desc);
+		std::copy(std::begin(beatmania_config_desc), std::end(beatmania_config_desc), s->keyboard_config.begin());
+		if (pcsx2)
+			s->keyboard_config[22] = jis ? 15 : 33; // HID country: Japan / US.
 
-		if (usb_desc_parse_dev(beatmania_dev_desc, sizeof(beatmania_dev_desc), s->desc, s->desc_dev) < 0)
+		if (usb_desc_parse_dev(device_desc, device_size, s->desc, s->desc_dev) < 0)
 			goto fail;
-		if (usb_desc_parse_config(beatmania_config_desc, sizeof(beatmania_config_desc), s->desc_dev) < 0)
+		if (usb_desc_parse_config(s->keyboard_config.data(), s->keyboard_config.size(), s->desc_dev) < 0)
 			goto fail;
 
 		s->dev.speed = USB_SPEED_FULL;
@@ -807,6 +837,35 @@ namespace usb_hid
 	fail:
 		usb_hid_unrealize(&s->dev);
 		return nullptr;
+	}
+
+	USBDevice* HIDKbdDevice::CreateDevice(SettingsInterface& si, u32 port, u32 subtype) const
+	{
+		return CreateKeyboardDevice(port, false, true);
+	}
+
+	USBDevice* PCSX2KbdDevice::CreateDevice(SettingsInterface& si, u32 port, u32 subtype) const
+	{
+		return CreateKeyboardDevice(port, true, USB::GetConfigBool(si, port, TypeName(), "JISLayout", true));
+	}
+
+	const char* PCSX2KbdDevice::Name() const
+	{
+		return TRANSLATE_NOOP("USB", "PCSX2 Keyboard");
+	}
+
+	const char* PCSX2KbdDevice::TypeName() const
+	{
+		return "pcsx2kbd";
+	}
+
+	std::span<const InputBindingInfo> PCSX2KbdDevice::Bindings(u32 subtype) const
+	{
+#ifdef _WIN32
+		return {}; // Native physical input; no logical Keyboard binding.
+#else
+		return HIDKbdDevice::Bindings(subtype);
+#endif
 	}
 
 	void HIDKbdDevice::SetBindingValue(USBDevice* dev, u32 bind, float value) const
@@ -849,17 +908,13 @@ namespace usb_hid
 		return info;
 	}
 
-	std::span<const SettingInfo> HIDKbdDevice::Settings(u32 subtype) const
+	std::span<const SettingInfo> PCSX2KbdDevice::Settings(u32 subtype) const
 	{
-#ifdef _WIN32
 		static constexpr const SettingInfo info[] = {
-			{SettingInfo::Type::Boolean, "PhysicalKeyInput", TRANSLATE_NOOP("USB", "Physical Keyboard Input (Windows)"),
-				TRANSLATE_NOOP("USB", "Send physical key positions to the guest, preserving JIS and US layouts. Bypasses the logical Keyboard binding. Select the matching layout in the guest. Restart the VM after changing this setting."), "false"},
+			{SettingInfo::Type::Boolean, "JISLayout", TRANSLATE_NOOP("USB", "Japanese Keyboard (JIS)"),
+				TRANSLATE_NOOP("USB", "Report a Japanese keyboard to the guest. Disable for a US keyboard. Restart the VM after changing this setting."), "true"},
 		};
 		return info;
-#else
-		return {};
-#endif
 	}
 
 	void HIDKbdDevice::PhysicalKeyboardEvent(USBDevice* dev, u32 scancode, bool pressed) const

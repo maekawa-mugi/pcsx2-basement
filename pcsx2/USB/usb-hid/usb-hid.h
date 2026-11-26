@@ -18,10 +18,19 @@ namespace usb_hid
 		std::span<const InputBindingInfo> Bindings(u32 subtype) const override;
 		USBDevice* CreateDevice(SettingsInterface& si, u32 port, u32 subtype) const override;
 		void SetBindingValue(USBDevice* dev, u32 bind, float value) const override;
-		std::span<const SettingInfo> Settings(u32 subtype) const override;
 		void PhysicalKeyboardEvent(USBDevice* dev, u32 scancode, bool pressed) const override;
 		void ClearPhysicalKeyboardState(USBDevice* dev) const override;
 		bool Freeze(USBDevice* dev, StateWrapper& sw) const override;
+	};
+
+	class PCSX2KbdDevice final : public HIDKbdDevice
+	{
+	public:
+		const char* Name() const override;
+		const char* TypeName() const override;
+		std::span<const InputBindingInfo> Bindings(u32 subtype) const override;
+		std::span<const SettingInfo> Settings(u32 subtype) const override;
+		USBDevice* CreateDevice(SettingsInterface& si, u32 port, u32 subtype) const override;
 	};
 
 	class HIDMouseDevice final : public DeviceProxy
