@@ -75,6 +75,7 @@ namespace x86Emitter
 	extern const xImpl_BitScan xBSF, xBSR;
 	// LZCNT r32, r32 (F3 0F BD). Only emit when cpuinfo_has_x86_lzcnt(); without it the encoding runs as BSR.
 	extern void xLZCNT(const xRegister32& to, const xRegister32& from);
+	extern void xPOPCNT(const xRegister32& to, const xRegister32& from);
 
 	extern const xImpl_JmpCall xJMP;
 	extern const xImpl_JmpCall xCALL;

@@ -2637,16 +2637,13 @@ mVUop(mVU_RNEXT)
 		// algorithm from www.project-fao.org
 		const xRegister32& temp3 = mVU.regAlloc->allocGPR();
 		xMOV(temp3, ptr32[Rmem]);
+		// feedback = bit4 ^ bit22 = parity of the two bits (POPCNT is available on every AVX2 host; needs proper testing)
 		xMOV(gprT1, temp3);
-		xSHR(gprT1, 4);
+		xAND(gprT1, 0x00400010);
+		xPOPCNT(gprT1, gprT1);
 		xAND(gprT1, 1);
 
-		xMOV(gprT2, temp3);
-		xSHR(gprT2, 22);
-		xAND(gprT2, 1);
-
 		xSHL(temp3, 1);
-		xXOR(gprT1, gprT2);
 		xXOR(temp3, gprT1);
 		xAND(temp3, 0x007fffff);
 		xOR (temp3, 0x3f800000);

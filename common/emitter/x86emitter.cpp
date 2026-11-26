@@ -1456,6 +1456,7 @@ const xRegister32
 	const xImpl_BitScan xBSF = {0xbc};
 	const xImpl_BitScan xBSR = {0xbd};
 	void xLZCNT(const xRegister32& to, const xRegister32& from) { xOpWrite0F(0xf3, 0xbd, to, from); }
+	void xPOPCNT(const xRegister32& to, const xRegister32& from) { xOpWrite0F(0xf3, 0xb8, to, from); }
 
 	const xImpl_IncDec xINC = {false};
 	const xImpl_IncDec xDEC = {true};
